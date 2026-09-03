@@ -1,0 +1,925 @@
+#!/usr/bin/env python3
+# This file is part of Simjit project <https://simjit.org>
+#
+# See LICENSE for license and copyright information
+# SPDX-License-Identifier: Zlib
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import os
+import platform
+import shutil
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
+
+from fuzz_common import (
+    ARCH_CHOICES,
+    ARTIFACT_KIND_CHOICES,
+    PRESET_CHOICES,
+    RUNTIME_PRESETS,
+    ProgressBar,
+    build_canonical_chunk_best_effort,
+    build_single_program,
+    bundle_success,
+    canonicalize_program,
+    chunk_plan,
+    clear_fuzz_artifacts,
+    compile_bundle_item,
+    compile_failure_bucket,
+    execute_bundle_item,
+    format_timing_stats,
+    format_lisp,
+    load_bundle_items_from_text,
+    load_corpus_records_from_text,
+    metadata_dict,
+    minimize_program,
+    save_artifact,
+    summarize_outcome_items,
+    validate_program,
+    validate_corpus_records,
+    write_bundle_artifact,
+    write_json_artifact,
+    write_jsonl_artifact,
+    write_text_artifact,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Transform Simjit fuzz artifacts between program, corpus, bundle, and outcome")
+    parser.add_argument("--from", dest="from_kind", choices=["program", "corpus", "bundle"])
+    parser.add_argument("--to", dest="to_kind", choices=ARTIFACT_KIND_CHOICES, required=True)
+    parser.add_argument("--input", "-i", type=str)
+    parser.add_argument("--output", "-o", type=str)
+
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--count", type=int)
+    parser.add_argument("--start-index", type=int)
+    parser.add_argument("--profile", type=str)
+    parser.add_argument("--max-depth", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--jobs", type=int, default=0)
+
+    parser.add_argument("--preset", choices=PRESET_CHOICES)
+    parser.add_argument("--arch", choices=ARCH_CHOICES)
+    parser.add_argument("--wait-for-debugger", action="store_true", default=False)
+    parser.add_argument("--cpp", action="store_true", default=False)
+
+    parser.add_argument("--format", action="store_true", default=False)
+    parser.add_argument("--minimize-roots", type=str)
+    parser.add_argument("--validate", choices=["syntax", "builder"])
+
+    parser.add_argument("--artifacts-dir", type=Path)
+    parser.add_argument("--clear-artifacts", action="store_true", default=False)
+    parser.add_argument(
+        "--isolate-runtime-crashes",
+        action="store_true",
+        default=False,
+        help="run each runtime outcome item in a child process and save crash repro/gdb artifacts",
+    )
+    return parser.parse_args()
+
+
+def source_kind(args: argparse.Namespace) -> str:
+    return "nothing" if args.input is None else str(args.from_kind)
+
+
+def validate_core_args(args: argparse.Namespace) -> None:
+    if args.input is None and args.from_kind is not None:
+        raise RuntimeError("--from must be omitted when generating from nothing")
+    if args.input is not None and args.from_kind is None:
+        raise RuntimeError("--from is required when --input is provided")
+    if args.jobs < 0:
+        raise RuntimeError("--jobs must be non-negative")
+    if args.clear_artifacts and args.artifacts_dir is None:
+        raise RuntimeError("--clear-artifacts requires --artifacts-dir")
+
+
+def validate_transform(source: str, target: str) -> None:
+    allowed = {
+        ("nothing", "program"),
+        ("nothing", "corpus"),
+        ("nothing", "bundle"),
+        ("nothing", "outcome"),
+        ("program", "program"),
+        ("program", "bundle"),
+        ("program", "outcome"),
+        ("corpus", "corpus"),
+        ("corpus", "bundle"),
+        ("corpus", "outcome"),
+        ("bundle", "outcome"),
+    }
+    if (source, target) not in allowed:
+        raise RuntimeError(f"unsupported transform: {source} -> {target}")
+
+
+def validate_flag_compatibility(args: argparse.Namespace, source: str, target: str) -> None:
+    generation_flags = [args.seed, args.count, args.start_index, args.profile, args.max_depth, args.batch_size]
+    compile_flags_used = args.preset is not None or args.arch is not None or args.wait_for_debugger or args.cpp
+    utility_flags_used = args.format or args.minimize_roots is not None or args.validate is not None
+    compile_pipeline = target in {"bundle", "outcome"} and source != "bundle"
+
+    if source != "nothing" and any(value is not None for value in generation_flags):
+        raise RuntimeError("generation flags are only valid when generating from nothing")
+
+    if source == "nothing" and args.seed is None:
+        raise RuntimeError("--seed is required when generating from nothing")
+
+    if not compile_pipeline and compile_flags_used:
+        raise RuntimeError("--preset, --arch, --cpp, and --wait-for-debugger are only valid for compile pipelines")
+
+    if source == "bundle" and target == "outcome" and compile_flags_used:
+        raise RuntimeError("--preset, --arch, --cpp, and --wait-for-debugger are invalid for bundle -> outcome")
+
+    if target == "outcome" and source != "bundle":
+        preset = args.preset or "scalar-diff"
+        if preset not in RUNTIME_PRESETS:
+            raise RuntimeError("--to outcome requires a runtime-capable preset")
+
+    if args.isolate_runtime_crashes and target != "outcome":
+        raise RuntimeError("--isolate-runtime-crashes is only valid with --to outcome")
+
+    if args.wait_for_debugger:
+        if target not in {"bundle", "outcome"} or (source == "bundle" and target == "outcome"):
+            raise RuntimeError("--wait-for-debugger is only valid for compile pipelines")
+        count = args.count or 1
+        if source in {"corpus"} or (source == "nothing" and count != 1):
+            raise RuntimeError("--wait-for-debugger is only supported for single-program compile pipelines")
+
+    if source == "program" and target == "program":
+        return
+
+    if source == "corpus" and target == "corpus":
+        if args.validate is None:
+            raise RuntimeError("corpus -> corpus requires --validate syntax or --validate builder")
+        if args.format or args.minimize_roots is not None:
+            raise RuntimeError("--format and --minimize-roots are only valid for program -> program")
+        return
+
+    if utility_flags_used:
+        raise RuntimeError("--format, --minimize-roots, and --validate are only valid for program -> program or corpus -> corpus")
+
+
+def host_arch_name() -> str:
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "arm"
+    if machine in {"x86_64", "amd64"}:
+        return "x86"
+    raise RuntimeError(f"unsupported host architecture '{machine}'")
+
+
+def resolve_generation_args(args: argparse.Namespace) -> tuple[int, int, int, str, int, int]:
+    seed = args.seed
+    assert seed is not None
+    count = 1 if args.count is None else args.count
+    start_index = 0 if args.start_index is None else args.start_index
+    profile = "default" if args.profile is None else args.profile
+    max_depth = 6 if args.max_depth is None else args.max_depth
+    batch_size = 10 if args.batch_size is None else args.batch_size
+    if count <= 0:
+        raise RuntimeError("--count must be positive")
+    if batch_size <= 0:
+        raise RuntimeError("--batch-size must be positive")
+    return seed, count, start_index, profile, max_depth, batch_size
+
+
+def resolve_compile_args(args: argparse.Namespace) -> tuple[str, str]:
+    preset = "scalar-diff" if args.preset is None else args.preset
+    arch = host_arch_name() if args.arch is None or args.arch == "native" else args.arch
+    return preset, arch
+
+
+def make_meta(record: dict[str, Any], *, preset: str, arch: str, fallback_index: int) -> dict[str, Any]:
+    base_seed = int(record.get("base_seed", -1))
+    program_index = int(record.get("program_index", fallback_index))
+    program_seed = int(record.get("program_seed", fallback_index if base_seed < 0 else base_seed + program_index))
+    profile = str(record.get("profile", "default"))
+    return metadata_dict(
+        base_seed=base_seed,
+        program_index=program_index,
+        program_seed=program_seed,
+        profile=profile,
+        preset=preset,
+        arch=arch,
+    )
+
+
+def meta_from_outcome_or_item(item: dict[str, Any]) -> dict[str, Any]:
+    return metadata_dict(
+        base_seed=int(item.get("base_seed", -1)),
+        program_index=int(item.get("program_index", 0)),
+        program_seed=int(item.get("program_seed", 0)),
+        profile=str(item.get("profile", "default")),
+        preset=str(item.get("preset", "scalar-diff")),
+        arch=str(item.get("arch", item.get("variant", "native"))),
+    )
+
+
+def generate_records(seed: int, count: int, start_index: int, profile: str, max_depth: int,
+                     batch_size: int, jobs: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    chunks = chunk_plan(start_index, count, batch_size)
+    worker_count = jobs or min(len(chunks), os.cpu_count() or 1)
+    worker_count = max(1, worker_count)
+    progress = ProgressBar(count, label="generate")
+    successes: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    pending: dict[int, list[dict[str, Any]]] = {}
+    next_chunk = 0
+    processed = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {
+            executor.submit(
+                build_canonical_chunk_best_effort,
+                seed,
+                chunk_count,
+                chunk_start,
+                profile,
+                max_depth,
+            ): chunk_index
+            for chunk_index, (chunk_start, chunk_count) in enumerate(chunks)
+        }
+
+        for future in concurrent.futures.as_completed(future_map):
+            chunk_index = future_map[future]
+            chunk_successes, chunk_failures = future.result()
+            ordered = sorted(chunk_successes + chunk_failures, key=lambda record: int(record["program_index"]))
+            pending[chunk_index] = ordered
+            while next_chunk in pending:
+                for record in pending.pop(next_chunk):
+                    processed += 1
+                    if "error" in record:
+                        failures.append(record)
+                        progress.update(processed, detail=f"failed seed={record['program_seed']}")
+                    else:
+                        successes.append(record)
+                        progress.update(processed, detail=f"seed={record['program_seed']}")
+                next_chunk += 1
+
+    progress.done(detail="complete")
+    return successes, failures
+
+
+def compile_records(records: list[dict[str, Any]], *, preset: str, arch: str, jobs: int,
+                    artifacts_dir: Path | None, wait_for_debugger: bool,
+                    emit_cpp: bool) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    if not records:
+        return [], [], []
+    worker_count = jobs or min(len(records), os.cpu_count() or 1)
+    worker_count = max(1, worker_count)
+    progress = ProgressBar(len(records), label="compile")
+    bundled: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    pending: dict[int, tuple[dict[str, Any], dict[str, Any], bool]] = {}
+    next_index = 0
+
+    def compile_one(index: int, record: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, Any], bool]:
+        meta = make_meta(record, preset=preset, arch=arch, fallback_index=index)
+        item, ok = compile_bundle_item(
+            record["serialized"],
+            preset,
+            meta,
+            wait_for_debugger=wait_for_debugger,
+            emit_cpp=emit_cpp,
+        )
+        return index, record, item, ok
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {
+            executor.submit(compile_one, index, record): index
+            for index, record in enumerate(records)
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            index, record, item, ok = future.result()
+            pending[index] = (record, item, ok)
+            while next_index in pending:
+                record, item, ok = pending.pop(next_index)
+                success = bundle_success(item, ok, preset)
+                observed_vector_failure = (
+                    preset == "compile-observe"
+                    and item.get("scalar_status") == "pass"
+                    and item.get("vector_status") not in {"pass", "scalar-only", "not-requested"}
+                )
+                if success:
+                    bundled.append(item)
+                    progress.update(next_index + 1, detail=f"ok seed={record['program_seed']}")
+                    if observed_vector_failure:
+                        observations.append({"record": record, "item": item, "bucket": "vector-fail"})
+                        if artifacts_dir is not None:
+                            save_artifact(
+                                "vector-fail",
+                                make_meta(record, preset=preset, arch=arch, fallback_index=next_index),
+                                record["serialized"],
+                                item=item,
+                                error=json.dumps(item.get("errors", {}), sort_keys=True),
+                                base_dir=artifacts_dir,
+                            )
+                else:
+                    failures.append({"record": record, "item": item, "bucket": compile_failure_bucket(item, preset)})
+                    progress.update(next_index + 1, detail=f"failed seed={record['program_seed']}")
+                    if artifacts_dir is not None:
+                        save_artifact(
+                            compile_failure_bucket(item, preset),
+                            make_meta(record, preset=preset, arch=arch, fallback_index=next_index),
+                            record["serialized"],
+                            item=item,
+                            error=json.dumps(item.get("errors", {}), sort_keys=True),
+                            base_dir=artifacts_dir,
+                        )
+                next_index += 1
+
+    progress.done(detail="complete")
+    return bundled, failures, observations
+
+
+def signal_name(returncode: int) -> str:
+    if returncode >= 0:
+        return f"exit-{returncode}"
+    sig = -returncode
+    try:
+        return signal.Signals(sig).name
+    except ValueError:
+        return f"signal-{sig}"
+
+
+def output_parent_dir(output: str | None) -> Path:
+    if output is None or output == "-":
+        return Path("test-dump") / "fuzz-crashes"
+    parent = Path(output).parent
+    return parent if str(parent) else Path(".")
+
+
+def runtime_crash_dir(args: argparse.Namespace) -> Path:
+    if args.artifacts_dir is not None:
+        return args.artifacts_dir / "runtime-crashes"
+    return output_parent_dir(args.output) / "runtime-crashes"
+
+
+def crash_stem(item: dict[str, Any], index: int) -> str:
+    program_seed = item.get("program_seed", index)
+    program_index = item.get("program_index", index)
+    item_id = str(item.get("id", "xsmith")).replace("/", "_").replace(":", "_")
+    return f"seed-{program_seed}-idx-{program_index}-{item_id}"
+
+
+def write_single_bundle(path: Path, item: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(item, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def read_single_outcome(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    items = report.get("items")
+    if isinstance(items, list) and len(items) == 1 and isinstance(items[0], dict):
+        return items[0]
+    return None
+
+
+def text_tail(path: Path, limit: int = 4000) -> str:
+    if not path.is_file():
+        return ""
+    payload = path.read_text(encoding="utf-8", errors="replace")
+    return payload[-limit:]
+
+
+def write_gdb_artifacts(cmd: list[str], item_dir: Path) -> tuple[Path, Path]:
+    report_path = item_dir / "gdb.txt"
+    command_path = item_dir / "gdb-command.txt"
+    gdb_cmd = [
+        "gdb",
+        "-q",
+        "--batch",
+        "-ex",
+        "set pagination off",
+        "-ex",
+        "run",
+        "-ex",
+        "bt full",
+        "-ex",
+        "info registers",
+        "-ex",
+        "x/16i $pc",
+        "--args",
+        *cmd,
+    ]
+    command_path.write_text(shlex.join(gdb_cmd) + "\n", encoding="utf-8")
+    gdb_path = shutil.which("gdb")
+    if gdb_path is None:
+        report_path.write_text("gdb not found on this host\n", encoding="utf-8")
+        return report_path, command_path
+    proc = subprocess.run(gdb_cmd, capture_output=True, text=True)
+    report_path.write_text(
+        "command: " + shlex.join(gdb_cmd) + "\n"
+        f"exit_code: {proc.returncode}\n\n"
+        "stdout:\n" + proc.stdout + "\n"
+        "stderr:\n" + proc.stderr,
+        encoding="utf-8",
+    )
+    return report_path, command_path
+
+
+def crash_outcome(
+    item: dict[str, Any],
+    *,
+    index: int,
+    returncode: int,
+    item_dir: Path,
+    bundle_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    gdb_report_path: Path | None,
+    gdb_command_path: Path | None,
+) -> dict[str, Any]:
+    outcome = {
+        **meta_from_outcome_or_item(item),
+        "id": item.get("id", f"xsmith-{item.get('program_seed', index)}"),
+        "serialized": item.get("serialized", ""),
+        "hir_scalar_only": bool(item.get("hir_scalar_only", False)),
+        "scalar_status": item.get("scalar_status", "pass"),
+        "vector_status": item.get("vector_status", "not-requested"),
+        "status": "crash",
+        "errors": {
+            "stage": "runtime child process crashed" if returncode < 0 else "runtime child process exited without outcome",
+            "signal": signal_name(returncode),
+            "stdout_tail": text_tail(stdout_path),
+            "stderr_tail": text_tail(stderr_path),
+        },
+        "error_metadata": {
+            "returncode": returncode,
+            "crash_dir": str(item_dir),
+            "repro_bundle": str(bundle_path),
+            "stdout": str(stdout_path),
+            "stderr": str(stderr_path),
+        },
+    }
+    if gdb_report_path is not None:
+        outcome["error_metadata"]["gdb_report"] = str(gdb_report_path)
+    if gdb_command_path is not None:
+        outcome["error_metadata"]["gdb_command"] = str(gdb_command_path)
+    return outcome
+
+
+def execute_bundle_item_isolated(item: dict[str, Any], index: int, crash_root: Path) -> dict[str, Any]:
+    item_dir = crash_root / crash_stem(item, index)
+    item_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = item_dir / "bundle.jsonl"
+    outcome_path = item_dir / "outcome.json"
+    stdout_path = item_dir / "stdout.txt"
+    stderr_path = item_dir / "stderr.txt"
+    write_single_bundle(bundle_path, item)
+
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--from",
+        "bundle",
+        "--input",
+        str(bundle_path),
+        "--to",
+        "outcome",
+        "--output",
+        str(outcome_path),
+        "--jobs",
+        "1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    stdout_path.write_text(proc.stdout, encoding="utf-8", errors="replace")
+    stderr_path.write_text(proc.stderr, encoding="utf-8", errors="replace")
+
+    outcome = read_single_outcome(outcome_path)
+    if outcome is not None:
+        shutil.rmtree(item_dir, ignore_errors=True)
+        return outcome
+
+    gdb_report_path: Path | None = None
+    gdb_command_path: Path | None = None
+    if proc.returncode < 0:
+        gdb_report_path, gdb_command_path = write_gdb_artifacts(cmd, item_dir)
+
+    return crash_outcome(
+        item,
+        index=index,
+        returncode=proc.returncode,
+        item_dir=item_dir,
+        bundle_path=bundle_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        gdb_report_path=gdb_report_path,
+        gdb_command_path=gdb_command_path,
+    )
+
+
+def run_outcomes(
+    items: list[dict[str, Any]],
+    *,
+    jobs: int,
+    artifacts_dir: Path | None,
+    isolate_runtime_crashes: bool = False,
+    crash_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    if not items:
+        return []
+    worker_count = jobs or min(len(items), os.cpu_count() or 1)
+    worker_count = max(1, worker_count)
+    if isolate_runtime_crashes:
+        if crash_dir is None:
+            crash_dir = artifacts_dir / "runtime-crashes" if artifacts_dir is not None else Path("test-dump") / "fuzz-crashes"
+        crash_dir.mkdir(parents=True, exist_ok=True)
+    progress = ProgressBar(len(items), label="run")
+    outcomes: list[dict[str, Any]] = []
+    pending: dict[int, dict[str, Any]] = {}
+    next_index = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        if isolate_runtime_crashes:
+            assert crash_dir is not None
+            future_map = {
+                executor.submit(execute_bundle_item_isolated, item, index, crash_dir): index
+                for index, item in enumerate(items)
+            }
+        else:
+            future_map = {
+                executor.submit(execute_bundle_item, item): index
+                for index, item in enumerate(items)
+            }
+        for future in concurrent.futures.as_completed(future_map):
+            index = future_map[future]
+            pending[index] = future.result()
+            while next_index in pending:
+                outcome = pending.pop(next_index)
+                outcomes.append(outcome)
+                status = str(outcome["status"])
+                detail = f"{status} seed={outcome['program_seed']}"
+                progress.update(next_index + 1, detail=detail)
+                if artifacts_dir is not None and status != "pass":
+                    save_artifact(
+                        status,
+                        meta_from_outcome_or_item(outcome),
+                        str(outcome.get("serialized", "")),
+                        item=outcome,
+                        error=json.dumps(outcome.get("errors", {}), sort_keys=True),
+                        base_dir=artifacts_dir,
+                    )
+                next_index += 1
+
+    progress.done(detail="complete")
+    return outcomes
+
+
+def maybe_prepare_artifacts_dir(artifacts_dir: Path | None, clear: bool) -> None:
+    if artifacts_dir is None:
+        return
+    if clear:
+        clear_fuzz_artifacts(artifacts_dir)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+
+def run_outcome_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "jobs": args.jobs,
+        "artifacts_dir": args.artifacts_dir,
+        "isolate_runtime_crashes": args.isolate_runtime_crashes,
+        "crash_dir": runtime_crash_dir(args) if args.isolate_runtime_crashes else None,
+    }
+
+
+def handle_program_to_program(args: argparse.Namespace) -> int:
+    serialized = read_program_input(args.input)
+    meta = metadata_dict(program_index=0, program_seed=0, preset="builder-validate")
+    if args.validate is not None:
+        validate_program(serialized, args.validate, meta=meta)
+    if args.minimize_roots is not None:
+        serialized = minimize_program(serialized, args.minimize_roots)
+    serialized = canonicalize_program(serialized)
+    if args.format:
+        serialized = format_lisp(serialized)
+    write_text_artifact(args.output, serialized)
+    return 0
+
+
+def read_program_input(path: str | None) -> str:
+    payload = sys.stdin.read() if path == "-" else (Path(path).read_text(encoding="utf-8") if path else sys.stdin.read())
+    if not payload.strip():
+        raise RuntimeError("no serialized program provided")
+    return payload.strip()
+
+
+def handle_corpus_to_corpus(args: argparse.Namespace) -> int:
+    text = read_text_input(args.input)
+    records = load_corpus_records_from_text(text)
+    progress = ProgressBar(len(records), label="validate")
+    failures = validate_corpus_records(records, args.validate, jobs=args.jobs, progress=progress)
+    progress.done(detail="complete" if not failures else f"failures={len(failures)}")
+    if failures and args.artifacts_dir is not None:
+        for index, error in failures:
+            record = records[index]
+            meta = make_meta(record, preset="builder-validate" if args.validate == "builder" else "syntax",
+                             arch="native", fallback_index=index)
+            bucket = "builder-fail" if args.validate == "builder" else "syntax-fail"
+            save_artifact(bucket, meta, record["serialized"], error=error, base_dir=args.artifacts_dir)
+    if not failures and args.output is not None:
+        write_jsonl_artifact(args.output, records)
+    if failures:
+        for index, error in failures:
+            print(f"record {index}: {error}", file=sys.stderr)
+    return 0 if not failures else 1
+
+
+def read_text_input(path: str | None) -> str:
+    payload = sys.stdin.read() if path == "-" else (Path(path).read_text(encoding="utf-8") if path else sys.stdin.read())
+    if not payload.strip():
+        raise RuntimeError("no input provided")
+    return payload
+
+
+def print_summary(label: str, summary: dict[str, Any]) -> None:
+    parts = [f"{key}={value}" for key, value in summary.items()]
+    print(f"{label}: {' '.join(parts)}", file=sys.stderr)
+
+
+def handle_bundle_output(items: list[dict[str, Any]], failures: list[dict[str, Any]], output: str | None,
+                         *, observations: int = 0) -> int:
+    write_bundle_artifact(output, items)
+    summary = {
+        "total": len(items) + len(failures),
+        "bundled": len(items),
+        "failed": len(failures),
+        "written": len(items),
+    }
+    if observations:
+        summary["observed_vector_fail"] = observations
+    print_summary("summary", summary)
+    return 0 if not failures else 1
+
+
+def handle_outcome_output(outcomes: list[dict[str, Any]], output: str | None) -> int:
+    report = {
+        "kind": "outcome",
+        "summary": summarize_outcome_items(outcomes),
+        "items": outcomes,
+    }
+    write_json_artifact(output, report)
+    print_summary("summary", report["summary"])
+    return 0 if report["summary"]["passed"] == report["summary"]["total"] else 1
+
+
+def compile_failure_to_outcome(failure: dict[str, Any], *, preset: str, arch: str) -> dict[str, Any]:
+    record = failure["record"]
+    item = failure["item"]
+    return {
+        **make_meta(record, preset=preset, arch=arch, fallback_index=int(record.get("program_index", 0))),
+        "id": item.get("id", f"xsmith-{record.get('program_seed', 0)}"),
+        "serialized": record["serialized"],
+        "hir_scalar_only": bool(item.get("hir_scalar_only", False)),
+        "scalar_status": item.get("scalar_status", "failed"),
+        "vector_status": item.get("vector_status", "not-requested"),
+        "errors": item.get("errors", {}),
+        "error_metadata": item.get("error_metadata", {}),
+        "status": failure["bucket"],
+    }
+
+
+def main() -> int:
+    total_start = time.perf_counter()
+    args = parse_args()
+    validate_core_args(args)
+
+    source = source_kind(args)
+    target = args.to_kind
+    validate_transform(source, target)
+    validate_flag_compatibility(args, source, target)
+    maybe_prepare_artifacts_dir(args.artifacts_dir, args.clear_artifacts)
+
+    if source == "nothing":
+        seed, count, start_index, profile, max_depth, batch_size = resolve_generation_args(args)
+        if target == "program" and count != 1:
+            raise RuntimeError("nothing -> program requires --count 1")
+
+        generate_start = time.perf_counter()
+        if target == "program":
+            program = build_single_program(seed=seed, profile=profile, max_depth=max_depth)
+            if args.format:
+                program = format_lisp(program)
+            write_text_artifact(args.output, program)
+            print("timing:", format_timing_stats("generate", time.perf_counter() - generate_start, 1), file=sys.stderr)
+            return 0
+
+        generated_records, gen_failures = generate_records(
+            seed=seed,
+            count=count,
+            start_index=start_index,
+            profile=profile,
+            max_depth=max_depth,
+            batch_size=batch_size,
+            jobs=args.jobs,
+        )
+        generate_seconds = time.perf_counter() - generate_start
+
+        if args.artifacts_dir is not None:
+            for failure in gen_failures:
+                save_artifact(
+                    "syntax-fail",
+                    make_meta(failure, preset="syntax", arch="native", fallback_index=int(failure["program_index"])),
+                    failure["serialized"],
+                    error=failure["error"],
+                    base_dir=args.artifacts_dir,
+                )
+
+        if target == "corpus":
+            write_jsonl_artifact(args.output, generated_records)
+            print(
+                "timing:",
+                format_timing_stats("generate", generate_seconds, count),
+                file=sys.stderr,
+            )
+            return 0 if not gen_failures else 1
+
+        preset, arch = resolve_compile_args(args)
+        if target == "outcome" and arch != host_arch_name():
+            raise RuntimeError(f"cannot run outcome for target arch '{arch}' on host '{host_arch_name()}'")
+        compile_start = time.perf_counter()
+        bundled_items, compile_failures, compile_observations = compile_records(
+            generated_records,
+            preset=preset,
+            arch=arch,
+            jobs=args.jobs,
+            artifacts_dir=args.artifacts_dir,
+            wait_for_debugger=args.wait_for_debugger,
+            emit_cpp=args.cpp,
+        )
+        compile_seconds = time.perf_counter() - compile_start
+
+        if target == "bundle":
+            rc = handle_bundle_output(
+                bundled_items,
+                compile_failures + [{"bucket": "syntax-fail"} for _ in gen_failures],
+                args.output,
+                observations=len(compile_observations),
+            )
+            print(
+                "timing:",
+                format_timing_stats("generate", generate_seconds, count),
+                format_timing_stats("compile", compile_seconds, len(generated_records)),
+                format_timing_stats("total", time.perf_counter() - total_start, count),
+                file=sys.stderr,
+            )
+            return rc
+
+        run_start = time.perf_counter()
+        compile_outcomes = [
+            {
+                "id": f"xsmith-{failure['program_seed']}",
+                "base_seed": int(failure["base_seed"]),
+                "program_index": int(failure["program_index"]),
+                "program_seed": int(failure["program_seed"]),
+                "profile": failure["profile"],
+                "preset": preset,
+                "arch": arch,
+                "serialized": failure["serialized"],
+                "hir_scalar_only": False,
+                "scalar_status": "failed",
+                "vector_status": "not-requested",
+                "errors": {"syntax": failure["error"]},
+                "status": "syntax-fail",
+            }
+            for failure in gen_failures
+        ]
+        compile_outcomes.extend(
+            compile_failure_to_outcome(failure, preset=preset, arch=arch)
+            for failure in compile_failures
+        )
+        outcomes = compile_outcomes + run_outcomes(bundled_items, **run_outcome_kwargs(args))
+        run_seconds = time.perf_counter() - run_start
+        rc = handle_outcome_output(outcomes, args.output)
+        print(
+            "timing:",
+            format_timing_stats("generate", generate_seconds, count),
+            format_timing_stats("compile", compile_seconds, len(generated_records)),
+            format_timing_stats("run", run_seconds, len(bundled_items)),
+            format_timing_stats("total", time.perf_counter() - total_start, count),
+            file=sys.stderr,
+        )
+        return rc
+
+    if source == "program":
+        if target == "program":
+            return handle_program_to_program(args)
+
+        serialized = read_program_input(args.input)
+        record = {
+            "base_seed": -1,
+            "program_index": 0,
+            "program_seed": 0,
+            "profile": "default",
+            "serialized": serialized,
+        }
+        preset, arch = resolve_compile_args(args)
+        if target == "outcome" and arch != host_arch_name():
+            raise RuntimeError(f"cannot run outcome for target arch '{arch}' on host '{host_arch_name()}'")
+        compile_start = time.perf_counter()
+        bundled_items, failures, observations = compile_records(
+            [record],
+            preset=preset,
+            arch=arch,
+            jobs=args.jobs,
+            artifacts_dir=args.artifacts_dir,
+            wait_for_debugger=args.wait_for_debugger,
+            emit_cpp=args.cpp,
+        )
+        compile_seconds = time.perf_counter() - compile_start
+        if target == "bundle":
+            rc = handle_bundle_output(bundled_items, failures, args.output, observations=len(observations))
+            print("timing:", format_timing_stats("compile", compile_seconds, 1), file=sys.stderr)
+            return rc
+        run_start = time.perf_counter()
+        outcomes = [compile_failure_to_outcome(failure, preset=preset, arch=arch) for failure in failures]
+        outcomes.extend(run_outcomes(bundled_items, **run_outcome_kwargs(args)))
+        run_seconds = time.perf_counter() - run_start
+        rc = handle_outcome_output(outcomes, args.output)
+        print(
+            "timing:",
+            format_timing_stats("compile", compile_seconds, 1),
+            format_timing_stats("run", run_seconds, len(bundled_items)),
+            file=sys.stderr,
+        )
+        return rc
+
+    if source == "corpus":
+        if target == "corpus":
+            return handle_corpus_to_corpus(args)
+
+        text = read_text_input(args.input)
+        records = load_corpus_records_from_text(text)
+        preset, arch = resolve_compile_args(args)
+        if target == "outcome" and arch != host_arch_name():
+            raise RuntimeError(f"cannot run outcome for target arch '{arch}' on host '{host_arch_name()}'")
+        compile_start = time.perf_counter()
+        bundled_items, failures, observations = compile_records(
+            records,
+            preset=preset,
+            arch=arch,
+            jobs=args.jobs,
+            artifacts_dir=args.artifacts_dir,
+            wait_for_debugger=args.wait_for_debugger,
+            emit_cpp=args.cpp,
+        )
+        compile_seconds = time.perf_counter() - compile_start
+        if target == "bundle":
+            rc = handle_bundle_output(bundled_items, failures, args.output, observations=len(observations))
+            print("timing:", format_timing_stats("compile", compile_seconds, len(records)), file=sys.stderr)
+            return rc
+        run_start = time.perf_counter()
+        outcomes = [compile_failure_to_outcome(failure, preset=preset, arch=arch) for failure in failures]
+        outcomes.extend(run_outcomes(bundled_items, **run_outcome_kwargs(args)))
+        run_seconds = time.perf_counter() - run_start
+        outcomes.sort(key=lambda item: int(item.get("program_index", 0)))
+        rc = handle_outcome_output(outcomes, args.output)
+        print(
+            "timing:",
+            format_timing_stats("compile", compile_seconds, len(records)),
+            format_timing_stats("run", run_seconds, len(bundled_items)),
+            file=sys.stderr,
+        )
+        return rc
+
+    if source == "bundle":
+        text = read_text_input(args.input)
+        items = load_bundle_items_from_text(text)
+        host_arch = host_arch_name()
+        for item in items:
+            item_arch = str(item.get("arch", item.get("variant", "native")))
+            if item_arch == "native":
+                raise RuntimeError("bundle items with arch='native' are ambiguous and cannot be run; rebuild the bundle with the unified driver")
+            if item_arch != host_arch:
+                raise RuntimeError(f"cannot run bundle for target arch '{item_arch}' on host '{host_arch}'")
+        outcomes = run_outcomes(items, **run_outcome_kwargs(args))
+        print("timing:", format_timing_stats("run", time.perf_counter() - total_start, len(items)), file=sys.stderr)
+        return handle_outcome_output(outcomes, args.output)
+
+    raise RuntimeError("unreachable")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)

@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Simjit Explorer</title>
+    <script src="{{ app_base }}/static/theme-init.js?v={{ static_version }}"></script>
+    <link rel="stylesheet" href="{{ app_base }}/static/vendor/highlightjs/simjit-neutral.css?v={{ static_version }}">
+    <link rel="stylesheet" href="{{ app_base }}/static/system.css?v={{ static_version }}">
+    <link rel="stylesheet" href="{{ app_base }}/static/style.css?v={{ static_version }}">
+    <script src="{{ app_base }}/static/vendor/highlightjs/highlight.min.js" defer></script>
+    <script src="{{ app_base }}/static/vendor/highlightjs/x86asm.min.js" defer></script>
+    <script src="{{ app_base }}/static/vendor/highlightjs/armasm.min.js" defer></script>
+    <script src="{{ app_base }}/static/vendor/highlightjs/llvm.min.js" defer></script>
+    <script src="{{ app_base }}/static/vendor/highlightjs/lisp.min.js" defer></script>
+    <script src="{{ app_base }}/static/simjit-languages.js?v={{ static_version }}" defer></script>
+    <script src="{{ app_base }}/static/app.js?v={{ static_version }}" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Simjit Explorer</h1>
+        <p>Simjit compiler demo</p>
+      </div>
+        <nav class="sample-nav" aria-label="Sample queries">
+          {% for group in sample_groups %}
+          <details class="sample-group">
+            <summary>{{ group.title }}</summary>
+            <div class="sample-links">
+              {% for sample in group.samples %}
+                <a
+                  href="?example={{ sample.id }}{% if sample_option_query %}&{{ sample_option_query }}{% endif %}"
+                  class="{% if sample.id == selected_sample_id %}active{% endif %}"
+                  {% if sample.id == selected_sample_id %}aria-current="page"{% endif %}
+                  title="{{ sample.source }}"
+                >{{ sample.title }}</a>
+              {% endfor %}
+            </div>
+          </details>
+        {% endfor %}
+      </nav>
+      <div class="topbar-utility">
+        <a class="button button-primary button-small docs-link cross-page-link" href="{{ app_base }}/demo">Demo</a>
+        <button type="button" class="button button-secondary button-small topbar-button" data-language-guide-open>Language guide</button>
+        <button type="button" class="button button-secondary button-small topbar-button theme-toggle" data-theme-toggle aria-label="Switch color theme">Theme</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="editor">
+        <form method="post">
+          <div class="query-editor" data-query-editor>
+            <pre class="query-highlight language-sql" aria-hidden="true"><code class="language-sql" data-query-highlight></code></pre>
+            <textarea name="query" spellcheck="false" aria-label="Expression SQL query">{{ query }}</textarea>
+          </div>
+          <div class="controls">
+            <label class="control-platform">Platform
+              <select class="control" name="arch">
+                {% for platform in platforms %}
+                  <option
+                    value="{{ platform.value }}"
+                    data-runnable="{{ 1 if platform.runnable else 0 }}"
+                    data-arch-family="{{ platform.arch_family }}"
+                    {% if platform.value == platform_arch %}selected{% endif %}
+                  >{{ platform.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <button type="submit" class="button button-primary" formaction="compile">Compile</button>
+            <button
+              type="submit"
+              class="button button-danger benchmark-button"
+              formaction="benchmark"
+              data-role="benchmark"
+              {% if not benchmark_runnable %}disabled title="{{ benchmark_availability.title or "Benchmarks run only on target-compatible platforms" }}"{% endif %}
+            >Run benchmark</button>
+            <button type="button" class="button button-secondary copy-query" data-role="copy-query">Copy query</button>
+            <button type="button" class="button button-secondary share-link" data-role="share-link">Share link</button>
+            <label>Input
+              <select class="control" name="input_mode" data-role="input-mode" data-default-value="{{ url_defaults.input_mode }}">
+                {% for value, label in input_modes %}
+                  <option value="{{ value }}" {% if value == input_mode %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Run on
+              <select class="control" name="benchmark_target" data-default-value="{{ url_defaults.benchmark_target }}">
+                {% for target in benchmark_targets %}
+                  <option
+                    value="{{ target.id }}"
+                    data-arch-family="{{ target.arch_family }}"
+                    data-available="{{ 1 if target.available else 0 }}"
+                    data-health="{{ target.health }}"
+                    title="{{ target.health }}"
+                    {% if target.id == benchmark_target %}selected{% endif %}
+                  >{{ target.display_label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Provider
+              <select class="control" name="provider" data-default-value="{{ url_defaults.provider }}">
+                {% for value, label in benchmark_providers %}
+                  <option value="{{ value }}" {% if value == options.provider %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Rows <input class="control" name="rows" type="number" min="1" value="{{ options.rows }}" data-default-value="{{ url_defaults.rows }}"></label>
+            <label>Warmups <input class="control" name="warmups" type="number" min="0" value="{{ options.warmups }}" data-default-value="{{ url_defaults.warmups }}"></label>
+            <label>Runs <input class="control" name="runs" type="number" min="1" value="{{ options.runs }}" data-default-value="{{ url_defaults.runs }}"></label>
+            <label>Null density <input class="control" name="null_density" type="number" min="0" max="1" step="0.01" value="{{ options.null_density }}" data-default-value="{{ url_defaults.null_density }}"></label>
+            <input type="hidden" name="output" value="pyarrow" data-default-value="{{ url_defaults.output }}">
+          </div>
+        </form>
+      </section>
+
+      <section class="results" id="results" aria-live="polite">
+        {% include "_results.html" %}
+      </section>
+    </main>
+    <script type="application/json" id="benchmark-availability-data">{{ benchmark_availability_matrix|tojson }}</script>
+
+    <dialog class="dialog language-guide-modal" data-language-guide-modal aria-labelledby="language-guide-title">
+      <div class="dialog-shell language-guide-shell">
+        <header class="dialog-header language-guide-header">
+          <div>
+            <span class="dialog-eyebrow">Explorer language</span>
+            <h2 id="language-guide-title">Expression SQL cards</h2>
+          </div>
+          <button type="button" class="button button-secondary language-guide-close" data-language-guide-close aria-label="Close language guide">Close</button>
+        </header>
+        <div class="dialog-body language-guide-body">
+          <section class="card language-card">
+            <h3>Shape</h3>
+            <p>Every query declares input columns, may name shared expressions with <code>WITH</code>, then returns projections or aggregates from <code>SELECT</code>.</p>
+            <pre><code>INPUT (price f64, discount f64, keep bool);
+WITH revenue = price * (1.0 - discount)
+SELECT
+  revenue AS net,
+  sum(revenue) FILTER (WHERE keep) AS kept_net;</code></pre>
+          </section>
+          <section class="card language-card">
+            <h3>Column types</h3>
+            <p>Supported data types: i8, i16, i32, i64, f32, f64, bool. Add <code>?</code> when an input can be null.</p>
+            <pre><code>INPUT (
+  qty i32?,
+  flags i32,
+  ok bool
+);</code></pre>
+          </section>
+          <section class="card language-card">
+            <h3>Numbers</h3>
+            <p>Casts: <code>i64(x)</code>.Helper functions: abs, sqrt. Use <code>least(a,b)</code> or <code>greatest(a,b)</code> for scalar min/max.</p>
+            <pre><code>WITH gross = i64(qty) * i64(price)
+SELECT
+  least(greatest(a, lo), hi) AS clamped,
+  abs(delta) AS magnitude,
+  sqrt(x * x + y * y) AS norm;</code></pre>
+          </section>
+          <section class="card language-card">
+            <h3>Predicates</h3>
+            <p>Comparisons produce masks. Combine them with <code>AND</code>, <code>OR</code>, and <code>NOT</code>, then feed them to <code>ifelse</code>, filters, or boolean outputs.</p>
+            <pre><code>WITH keep = qty > 0 AND price <= 5000
+SELECT
+  ifelse(keep, i64(price), 0) AS safe_price;</code></pre>
+          </section>
+          <section class="card language-card">
+            <h3>Aggregates</h3>
+            <p><code>sum</code>, <code>min</code>, <code>max</code>, and <code>count_if</code> can be returned next to normal projections; add <code>FILTER</code> to aggregate selected rows.</p>
+            <pre><code>SELECT
+  sum(value) AS total,
+  min(value) FILTER (WHERE valid) AS min_valid,
+  count_if(valid) AS valid_rows;</code></pre>
+          </section>
+          <section class="card language-card">
+            <h3>Nulls</h3>
+            <p>Nullable inputs carry validity with the value. Use <code>IS NULL</code>, <code>IS NOT NULL</code>, <code>coalesce</code>, and <code>nullif</code> to make the row policy explicit before projecting or aggregating.</p>
+            <pre><code>WITH
+  price = nullif(unit_price, 0),
+  safe_qty = coalesce(qty, 0)
+SELECT
+  price IS NOT NULL AS has_price;</code></pre>
+          </section>
+        </div>
+      </div>
+    </dialog>
+  </body>
+</html>

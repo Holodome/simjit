@@ -1,0 +1,56 @@
+# This file is part of Simjit project <https://simjit.org>
+#
+# See LICENSE for license and copyright information
+# SPDX-License-Identifier: Zlib
+
+@PACKAGE_INIT@
+
+set(SIMJIT_VERSION "@SIMJIT_VERSION@")
+set(SIMJIT_VERSION_MAJOR "@SIMJIT_VERSION_MAJOR@")
+set(SIMJIT_VERSION_MINOR "@SIMJIT_VERSION_MINOR@")
+set(SIMJIT_VERSION_PATCH "@SIMJIT_VERSION_PATCH@")
+set(SIMJIT_INSTALL_PROFILE "@SIMJIT_CONFIG_PROFILE@")
+
+set_and_check(_simjit_include_dir "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+set_and_check(_simjit_lib_dir "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
+
+set(_simjit_compile_definitions "@SIMJIT_CONFIG_COMPILE_DEFINITIONS@")
+set(_simjit_llvm_ldflags "@SIMJIT_CONFIG_LLVM_LDFLAGS@")
+set(_simjit_llvm_libs "@SIMJIT_CONFIG_LLVM_LIBS@")
+
+if(@SIMJIT_CONFIG_ENABLE_ASMJIT@ AND NOT TARGET simjit::asmjit)
+  add_library(simjit::asmjit STATIC IMPORTED)
+  set_target_properties(simjit::asmjit PROPERTIES
+    IMPORTED_LOCATION "${_simjit_lib_dir}/@SIMJIT_CONFIG_ASMJIT_LIBRARY_NAME@")
+
+  if(@SIMJIT_CONFIG_INSTALLS_ASMJIT_HEADERS@)
+    set_target_properties(simjit::asmjit PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${_simjit_include_dir}")
+  endif()
+endif()
+
+if(NOT TARGET simjit::simjit)
+  add_library(simjit::simjit STATIC IMPORTED)
+  set_target_properties(simjit::simjit PROPERTIES
+    IMPORTED_LOCATION "${_simjit_lib_dir}/@SIMJIT_CONFIG_SIMJIT_LIBRARY_NAME@"
+    INTERFACE_INCLUDE_DIRECTORIES "${_simjit_include_dir}"
+    INTERFACE_COMPILE_FEATURES cxx_std_17
+    INTERFACE_COMPILE_DEFINITIONS "${_simjit_compile_definitions}")
+
+  if(@SIMJIT_CONFIG_ENABLE_ASMJIT@)
+    set_property(TARGET simjit::simjit APPEND PROPERTY
+      INTERFACE_LINK_LIBRARIES simjit::asmjit)
+  endif()
+
+  if(_simjit_llvm_ldflags)
+    set_property(TARGET simjit::simjit APPEND PROPERTY
+      INTERFACE_LINK_OPTIONS "${_simjit_llvm_ldflags}")
+  endif()
+
+  if(_simjit_llvm_libs)
+    set_property(TARGET simjit::simjit APPEND PROPERTY
+      INTERFACE_LINK_LIBRARIES "${_simjit_llvm_libs}")
+  endif()
+endif()
+
+check_required_components(simjit)

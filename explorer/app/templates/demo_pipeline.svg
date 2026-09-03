@@ -1,0 +1,54 @@
+<svg
+    class="pipeline-svg"
+    viewBox="0 0 560 150"
+    role="img"
+    aria-labelledby="pipeline-title pipeline-desc"
+>
+    <title id="pipeline-title">Simjit pipeline</title>
+    <desc id="pipeline-desc">
+        Host applications provide column buffers and expressions. Simjit lowers
+        them through its expression compiler and emits native SIMD machine code
+        for x86-64 AVX-512 and AArch64 NEON.
+    </desc>
+    <defs>
+        <marker
+            id="pipeline-arrow"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="5"
+            markerHeight="5"
+            orient="auto-start-reverse"
+        >
+            <path class="pipeline-arrow-head" d="M 0 0 L 10 5 L 0 10 z"></path>
+        </marker>
+    </defs>
+
+    <text class="pipeline-heading" x="28" y="22">Inputs</text>
+    <rect class="pipeline-box" x="28" y="34" width="142" height="88" rx="9"></rect>
+    <text class="pipeline-box-title" x="99" y="59">Column data</text>
+    <text class="pipeline-chip-row" x="99" y="84">
+        <tspan x="99" y="84">NumPy · PyArrow</tspan>
+        <tspan x="99" y="101">Arrow C++ · DuckDB</tspan>
+    </text>
+
+    <path class="pipeline-arrow-line" d="M170 78 H208"></path>
+
+    <text class="pipeline-heading" x="208" y="22">Compiler</text>
+    <rect class="pipeline-simjit-region" x="208" y="34" width="168" height="88" rx="10"></rect>
+    <text class="pipeline-region-title" x="292" y="60">Simjit</text>
+    <rect class="pipeline-stage-box vectorizer-stage" x="232" y="82" width="120" height="18" rx="9"></rect>
+    <text class="pipeline-stage-title" x="292" y="91">Vectorizer</text>
+
+    <path class="pipeline-arrow-line" d="M376 78 H414"></path>
+
+    <text class="pipeline-heading" x="414" y="22">Output</text>
+    <rect class="pipeline-backend-box runtime-backend" x="414" y="34" width="122" height="88" rx="9"></rect>
+    <a href="{{ project_links.asmjit }}" target="_blank" rel="noreferrer">
+        <text class="pipeline-box-title" x="475" y="58">Machine code</text>
+    </a>
+    <text class="pipeline-chip-row" x="475" y="84">
+        <tspan x="475" y="84">x86-64 AVX-512</tspan>
+        <tspan x="475" y="101">AArch64 NEON</tspan>
+    </text>
+</svg>

@@ -1,0 +1,26 @@
+# Copy this file to explorer/config.yaml, or point SIMJIT_EXPLORER_TARGETS_FILE
+# at a JSON/YAML config elsewhere.
+
+local:
+  label: Local arm64
+  public: true
+  env:
+    LLVM_CONFIG: /opt/homebrew/bin/llvm-config
+    LLVM_CLANG: /opt/homebrew/bin/clang
+
+security:
+  max_query_bytes: 65536
+  max_share_query_bytes: 131072
+  max_form_bytes: 200000
+  max_form_fields: 32
+  max_form_value_bytes: 131072
+  max_rows: 1000000
+  max_warmups: 10
+  max_runs: 20
+  max_null_density: 1.0
+  max_benchmark_seconds: 120
+  allowed_providers: [google, python, all]
+  allowed_outputs: [pyarrow]
+  allowed_targets: [local]
+
+targets: []

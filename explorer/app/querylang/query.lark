@@ -1,0 +1,80 @@
+program: _INPUT input_name? "(" columns? ")" ";"? with_clause? _SELECT outputs ";"?
+
+input_name: IDENT
+columns: column ("," column)*
+column: IDENT IDENT nullable?
+nullable: "?"
+
+with_clause: _WITH bindings
+bindings: binding ("," binding)*
+binding: IDENT _ASSIGN expr
+
+outputs: output ("," output)*
+output: expr filter? alias?
+filter: _FILTER "(" _WHERE expr ")"
+alias: _AS IDENT -> alias_as
+     | IDENT     -> alias_shorthand
+
+?expr: or_expr
+?or_expr: or_expr OR_OP and_expr -> binary
+        | and_expr
+
+?and_expr: and_expr AND_OP not_expr -> binary
+         | not_expr
+
+?not_expr: NOT not_expr -> unary_not
+         | compare
+
+?compare: compare _IS NOT? _NULL -> null_predicate
+        | compare CMP add -> binary
+        | add
+
+?add: add ADD_OP mul -> binary
+    | mul
+
+?mul: mul MUL_OP unary -> binary
+    | unary
+
+?unary: UNARY_OP unary -> unary_symbol
+      | primary
+
+?primary: "(" expr ")"
+        | TRUE -> true
+        | FALSE -> false
+        | NUMBER -> number
+        | NAME "(" args? ")" -> call
+        | NAME -> name
+
+args: expr ("," expr)*
+
+NAME: IDENT | AND | OR | NOT
+
+OR_OP.3: OR | "||" | "|" | "#"
+AND_OP.3: AND | "&&" | "&"
+CMP.2: "<=" | ">=" | "!=" | "<>" | "=" | "<" | ">"
+ADD_OP.3: "+" | "-"
+MUL_OP.4: "<<" | ">>" | "*" | "/" | "%"
+UNARY_OP.3: "+" | "-" | "~"
+
+_ASSIGN.2: "="
+
+_INPUT.10: "INPUT"i
+_WITH.10: "WITH"i
+_SELECT.10: "SELECT"i
+_FILTER.10: "FILTER"i
+_WHERE.10: "WHERE"i
+_AS.10: "AS"i
+_IS.10: "IS"i
+_NULL.10: "NULL"i
+
+NOT.10: "NOT"i
+AND.10: "AND"i
+OR.10: "OR"i
+TRUE.10: "TRUE"i
+FALSE.10: "FALSE"i
+
+IDENT: /[A-Za-z_][A-Za-z0-9_]*/
+NUMBER: /[0-9]+(\.[0-9]*)?/
+
+%ignore /[ \t\r\n]+/
+%ignore /--[^\n]*/

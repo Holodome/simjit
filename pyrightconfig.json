@@ -1,0 +1,23 @@
+{
+  "include": ["python/src"],
+  "ignore": ["python/src/simjit/_simjit.pyi", "python/tests/*"],
+  "executionEnvironments": [
+    {
+      "root": "python/tests",
+      "extraPaths": ["python/src"]
+    },
+    {
+      "root": "python/src"
+    }
+  ],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "recommended",
+  "reportImportCycles": "none",
+  "reportImplicitOverride": "none",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportMissingTypeStubs": "none",
+  "reportPrivateUsage": "none",
+  "reportUnnecessaryIsInstance": "none",
+  "reportUnreachable": "none"
+}

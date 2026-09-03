@@ -1,0 +1,10 @@
+.cache/
+compile_commands.json
+*.o
+bench
+build/
+test-dump/
+*.jsonl
+__pycache__/
+*.pyc
+.DS_Store

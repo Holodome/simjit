@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# This file is part of Simjit project <https://simjit.org>
+#
+# See LICENSE for license and copyright information
+# SPDX-License-Identifier: Zlib
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workers="${WORKERS:-$(command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/dev COMMAND [ARGS...]
+
+Benchmarks:
+  python-bench            Build and run the E1-E10 Python paper benchmark
+  demo-bench              Run the benchmark set used by the Explorer demo
+  jit-bench               Build the Arrow/Gandiva JIT benchmark
+
+Explorer and tools:
+  explorer-probe          Build the optional Explorer LLVM probe
+  explorer-serve          Run the Explorer development server
+  explorer-docker-build   Build the Explorer runtime image
+  explorer-docker-run     Start the Explorer container
+  explorer-docker-smoke   Smoke-test the running Explorer container
+  explorer-docker-stop    Remove the Explorer container
+  results-serve           Serve the local JSONL/code viewer
+
+Arguments after COMMAND are forwarded to Python benchmark runners or uvicorn.
+Configuration uses the existing NO_LTO, LTO_MODE, WORKERS, SIMJIT_PYTHON,
+PYTHON_DEMO_BENCH_*, and DOCKER_EXPLORER_* environment variables.
+EOF
+}
+
+choose_python() {
+  if [[ -n "${SIMJIT_PYTHON:-}" ]]; then
+    printf '%s\n' "$SIMJIT_PYTHON"
+  elif [[ -x "$repo_root/.venv/bin/python" ]]; then
+    printf '%s\n' "$repo_root/.venv/bin/python"
+  elif [[ -x "$HOME/.venv/bin/python" ]]; then
+    printf '%s\n' "$HOME/.venv/bin/python"
+  else
+    command -v python3
+  fi
+}
+
+merge_compile_commands() {
+  "$python_bin" "$repo_root/scripts/merge-compile-commands.py" \
+    --output "$repo_root/compile_commands.json" \
+    "$repo_root/build/debug" \
+    "$repo_root/build/reldebug" \
+    "$repo_root/build/release" \
+    "$repo_root/build/python-dev" \
+    "$@"
+}
+
+cmake_feature_flags() {
+  cmake_flags=(-DSIMJIT_ENABLE_SERIALIZATION=ON)
+
+  if [[ "${NO_LTO:-0}" == 1 ]]; then
+    cmake_flags+=(-DSIMJIT_ENABLE_LTO=OFF)
+  else
+    cmake_flags+=(-DSIMJIT_ENABLE_LTO=ON)
+  fi
+  if [[ -n "${LTO_MODE:-}" ]]; then
+    cmake_flags+=("-DSIMJIT_LTO_MODE=$LTO_MODE")
+  fi
+  if [[ "${NO_LLVM:-0}" == 1 ]]; then
+    cmake_flags+=(-DSIMJIT_ENABLE_LLVM=OFF)
+  else
+    cmake_flags+=(-DSIMJIT_ENABLE_LLVM=ON)
+  fi
+  if [[ "${NO_CPP:-0}" == 1 ]]; then
+    cmake_flags+=(-DSIMJIT_ENABLE_CPP=OFF)
+  else
+    cmake_flags+=(-DSIMJIT_ENABLE_CPP=ON)
+  fi
+  if [[ "${NO_ASMJIT:-0}" == 1 ]]; then
+    cmake_flags+=(-DSIMJIT_ENABLE_ASMJIT=OFF)
+  elif [[ "${NO_X86:-0}" == 1 ]]; then
+    cmake_flags+=(-DSIMJIT_ENABLE_ASMJIT=ON -DSIMJIT_ENABLE_ASMJIT_ARM=ON -DSIMJIT_ENABLE_ASMJIT_X86=OFF)
+  elif [[ "${NO_ARM:-0}" == 1 ]]; then
+    cmake_flags+=(-DSIMJIT_ENABLE_ASMJIT=ON -DSIMJIT_ENABLE_ASMJIT_ARM=OFF -DSIMJIT_ENABLE_ASMJIT_X86=ON)
+  else
+    cmake_flags+=(-DSIMJIT_ENABLE_ASMJIT=ON -DSIMJIT_ENABLE_ASMJIT_ARM=ON -DSIMJIT_ENABLE_ASMJIT_X86=ON)
+  fi
+  if [[ "${ASAN:-0}" == 1 ]]; then
+    cmake_flags+=(-DSIMJIT_ENABLE_ASAN=ON)
+  fi
+  if [[ "${UBSAN:-0}" == 1 ]]; then
+    cmake_flags+=(-DSIMJIT_ENABLE_UBSAN=ON)
+  fi
+  if [[ "${COVERAGE:-0}" == 1 ]]; then
+    cmake_flags+=(-DSIMJIT_ENABLE_COVERAGE=ON)
+  fi
+}
+
+command_name="${1:-}"
+if [[ -z "$command_name" || "$command_name" == -h || "$command_name" == --help || "$command_name" == help ]]; then
+  usage
+  exit 0
+fi
+shift
+
+python_bin="$(choose_python)"
+
+case "$command_name" in
+  python-bench)
+    make -C "$repo_root" py
+    exec "$repo_root/scripts/py" "$repo_root/benchmarks/python/bench.py" "$@"
+    ;;
+  demo-bench)
+    output_dir="${PYTHON_DEMO_BENCH_DIR:-$repo_root/build/demo-python-bench}"
+    mkdir -p "$output_dir"
+    make -C "$repo_root" py PY_LLVM=1 PY_CPP=1
+    exec "$repo_root/scripts/py" "$repo_root/benchmarks/python/demo_bench.py" \
+      --sizes "${PYTHON_DEMO_BENCH_SIZES:-1024,4096,65536,1048576}" \
+      --null-patterns "${PYTHON_DEMO_BENCH_NULL_PATTERNS:-periodic}" \
+      --null-mods "${PYTHON_DEMO_BENCH_NULL_MODS:-7}" \
+      --workloads "${PYTHON_DEMO_BENCH_WORKLOADS:-conditional_store_projection,select_store_projection,nullable_revenue_multiagg,split_valids_revenue,unconditional_div_split_valids}" \
+      --libraries "${PYTHON_DEMO_BENCH_LIBRARIES:-numba_arrow_bits,pyarrow_compute,simjit_arrow}" \
+      --repeats "${PYTHON_DEMO_BENCH_REPEATS:-5}" \
+      --min-time "${PYTHON_DEMO_BENCH_MIN_TIME:-0.20}" \
+      --jsonl "${PYTHON_DEMO_BENCH_JSONL:-$output_dir/python-demo-bench.jsonl}" \
+      --markdown "${PYTHON_DEMO_BENCH_MARKDOWN:-$output_dir/python-demo-bench.md}" \
+      --no-heatmaps "$@"
+    ;;
+  jit-bench)
+    cmake_flags=()
+    cmake_feature_flags
+    cmake -S "$repo_root" --preset reldebug-benchmarks "${cmake_flags[@]}"
+    merge_compile_commands
+    cmake --build "$repo_root/build/reldebug" --target jit-bench --parallel "$workers"
+    ;;
+  explorer-probe)
+    cmake_flags=()
+    cmake_feature_flags
+    cmake -S "$repo_root" --preset explorer-probe "${cmake_flags[@]}" \
+      "-DPython_EXECUTABLE=$python_bin" \
+      "-DSIMJIT_EXPLORER_PROBE_OUTPUT_DIR=$repo_root/build/python-dev"
+    merge_compile_commands "$repo_root/build/explorer-probe"
+    cmake --build "$repo_root/build/explorer-probe" --target explorer_llvm_probe --parallel "$workers"
+    ;;
+  explorer-serve)
+    exec "$repo_root/scripts/py" -m uvicorn explorer.app:app --host 127.0.0.1 --port 8001 "$@"
+    ;;
+  explorer-docker-build)
+    image="${DOCKER_EXPLORER_IMAGE:-simjit-explorer:local}"
+    platform="${DOCKER_EXPLORER_PLATFORM:-linux/amd64}"
+    platform_args=()
+    [[ -z "$platform" ]] || platform_args=(--platform "$platform")
+    docker build "${platform_args[@]}" \
+      --build-arg "PYTHON_IMAGE=${DOCKER_EXPLORER_PYTHON_IMAGE:-python:3.13-slim-bookworm}" \
+      --build-arg "BUILD_WORKERS=${DOCKER_EXPLORER_BUILD_WORKERS:-2}" \
+      --build-arg "LLVM_MAJOR=${DOCKER_EXPLORER_LLVM_MAJOR:-22}" \
+      --build-arg "LLVM_DEBIAN_CODENAME=${DOCKER_EXPLORER_LLVM_DEBIAN_CODENAME:-bookworm}" \
+      --build-arg "LLVM_CONFIG=${DOCKER_EXPLORER_LLVM_CONFIG:-llvm-config-${DOCKER_EXPLORER_LLVM_MAJOR:-22}}" \
+      --build-arg "LLVM_CLANG=${DOCKER_EXPLORER_LLVM_CLANG:-clang-${DOCKER_EXPLORER_LLVM_MAJOR:-22}}" \
+      --build-arg "EXTRA_APT_PACKAGES=${DOCKER_EXPLORER_EXTRA_APT_PACKAGES:-}" \
+      -f "$repo_root/explorer/docker/Dockerfile" --target runtime -t "$image" "$repo_root"
+    ;;
+  explorer-docker-run)
+    container="${DOCKER_EXPLORER_CONTAINER:-simjit-explorer-local}"
+    image="${DOCKER_EXPLORER_IMAGE:-simjit-explorer:local}"
+    port="${DOCKER_EXPLORER_PORT:-8080}"
+    platform="${DOCKER_EXPLORER_PLATFORM:-linux/amd64}"
+    platform_args=()
+    [[ -z "$platform" ]] || platform_args=(--platform "$platform")
+    docker rm -f "$container" >/dev/null 2>&1 || true
+    docker run -d "${platform_args[@]}" --name "$container" -p "127.0.0.1:$port:80" "$image"
+    ;;
+  explorer-docker-smoke)
+    port="${DOCKER_EXPLORER_PORT:-8080}"
+    base_url="http://127.0.0.1:$port"
+    curl -fsS -o /dev/null "$base_url/"
+    curl -fsS -o /dev/null "$base_url/explorer/"
+    curl -fsS -D - -o /dev/null "$base_url/" | grep -qi "Content-Security-Policy: default-src 'self'"
+    curl -fsS -D - -o /dev/null "$base_url/explorer/" | grep -qi "Content-Security-Policy: default-src 'self'"
+    curl -fsS -D - -o /dev/null "$base_url/robots.txt" | grep -qi "X-Robots-Tag: noindex"
+    curl -fsS -H 'X-Simjit-Explorer-Fragment: results' \
+      --data-urlencode 'query=INPUT t (x i32); SELECT x + 1 AS y;' \
+      "$base_url/explorer/compile" >/dev/null
+    ;;
+  explorer-docker-stop)
+    docker rm -f "${DOCKER_EXPLORER_CONTAINER:-simjit-explorer-local}" >/dev/null 2>&1 || true
+    ;;
+  results-serve)
+    exec "$python_bin" "$repo_root/tests/scripts/server.py" "$@"
+    ;;
+  *)
+    printf 'unknown command: %s\n\n' "$command_name" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

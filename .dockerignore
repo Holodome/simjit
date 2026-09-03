@@ -1,0 +1,16 @@
+.DS_Store
+.git
+.cache
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.vscode
+.venv
+.claude
+.zed
+__pycache__
+build
+compile_commands.json
+test-dump
+*.pyc
+*.jsonl

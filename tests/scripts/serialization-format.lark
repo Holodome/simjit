@@ -1,0 +1,156 @@
+// Simjit HIR serialization format.
+//
+// Source of truth:
+//   - src/simjit/core/serialize.cpp
+//   - src/simjit/core/hir.cpp
+//   - src/simjit/core/expr.cpp
+//
+// This grammar describes the s-expression text emitted by simjit::serialize()
+// for HIR functions. The concrete syntax is headerlisp: parentheses form lists
+// and whitespace is insignificant outside atoms/strings.
+
+document: function
+
+function: "(" "func" args_section accs_section? steps_section roots_section? scalar_only_section? ")"
+
+args_section: "(" "args" arg_decl* ")"
+arg_decl: "(" "arg" arg_id scalar_dtype arg_kind ")"
+
+accs_section: "(" "accs" acc_decl* ")"
+acc_decl: "(" "acc" acc_id scalar_dtype arg_ref step_ref ")"
+
+steps_section: "(" "steps" step* ")"
+roots_section: "(" "roots" step_ref* ")"
+scalar_only_section: "(" "scalar-only" ")"
+
+step: const_step
+    | load_step
+    | load_splat_step
+    | index_step
+    | gather_step
+    | arith_binary_step
+    | checked_op_step
+    | arith_unary_step
+    | compare_step
+    | int_cast_step
+    | float_cast_step
+    | bitcast_step
+    | predicate_binary_step
+    | countif_step
+    | predicate_not_step
+    | select_step
+    | store_step
+    | scatter_step
+    | pack_step
+    | acc_arith_step
+    | acc_predicate_step
+    | acc_sum128_step
+    | permute_step
+    | fpclass_step
+
+const_step: "(" "step" step_id "const" scalar_dtype HEX_STRING ")"
+load_step: "(" "step" step_id "load" scalar_dtype arg_ref load_store_kind ")"
+load_splat_step: "(" "step" step_id "load-splat" scalar_dtype arg_ref ")"
+index_step: "(" "step" step_id "index" scalar_dtype ")"
+gather_step: "(" "step" step_id "gather" scalar_dtype step_ref arg_ref ")"
+
+arith_binary_step: "(" "step" step_id "binary" scalar_dtype arith_binary_op step_ref step_ref arith_binary_flags? ")"
+checked_op_step: "(" "step" step_id "checked-op" scalar_dtype step_ref step_ref? ")"
+arith_unary_step: "(" "step" step_id "unary" scalar_dtype arith_unary_op step_ref ")"
+compare_step: "(" "step" step_id "cmp" scalar_dtype cmp_op step_ref step_ref true_literal? ")"
+int_cast_step: "(" "step" step_id "int-cast" scalar_dtype int_cast_kind step_ref ")"
+float_cast_step: "(" "step" step_id "float-cast" scalar_dtype step_ref true_literal? ")"
+bitcast_step: "(" "step" step_id "bitcast" scalar_dtype step_ref ")"
+
+predicate_binary_step: "(" "step" step_id "predicate-binary" scalar_dtype predicate_binary_op step_ref step_ref ")"
+countif_step: "(" "step" step_id "countif" "i64" step_ref acc_ref ")"
+predicate_not_step: "(" "step" step_id "predicate-not" scalar_dtype step_ref ")"
+select_step: "(" "step" step_id "select" scalar_dtype step_ref step_ref step_ref ")"
+
+store_step: "(" "step" step_id "store" scalar_dtype step_ref arg_ref load_store_kind step_ref? ")"
+scatter_step: "(" "step" step_id "scatter" scalar_dtype step_ref step_ref arg_ref step_ref? ")"
+pack_step: "(" "step" step_id "pack" scalar_dtype step_ref step_ref arg_ref acc_ref ")"
+
+acc_arith_step: "(" "step" step_id "acc-arith-bin" scalar_dtype arith_binary_op step_ref acc_ref step_ref? ")"
+acc_predicate_step: "(" "step" step_id "acc-predicate-bin" scalar_dtype predicate_binary_op step_ref acc_ref ")"
+acc_sum128_step: "(" "step" step_id "sum128" scalar_dtype arith_binary_op step_ref acc_ref step_ref? ")"
+permute_step: "(" "step" step_id "permute" scalar_dtype step_ref HEX_STRING bool_literal ")"
+fpclass_step: "(" "step" step_id "fpclass" scalar_dtype step_ref fpclass_flags ")"
+
+step_ref: "(" "step" step_id ")"
+arg_ref: "(" "arg" arg_id ")"
+acc_ref: "(" "acc" acc_id ")"
+
+scalar_dtype: "i1" | "i8" | "i16" | "i32" | "i64" | "i128" | "f32" | "f64"
+
+arg_kind: arg_kind_atom | "(" arg_kind_atom+ ")"
+arg_kind_atom: "src-arr"
+             | "src-idx-arr"
+             | "src-const"
+             | "dst-arr"
+             | "dst-scalar"
+             | "src-gather-arr"
+             | "dst-overflow"
+
+load_store_kind: "aligned" | "unaligned"
+
+arith_binary_op: "add"
+               | "sub"
+               | "mul"
+               | "mulse"
+               | "mulze"
+               | "div"
+               | "udiv"
+               | "mod"
+               | "umod"
+               | "min"
+               | "max"
+               | "umin"
+               | "umax"
+               | "and"
+               | "or"
+               | "xor"
+               | "andnot"
+               | "shra"
+               | "shrl"
+               | "shll"
+               | "rol"
+               | "ror"
+
+arith_unary_op: "not"
+              | "neg"
+              | "abs"
+              | "lzcnt"
+              | "tzcnt"
+              | "popcnt"
+              | "round"
+              | "floor"
+              | "ceil"
+              | "trunc"
+              | "rcp"
+              | "sqrt"
+              | "rsqrt"
+
+cmp_op: "lt" | "gt" | "le" | "ge" | "eq" | "ne"
+predicate_binary_op: "and" | "or" | "xor" | "andnot" | "xnor"
+int_cast_kind: "trunc" | "sext" | "zext"
+
+arith_binary_flags: arith_binary_flag | "(" arith_binary_flag+ ")"
+arith_binary_flag: "overflow" | "shift-wraparound" | "safe-division"
+
+fpclass_flags: fpclass_flag | "(" fpclass_flag+ ")"
+fpclass_flag: "\"inf\"" | "\"nan\"" | "sub" | "zer"
+
+bool_literal: true_literal | false_literal
+true_literal: "t"
+false_literal: "(" ")"
+
+step_id: INT
+arg_id: INT
+acc_id: INT
+
+HEX_STRING: /"0x[0-9a-fA-F]+"/
+INT: /[0-9]+/
+
+%import common.WS
+%ignore WS

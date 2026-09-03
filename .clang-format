@@ -1,0 +1,12 @@
+BasedOnStyle: llvm
+ColumnLimit: 120
+IndentWidth: 4
+AllowShortIfStatementsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Always
+AllowShortFunctionsOnASingleLine: InlineOnly
+AllowShortLoopsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: true
+AccessModifierOffset: -4
+AlignEscapedNewlines: Left
+IfMacros: [SIMJIT_MATCH, SIMJIT_MATCH2]

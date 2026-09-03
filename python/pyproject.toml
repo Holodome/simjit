@@ -1,0 +1,31 @@
+[build-system]
+requires = ["scikit-build-core>=0.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "simjit"
+version = "0.1.0"
+description = "Native JIT compiler for fast columnar analytics in Python"
+readme = "README.md"
+license = "Zlib"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.26"]
+arrow = ["pyarrow>=14"]
+dev = [
+    "basedpyright>=1.31",
+    "numpy>=1.26",
+    "pyarrow>=14",
+    "pybind11-stubgen>=2.5",
+    "pytest>=8.4",
+    "ruff>=0.12",
+]
+
+[tool.scikit-build]
+cmake.source-dir = "."
+cmake.build-type = "Release"
+wheel.packages = ["src/simjit"]
+build-dir = "../build/python/{wheel_tag}"

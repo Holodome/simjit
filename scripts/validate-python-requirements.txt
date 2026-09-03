@@ -1,0 +1,7 @@
+-r ../python/docker-build-requirements.txt
+-r ../explorer/requirements.txt
+
+# Validation-only tools and benchmark peers.
+basedpyright>=1.31
+numba>=0.61
+ruff>=0.12

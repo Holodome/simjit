@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Test Code Viewer</title>
+
+<style>
+body {
+  font-family: monospace;
+  margin: 20px;
+}
+
+.item {
+  border: 1px solid #ccc;
+  margin-bottom: 8px;
+  padding: 6px;
+}
+
+.header {
+  cursor: pointer;
+  font-weight: bold;
+}
+
+.codes {
+  margin-left: 20px;
+  margin-top: 6px;
+}
+
+.meta {
+  color: #555;
+  margin: 6px 0 10px 0;
+}
+
+.code-header {
+  cursor: pointer;
+  color: darkblue;
+}
+
+.code-panel {
+  margin-bottom: 8px;
+}
+
+pre {
+  background: #f6f6f6;
+  padding: 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+.hidden {
+  display: none;
+}
+</style>
+</head>
+
+<body>
+<h2>Test Viewer</h2>
+
+<div class="controls">
+  <input id="search" placeholder="Search substring..." />
+  <button onclick="expandAll()">Expand all</button>
+  <button onclick="collapseAll()">Collapse all</button>
+</div>
+
+<div id="container">Loading...</div>
+
+<script>
+let items = [];
+
+function parseBundleText(text) {
+  const stripped = text.trim();
+  if (!stripped) {
+    return [];
+  }
+  return stripped
+    .split(/\n+/)
+    .filter(line => line.trim() !== "")
+    .map(line => JSON.parse(line));
+}
+
+fetch("../../tests.jsonl")
+  .then(r => r.text())
+  .then(text => {
+    const data = parseBundleText(text);
+    items = data;
+    render(data);
+  });
+
+function render(data) {
+  const container = document.getElementById("container");
+  container.innerHTML = "";
+
+  data.forEach(item => {
+    const testNumber = item.n ?? "?";
+    const stableId = item.id ?? null;
+    const shortFile = (item.file ?? "").split("/").pop();
+    const location = item.file && item.line ? `${shortFile}:${item.line}` : shortFile;
+    const iterationSuffix = item.iteration != null ? `, iteration=${item.iteration}` : "";
+
+    const div = document.createElement("div");
+    div.className = "item";
+
+    const header = document.createElement("div");
+    header.className = "header";
+    header.textContent = `n=${testNumber}` +
+      (stableId ? `, ${stableId}` : "") +
+      `, ${location}${iterationSuffix}`;
+
+    const body = document.createElement("div");
+    body.className = "hidden";
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `n=${testNumber}` +
+      (stableId ? `, id=${stableId}` : "") +
+      (item.file ? `, file=${item.file}` : "");
+    body.appendChild(meta);
+
+    const codesDiv = document.createElement("div");
+    codesDiv.className = "codes";
+
+    if (item.src) appendCodePanel(codesDiv, "hir", item.src ?? "");
+    if (item.serialized) appendCodePanel(codesDiv, "serialized", formatLisp(item.serialized ?? "", 40, ["arg", "step"]));
+    if (item.mir) appendCodePanel(codesDiv, "mir", item.mir ?? "");
+
+    (item.codes ?? []).filter(x => x.name !== "asmjit" && x.name !== "asmjit_s").forEach(codeObj => {
+      appendCodePanel(codesDiv, codeObj.name, codeObj.code ?? "");
+    });
+
+    body.appendChild(codesDiv);
+
+    header.onclick = () =>
+      body.classList.toggle("hidden");
+
+    div.appendChild(header);
+    div.appendChild(body);
+    container.appendChild(div);
+  });
+}
+
+function appendCodePanel(parent, label, code) {
+  const codeHeader = document.createElement("div");
+  codeHeader.className = "code-header";
+  codeHeader.textContent = label;
+
+  const codeContainer = document.createElement("div");
+  codeContainer.className = "pre-container code-panel hidden";
+
+  const codeBody = document.createElement("pre");
+  codeBody.textContent = code;
+
+  const codeCopyBtn = createCopyButton(codeBody);
+
+  codeContainer.appendChild(codeBody);
+  codeContainer.appendChild(codeCopyBtn);
+
+  codeHeader.onclick = () =>
+    codeContainer.classList.toggle("hidden");
+
+  parent.appendChild(codeHeader);
+  parent.appendChild(codeContainer);
+}
+
+function createCopyButton(preElement) {
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "copy-btn";
+  copyBtn.textContent = "Copy";
+  copyBtn.title = "Copy to clipboard";
+
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(preElement.textContent);
+
+      const originalText = copyBtn.textContent;
+      copyBtn.textContent = "Copied!";
+      copyBtn.classList.add("copied");
+
+      setTimeout(() => {
+        copyBtn.textContent = originalText;
+        copyBtn.classList.remove("copied");
+      }, 2000);
+    } catch (err) {
+      console.error("Failed to copy: ", err);
+      copyBtn.textContent = "Failed";
+      setTimeout(() => {
+        copyBtn.textContent = "Copy";
+      }, 2000);
+    }
+  });
+
+  return copyBtn;
+}
+
+function expandAll() {
+  document.querySelectorAll(".hidden").forEach(el =>
+    el.classList.remove("hidden")
+  );
+}
+
+function collapseAll() {
+  document.querySelectorAll(".item").forEach(itemDiv => {
+    const body = itemDiv.children[1];
+    body.classList.add("hidden");
+    body.querySelectorAll(".code-panel").forEach(panel =>
+      panel.classList.add("hidden")
+    );
+  });
+}
+
+document.getElementById("search").addEventListener("input", e => {
+  const q = e.target.value.toLowerCase();
+
+  if (q === "") {
+    expandAll();
+    collapseAll();
+    return;
+  }
+
+  document.querySelectorAll(".item").forEach(itemDiv => {
+    let match = false;
+
+    const header = itemDiv.querySelector(".header");
+    if (header.textContent.toLowerCase().includes(q)) {
+      match = true;
+    }
+    const meta = itemDiv.querySelector(".meta");
+    if (meta && meta.textContent.toLowerCase().includes(q)) {
+      match = true;
+    }
+
+    itemDiv.querySelectorAll(".code-header, pre").forEach(el => {
+      if (el.textContent.toLowerCase().includes(q)) {
+        match = true;
+      }
+    });
+
+    const body = itemDiv.children[1];
+
+    if (!q) {
+      body.classList.add("hidden");
+      itemDiv.classList.remove("hidden");
+      body.querySelectorAll(".code-panel").forEach(panel =>
+        panel.classList.add("hidden")
+      );
+      return;
+    }
+
+    if (match) {
+      body.classList.remove("hidden");
+      itemDiv.classList.remove("hidden");
+      body.querySelectorAll(".code-panel").forEach(panel =>
+        panel.classList.remove("hidden")
+      );
+    } else {
+      body.classList.add("hidden");
+      itemDiv.classList.add("hidden");
+    }
+  });
+});
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+});
+
+function formatLisp(code, columnLimit = 40, specialNames = []) {
+  const specialSet = new Set(specialNames);
+
+  function tokenize(code) {
+    const tokens = [];
+    let i = 0;
+    const len = code.length;
+    while (i < len) {
+      const ch = code[i];
+      if (/\s/.test(ch)) {
+        i++;
+        continue;
+      }
+      if (ch === "(" || ch === ")") {
+        tokens.push({ type: "paren", value: ch });
+        i++;
+        continue;
+      }
+      if (ch === "\"") {
+        let start = i;
+        i++;
+        while (i < len) {
+          if (code[i] === "\\") {
+            i += 2;
+            continue;
+          }
+          if (code[i] === "\"") {
+            i++;
+            break;
+          }
+          i++;
+        }
+        tokens.push({ type: "string", value: code.slice(start, i) });
+        continue;
+      }
+      let start = i;
+      while (i < len && !/\s/.test(code[i]) && code[i] !== "(" && code[i] !== ")") {
+        i++;
+      }
+      const word = code.slice(start, i);
+      if (/^-?\d+(\.\d+)?$/.test(word)) {
+        tokens.push({ type: "number", value: word });
+      } else {
+        tokens.push({ type: "symbol", value: word });
+      }
+    }
+    return tokens;
+  }
+
+  function parse(tokens) {
+    const root = [];
+    const stack = [root];
+    for (const token of tokens) {
+      if (token.type === "paren" && token.value === "(") {
+        const newList = [];
+        stack[stack.length - 1].push(newList);
+        stack.push(newList);
+      } else if (token.type === "paren" && token.value === ")") {
+        if (stack.length === 1) throw new Error("Unmatched )");
+        stack.pop();
+      } else {
+        stack[stack.length - 1].push(token.value);
+      }
+    }
+    if (stack.length !== 1) throw new Error("Unmatched (");
+    return root;
+  }
+
+  function inlineRepr(node) {
+    if (!Array.isArray(node)) {
+      return node;
+    }
+    if (node.length === 0) return "()";
+    let result = "(" + inlineRepr(node[0]);
+    for (let i = 1; i < node.length; i++) {
+      result += " " + inlineRepr(node[i]);
+    }
+    result += ")";
+    return result;
+  }
+
+  function formatNode(node, indent) {
+    if (!Array.isArray(node)) {
+      return node;
+    }
+
+    if (node.length === 0) return "()";
+
+    const inlineVersion = inlineRepr(node);
+    const inlineLength = inlineVersion.length;
+
+    const first = node[0];
+    const isSpecial = !Array.isArray(first) && specialSet.has(first);
+
+    if (isSpecial || inlineLength <= columnLimit) {
+      return inlineVersion;
+    }
+
+    let result = "(" + formatNode(node[0], indent + "  ");
+    for (let i = 1; i < node.length; i++) {
+      result += "\n" + indent + "  " + formatNode(node[i], indent + "  ");
+    }
+    result += ")";
+    return result;
+  }
+
+  const tokens = tokenize(code);
+  const ast = parse(tokens);
+  return ast.map(node => formatNode(node, "")).join("\n");
+}
+</script>
+</body>
+</html>

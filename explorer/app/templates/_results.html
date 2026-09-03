@@ -1,0 +1,175 @@
+{% if result and not result.ok %}
+  <div class="diagnostic error">{{ result.error }}</div>
+{% endif %}
+
+{% if result and result.diagnostics %}
+  <details open class="diagnostic">
+    <summary>Diagnostics</summary>
+    {% for diagnostic in result.diagnostics %}
+      <pre>{{ diagnostic }}</pre>
+    {% endfor %}
+  </details>
+{% endif %}
+
+{% if benchmark %}
+  <details open class="panel pane">
+    <summary>
+      <span>Benchmark</span>
+      <span class="summary-actions">
+        <button
+          type="button"
+          class="button button-ghost button-small benchmark-info-button"
+          data-benchmark-compile-open
+          aria-haspopup="dialog"
+        >Compile timing</button>
+        {% if benchmark.ok and benchmark.implementations %}
+          <button type="button" class="button button-ghost button-small copy-table" data-copy-benchmark-csv>Copy CSV</button>
+        {% endif %}
+      </span>
+    </summary>
+    <dialog
+      class="dialog benchmark-compile-modal"
+      data-benchmark-compile-modal
+      aria-labelledby="benchmark-compile-title"
+    >
+      <div class="dialog-shell benchmark-compile-shell">
+        <header class="dialog-header benchmark-compile-header">
+          <div>
+            <span class="dialog-eyebrow">Benchmark table</span>
+            <h2 id="benchmark-compile-title">Compile timing</h2>
+          </div>
+          <button
+            type="button"
+            class="button button-secondary benchmark-compile-close"
+            data-benchmark-compile-close
+            aria-label="Close compile timing"
+          >Close</button>
+        </header>
+        <div class="dialog-body benchmark-compile-body">
+          <section>
+            <h3>How compile time is measured</h3>
+            <p>Compile time is measured separately from the hot runtime loop, so one-time setup costs don't contaminate execution samples.</p>
+          </section>
+          <section>
+            <h3>Python API rows</h3>
+            <p>Median time to produce a runnable kernel from already-created NumPy/Arrow inputs and an expression. Covers the full native path (type resolution, lowering, codegen). Excludes input data generation and hot-loop execution.</p>
+          </section>
+          <section>
+            <h3>AsmJit rows</h3>
+            <p>Median native compile time after Python hands off. Covers lowering and AsmJit codegen. Excludes Python overhead, harness compilation, and execution, but will be larger than pure C++ usage due to Python handoff costs.</p>
+          </section>
+          <section>
+            <h3>LLVM rows</h3>
+            <p>Median native compilation time from HIR in an initialized JIT session until compilation returns a callable function pointer (<code>O1</code> for SIMD/scalar LLVM rows, <code>O3</code> for the scalar-O3 row).</p>
+          </section>
+          <section>
+            <h3>C++ emitter rows</h3>
+            <p>C++ emitter rows do not report compile time to avoid creating a strawman.</p>
+          </section>
+        </div>
+      </div>
+    </dialog>
+    {% if benchmark.ok %}
+      <dl class="metrics">
+        <dt>Rows</dt><dd>{{ benchmark.rows }}</dd>
+        <dt>Platform</dt><dd>{{ benchmark.platform_label or benchmark.arch }}</dd>
+        <dt>Target</dt><dd>{{ benchmark.target_label or "Local" }}{% if benchmark.target_arch %} ({{ benchmark.target_arch }}){% endif %}</dd>
+        <dt>Provider</dt><dd>{{ benchmark.provider_label or benchmark.provider }}</dd>
+        <dt>Null density</dt><dd>{{ "%.2f"|format(benchmark.null_density) }}</dd>
+        {% if benchmark.compile_us is defined and benchmark.compile_us is not none %}
+          <dt>AsmJit compile</dt><dd>{{ "%.2f us"|format(benchmark.compile_us) }}</dd>
+        {% endif %}
+        {% if benchmark.median_us is defined and benchmark.median_us is not none %}
+          <dt>AsmJit hot median</dt><dd>{{ "%.2f us"|format(benchmark.median_us) }}</dd>
+        {% endif %}
+        {% if benchmark.rows_per_second is defined and benchmark.rows_per_second is not none %}
+          <dt>Rows/s</dt><dd>{{ "%.2f M"|format(benchmark.rows_per_second / 1000000.0) }}</dd>
+        {% endif %}
+        {% if benchmark.throughput_gbps is defined and benchmark.throughput_gbps is not none %}
+          <dt>Throughput</dt><dd>{{ "%.2f GB/s"|format(benchmark.throughput_gbps) }}</dd>
+        {% endif %}
+      </dl>
+      {% if benchmark.implementations %}
+        <div class="bench-chart" aria-label="Benchmark comparison">
+          {% for item in benchmark.implementations %}
+            {% set bar_bucket = ((item.bar_percent / 5)|round(0, "ceil")|int * 5) %}
+            <div class="bench-bar-row{% if item.main %} bench-main-row{% endif %}">
+              <span class="bench-label">{{ item.chart_label or item.name }}</span>
+              <span class="meter bench-meter" role="img" aria-label="{{ item.chart_label or item.name }}: {{ item.bar_label }}">
+                <span class="meter-fill bench-fill bench-fill-p{{ bar_bucket }}"></span>
+              </span>
+              <span class="bench-value">{{ item.bar_label }}</span>
+            </div>
+          {% endfor %}
+        </div>
+        <table class="data-table bench-table">
+          <thead>
+            <tr>
+              <th>API</th>
+              <th>Compile mode</th>
+              <th>Backend</th>
+              <th>Opt</th>
+              <th>Runner</th>
+              <th>Hot median</th>
+              <th>Slowdown</th>
+              <th>Rows/s</th>
+              <th>Throughput</th>
+              <th>Compile</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in benchmark.implementations %}
+              <tr{% if item.main %} class="bench-main-row"{% endif %}>
+                <td>{{ item.api or "-" }}</td>
+                <td>{{ item.compile_mode or "-" }}</td>
+                <td>{{ item.backend or "-" }}</td>
+                <td>{{ item.opt or "-" }}</td>
+                <td>{{ item.source }}</td>
+                <td>{{ "%.2f us"|format(item.hot_us) }}</td>
+                <td>{% if item.speedup %}{{ "%.2f x"|format(item.speedup) }}{% else %}-{% endif %}</td>
+                <td>{% if item.rows_per_second %}{{ "%.2f M"|format(item.rows_per_second / 1000000.0) }}{% else %}-{% endif %}</td>
+                <td>{% if item.throughput_gbps %}{{ "%.2f GB/s"|format(item.throughput_gbps) }}{% else %}-{% endif %}</td>
+                <td>{% if item.compile_us is not none %}{{ "%.2f us"|format(item.compile_us) }}{% else %}-{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+      {% if benchmark.diagnostics %}
+        <details class="bench-notes">
+          <summary>Benchmark notes</summary>
+          {% for diagnostic in benchmark.diagnostics %}
+            <pre>{{ diagnostic }}</pre>
+          {% endfor %}
+        </details>
+      {% endif %}
+    {% else %}
+      <pre>{{ benchmark.error }}</pre>
+    {% endif %}
+  </details>
+{% endif %}
+
+{% if result and result.ok %}
+  {% for title, text in result.sections.items() %}
+    {% set language = section_language(title, result.arch) %}
+    <details class="panel pane" {% if loop.index <= 2 %}open{% endif %}>
+      <summary>
+        <span>{{ title }}</span>
+        <span class="summary-actions">
+          {% if title == "AsmJit" %}
+            {% set asmjit_note = "AsmJit assembly output is not compatible with gcc/clang because AsmJit output is slightly different." %}
+            <span
+              class="tooltip-badge info-tooltip"
+              tabindex="0"
+              role="img"
+              aria-label="{{ asmjit_note }}"
+              data-tooltip="{{ asmjit_note }}"
+            >i</span>
+          {% endif %}
+          <button type="button" class="button button-ghost button-small copy-code" data-copy-code>Copy</button>
+        </span>
+      </summary>
+      <pre class="code-block {{ language }}"><code class="{{ language }}" tabindex="0">{{ text or "(empty)" }}</code></pre>
+    </details>
+  {% endfor %}
+{% endif %}

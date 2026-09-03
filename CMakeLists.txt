@@ -1,0 +1,51 @@
+cmake_minimum_required(VERSION 3.25)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/simjitVersion.cmake")
+project(simjit VERSION "${SIMJIT_VERSION}" LANGUAGES CXX)
+
+if(NOT DEFINED SIMJIT_DEFAULT_BUILD_DEV_TARGETS)
+  set(SIMJIT_DEFAULT_BUILD_DEV_TARGETS ON)
+endif()
+
+add_subdirectory(src "${CMAKE_CURRENT_BINARY_DIR}/_cmake/src")
+simjit_configure_lto()
+
+if(SIMJIT_DEFAULT_BUILD_DEV_TARGETS AND SIMJIT_ENABLE_SERIALIZATION)
+  set(SIMJIT_DEFAULT_BUILD_CLI ON)
+  set(SIMJIT_DEFAULT_BUILD_FUZZ_TOOLS ON)
+else()
+  set(SIMJIT_DEFAULT_BUILD_CLI OFF)
+  set(SIMJIT_DEFAULT_BUILD_FUZZ_TOOLS OFF)
+endif()
+
+option(SIMJIT_BUILD_CLI "Build simjit CLI" ${SIMJIT_DEFAULT_BUILD_CLI})
+option(SIMJIT_BUILD_TESTS "Build simjit test binary" ${SIMJIT_DEFAULT_BUILD_DEV_TARGETS})
+option(SIMJIT_BUILD_BENCHMARKS "Build simjit benchmark targets" OFF)
+option(SIMJIT_BUILD_FUZZ_TOOLS "Build simjit fuzz tools" ${SIMJIT_DEFAULT_BUILD_FUZZ_TOOLS})
+option(SIMJIT_BUILD_EXPLORER_LLVM_PROBE "Build explorer LLVM probe module" OFF)
+
+if(SIMJIT_BUILD_CLI)
+  if(NOT SIMJIT_ENABLE_SERIALIZATION)
+    message(FATAL_ERROR "SIMJIT_BUILD_CLI=ON requires SIMJIT_ENABLE_SERIALIZATION=ON")
+  endif()
+  add_subdirectory(simjit-cli "${CMAKE_CURRENT_BINARY_DIR}/_cmake/simjit-cli")
+endif()
+
+if(SIMJIT_BUILD_TESTS)
+  add_subdirectory(tests "${CMAKE_CURRENT_BINARY_DIR}/_cmake/tests")
+endif()
+
+if(SIMJIT_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks "${CMAKE_CURRENT_BINARY_DIR}/_cmake/benchmarks")
+endif()
+
+if(SIMJIT_BUILD_FUZZ_TOOLS)
+  add_subdirectory(fuzz "${CMAKE_CURRENT_BINARY_DIR}/_cmake/fuzz")
+endif()
+
+if(SIMJIT_BUILD_EXPLORER_LLVM_PROBE)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/explorer/CMakeLists.txt")
+    add_subdirectory(explorer "${CMAKE_CURRENT_BINARY_DIR}/_cmake/explorer")
+  else()
+    message(FATAL_ERROR "SIMJIT_BUILD_EXPLORER_LLVM_PROBE=ON requires the explorer/ tree")
+  endif()
+endif()

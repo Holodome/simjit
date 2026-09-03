@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#ffffff"/>
+  <rect x="1.5" y="1.5" width="61" height="61" rx="10.5" fill="none" stroke="#d5dde0" stroke-width="3"/>
+  <text
+    x="32"
+    y="39"
+    fill="#18242b"
+    font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+    font-size="28"
+    font-weight="600"
+    letter-spacing="-1"
+    text-anchor="middle"
+  >sj</text>
+</svg>

@@ -1,0 +1,465 @@
+@layer tokens, base, utilities, components;
+
+@layer tokens {
+  :root {
+    color-scheme: light;
+
+    --surface-page: #f4f7f8;
+    --surface: #fbfcfc;
+    --surface-muted: #f7fafb;
+    --surface-control: #fbfcfc;
+    --border: #d5dde0;
+    --text: #2c3438;
+    --text-muted: #657378;
+    --accent: #3f6f8e;
+    --accent-hover: #345d76;
+    --accent-soft: #eef6f9;
+    --accent-ink: #ffffff;
+    --danger: #ad5a50;
+    --danger-hover: #9f5149;
+    --danger-ink: #fffaf7;
+    --danger-shadow: rgba(173, 90, 80, 0.22);
+    --focus: #9fc4d6;
+    --shadow: color-mix(in srgb, var(--text) 18%, transparent);
+    --shadow-strong: color-mix(in srgb, var(--text) 24%, transparent);
+    --bench-track: #e5ecef;
+    --bench-bar-a: #6ea4bc;
+    --bench-bar-b: #7cae93;
+    --error: #7b4f55;
+    --error-border: #d9c4c7;
+    --error-bg: #f6eeee;
+
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 24px;
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --control-height: 34px;
+    --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+    --syntax-comment: #78848a;
+    --syntax-keyword: #3f6f8e;
+    --syntax-type: #4f7b70;
+    --syntax-title: #355f79;
+    --syntax-string: #557a5f;
+    --syntax-number: #66727a;
+    --syntax-meta: #667387;
+    --syntax-strong: #2f3437;
+    --syntax-addition: #4d7658;
+    --syntax-addition-bg: #eef7f1;
+    --syntax-deletion: #7a5e64;
+    --syntax-deletion-bg: #f6eff1;
+
+    --bg: var(--surface-page);
+    --panel: var(--surface);
+    --code-bg: var(--surface-muted);
+    --control-bg: var(--surface-control);
+    --ink: var(--text);
+    --muted: var(--text-muted);
+    --button-ink: var(--accent-ink);
+    --benchmark-action: var(--danger);
+    --benchmark-action-hover: var(--danger-hover);
+    --benchmark-action-ink: var(--danger-ink);
+    --benchmark-action-shadow: var(--danger-shadow);
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+
+    --surface-page: #111416;
+    --surface: #171b1f;
+    --surface-muted: #101316;
+    --surface-control: #11161a;
+    --border: #333b42;
+    --text: #e6ecef;
+    --text-muted: #99a7ae;
+    --accent: #8ccfe7;
+    --accent-hover: #b6e3f0;
+    --accent-soft: #18313a;
+    --accent-ink: #102026;
+    --danger: #e3aa8c;
+    --danger-hover: #efb99b;
+    --danger-ink: #20140e;
+    --danger-shadow: rgba(227, 170, 140, 0.18);
+    --focus: #67adc6;
+    --bench-track: #263038;
+    --bench-bar-a: #76b9d1;
+    --bench-bar-b: #7dbf9b;
+    --error: #f0b9c0;
+    --error-border: #6f444b;
+    --error-bg: #291b20;
+
+    --syntax-comment: #7f8c95;
+    --syntax-keyword: #8ccfe7;
+    --syntax-type: #93c8ad;
+    --syntax-title: #a7d7ea;
+    --syntax-string: #9bc99f;
+    --syntax-number: #c0b8f2;
+    --syntax-meta: #9ba8d7;
+    --syntax-strong: #e8eef1;
+    --syntax-addition: #9bd3a6;
+    --syntax-addition-bg: #14291c;
+    --syntax-deletion: #e4a4ad;
+    --syntax-deletion-bg: #2c171d;
+  }
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 24%, transparent);
+    color: var(--text);
+  }
+
+  body {
+    margin: 0;
+    background: var(--surface-page);
+    color: var(--text);
+    font: 14px/1.45 var(--font-sans);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  p {
+    margin-top: 0;
+  }
+
+  a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  a:hover,
+  a:focus-visible {
+    color: var(--accent-hover);
+  }
+
+  code {
+    font: inherit;
+  }
+
+  pre,
+  pre code.hljs {
+    margin: 0;
+    padding: var(--space-3);
+    overflow: auto;
+    color: var(--text);
+    font: 12px/1.45 var(--font-mono);
+    background: var(--surface-muted);
+  }
+
+  pre[class*="language-"] {
+    padding: 0;
+  }
+
+  pre code.hljs {
+    display: block;
+    overflow-x: auto;
+    padding: var(--space-3);
+  }
+
+  pre code:focus {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
+
+  pre::selection,
+  pre code::selection,
+  pre code *::selection {
+    background: color-mix(in srgb, var(--accent) 26%, transparent);
+    color: var(--text);
+  }
+
+  label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+  }
+
+  input,
+  select,
+  .control {
+    width: 86px;
+    min-height: 32px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface-control);
+    color: var(--text);
+    font: inherit;
+  }
+
+  select,
+  select.control {
+    width: auto;
+    max-width: 220px;
+  }
+
+  button,
+  .button {
+    min-height: var(--control-height);
+    border: 0;
+    border-radius: var(--radius-md);
+    padding: 8px 12px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font: inherit;
+    font-weight: 650;
+    cursor: pointer;
+  }
+
+  button:hover:not(:disabled),
+  .button:hover:not(:disabled) {
+    background: var(--accent-hover);
+    color: var(--accent-ink);
+  }
+
+  button:disabled,
+  .button:disabled {
+    cursor: not-allowed;
+    opacity: 0.65;
+  }
+
+  button:focus-visible,
+  .button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  .control:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  dialog::backdrop {
+    background: color-mix(in srgb, #101820 48%, transparent);
+    backdrop-filter: blur(4px);
+  }
+}
+
+@layer utilities {
+  .cluster {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .split {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  .stack-sm {
+    display: grid;
+    gap: var(--space-2);
+  }
+
+  .stack-md {
+    display: grid;
+    gap: var(--space-3);
+  }
+
+  .muted {
+    color: var(--text-muted);
+  }
+}
+
+@layer components {
+  .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+  }
+
+  .button-primary {
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: var(--accent-ink);
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+
+  .button-primary:hover:not(:disabled) {
+    border-color: var(--accent-hover);
+    background: var(--accent-hover);
+    color: var(--accent-ink);
+  }
+
+  .button-secondary {
+    border: 1px solid var(--border);
+    background: var(--surface-control);
+    color: var(--text);
+    box-shadow: none;
+  }
+
+  .button-secondary:hover:not(:disabled),
+  .button-secondary:focus-visible {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+  }
+
+  .button-ghost {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--accent);
+  }
+
+  .button-ghost:hover:not(:disabled),
+  .button-ghost:focus-visible {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+  }
+
+  .button-danger {
+    background: var(--danger);
+    color: var(--danger-ink);
+    font-weight: 700;
+    box-shadow: 0 5px 14px var(--danger-shadow);
+  }
+
+  .button-danger:hover:not(:disabled) {
+    background: var(--danger-hover);
+    color: var(--danger-ink);
+  }
+
+  .button-small {
+    min-height: 30px;
+    padding: 5px 8px;
+    font-size: 12px;
+  }
+
+  .panel,
+  .card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+  }
+
+  .panel {
+    overflow: hidden;
+  }
+
+  .card {
+    min-width: 0;
+  }
+
+  .diagnostic {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+  }
+
+  .diagnostic.error {
+    color: var(--error);
+    border-color: var(--error-border);
+    background: var(--error-bg);
+  }
+
+  .dialog {
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 28px 80px var(--shadow-strong);
+    overflow: hidden;
+  }
+
+  .dialog-shell {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    max-height: inherit;
+  }
+
+  .dialog-header {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-4);
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 88%, var(--accent-soft));
+  }
+
+  .dialog-eyebrow {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .dialog-body {
+    overflow: auto;
+  }
+
+  .code-block {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface-muted);
+  }
+
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  .data-table th,
+  .data-table td {
+    padding: 7px 8px;
+    border-top: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  .data-table th {
+    color: var(--text-muted);
+    font-weight: 700;
+  }
+
+  .meter {
+    position: relative;
+    display: block;
+    width: 100%;
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .meter-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    display: block;
+    width: 0;
+    border-radius: 999px;
+  }
+
+  .tooltip-badge {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+    border: 1px solid var(--border);
+    background: var(--surface-control);
+    color: var(--text-muted);
+    cursor: help;
+  }
+
+  .tooltip-badge:hover,
+  .tooltip-badge:focus-visible {
+    border-color: var(--accent);
+    color: var(--accent-hover);
+    outline: none;
+  }
+}

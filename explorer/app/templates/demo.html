@@ -1,0 +1,570 @@
+{% macro benchmark_info(environment) -%}
+<div class="benchmark-info" tabindex="0">
+    <span class="benchmark-info-chip">Benchmark host</span>
+    <div class="benchmark-info-card" role="tooltip">
+        <strong>{{ environment["title"] }}</strong>
+        {% for item in environment["items"] %}
+        <span>{{ item }}</span>
+        {% endfor %} {% for section in environment.get("sections", []) %}
+        <strong>{{ section["title"] }}</strong>
+        {% for item in section["items"] %}
+        <span>{{ item }}</span>
+        {% endfor %} {% endfor %}
+    </div>
+</div>
+{%- endmacro %} {% macro project_link(href, label) -%}
+<a class="project-link" href="{{ href }}" target="_blank" rel="noreferrer"
+    >{{ label }}</a
+>
+{%- endmacro %}
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Simjit Demo</title>
+        <link
+            rel="icon"
+            type="image/svg+xml"
+            href="/favicon.svg?v={{ static_version }}"
+        />
+        <link
+            rel="shortcut icon"
+            type="image/svg+xml"
+            href="/favicon.svg?v={{ static_version }}"
+        />
+        <script src="{{ app_base }}/static/theme-init.js?v={{ static_version }}"></script>
+        <link
+            rel="stylesheet"
+            href="{{ app_base }}/static/vendor/highlightjs/simjit-neutral.css?v={{ static_version }}"
+        />
+        <link
+            rel="stylesheet"
+            href="{{ app_base }}/static/system.css?v={{ static_version }}"
+        />
+        <link rel="stylesheet" href="{{ app_base }}/static/demo.css?v={{ static_version }}" />
+        <script
+            src="{{ app_base }}/static/vendor/highlightjs/highlight.min.js"
+            defer
+        ></script>
+        <script
+            src="{{ app_base }}/static/simjit-languages.js?v={{ static_version }}"
+            defer
+        ></script>
+        <script
+            src="{{ app_base }}/static/demo.js?v={{ static_version }}"
+            defer
+        ></script>
+    </head>
+    <body class="demo-page">
+        <header class="demo-nav">
+            <a
+                class="demo-brand"
+                href="{{ demo_home_href }}"
+                aria-current="page"
+            >
+                <span>Simjit demo</span>
+            </a>
+            <nav class="demo-links" aria-label="Demo navigation">
+                <a class="button button-primary button-small cross-page-link" href="{{ app_base }}/">Explorer</a>
+                <a class="button button-secondary button-small" href="#python">Python library</a>
+                <a class="button button-secondary button-small" href="#cpp">C++ library</a>
+                <a class="button button-secondary button-small" href="#scope">Scope</a>
+                <button
+                    type="button"
+                    class="button button-secondary button-small theme-toggle"
+                    data-theme-toggle
+                    aria-label="Switch color theme"
+                >
+                    Theme
+                </button>
+            </nav>
+        </header>
+
+        <main>
+            <section class="demo-hero">
+                <div class="demo-hero-copy">
+                    <h1>{{ hero_title }}</h1>
+                    <p class="demo-hero-description">{{ hero_description }}</p>
+                </div>
+                <div
+                    class="demo-hero-visual pipeline-diagram"
+                    aria-label="Simjit API and vectorizer pipeline"
+                >
+                    {% include "demo_pipeline.svg" %}
+                </div>
+            </section>
+
+            <section id="python" class="demo-band python-band">
+                <div class="demo-section-heading">
+                    <h2>
+                        <span class="section-title-prefix"
+                            >Python library:</span
+                        >
+                        column expressions with nullable Arrow semantics.
+                    </h2>
+                    <p>
+                        The Simjit Python library has native support for {{
+                        project_link(project_links.numpy, "NumPy") }} and {{
+                        project_link(project_links.pyarrow, "PyArrow") }}
+                        arrays, and can also accept objects exposing the {{
+                        project_link(project_links.python_buffer, "Python buffer
+                        API") }}. It operates directly over provided buffer
+                        memory.
+                    </p>
+                    <p>
+                        Nullable Arrow support is part of the expression
+                        semantics: filters, projections, and aggregations can
+                        handle nulls through the validity bitmap, without
+                        separate null-checking code.
+                    </p>
+                </div>
+
+                <div class="split-grid">
+                    <article class="panel code-card">
+                        <header>
+                            <strong>Python expression API</strong>
+                        </header>
+                        <pre><code class="language-python">{{ readme_code }}</code></pre>
+                    </article>
+
+                    <div class="use-guidance" aria-label="When to use Simjit">
+                        {% for item in python_panel.use_guidance %}
+                        <article>
+                            <strong>{{ item.title }}</strong>
+                            <p>{{ item.text }}</p>
+                        </article>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div class="panel chart-panel">
+                    <div class="chart-heading">
+                        <div>
+                            <h3>
+                                Python library benchmark: nullable Arrow
+                                workload
+                            </h3>
+                            <p>
+                                Cells show hot-execution speedup for the same
+                                nullable workloads, with separate baselines for
+                                handwritten Numba kernels and {{
+                                project_link(project_links.pyarrow_compute,
+                                "pyarrow.compute") }}.
+                            </p>
+                        </div>
+                        <div class="chart-heading-actions">
+                            <div
+                                class="baseline-toggle"
+                                data-python-baseline-toggle
+                                role="group"
+                                aria-label="Python benchmark baseline"
+                            >
+                                {% for baseline in python_panel.baselines %}
+                                <button
+                                    type="button"
+                                    data-python-baseline="{{ baseline.id }}"
+                                    data-python-baseline-label="{{ baseline.axis_label }}"
+                                    aria-pressed="{{ 'true' if loop.first else 'false' }}"
+                                >
+                                    {{ baseline.label }}
+                                </button>
+                                {% endfor %}
+                            </div>
+                            <div
+                                class="gradient-legend"
+                                aria-label="Speedup color scale"
+                            >
+                                <span data-python-baseline-axis>Numba</span>
+                                <i aria-hidden="true"></i>
+                                <span>Simjit</span>
+                            </div>
+                            {{ benchmark_info(python_benchmark_environment) }}
+                        </div>
+                    </div>
+                    <div
+                        class="heatmap python-heatmap"
+                        role="table"
+                        aria-label="Python benchmark heatmap"
+                    >
+                        <div class="heatmap-corner" role="columnheader">
+                            Workload
+                        </div>
+                        {% for column in python_panel.row_labels %}
+                        <div class="heatmap-column" role="columnheader">
+                            <strong>{{ column.label }}</strong>
+                            {% if column.note %}
+                            <small>{{ column.note }}</small>
+                            {% endif %}
+                        </div>
+                        {% endfor %} {% for row in python_panel.heatmap %}
+                        <div class="heatmap-row-label" role="rowheader">
+                            <strong>{{ row.label }}</strong>
+                            <button
+                                class="button button-secondary button-small source-button small"
+                                type="button"
+                                data-source-template="source-python-{{ row.id }}"
+                                data-source-title="{{ row.label }} benchmark sources"
+                            >
+                                Show sources
+                            </button>
+                        </div>
+                        {% for cell in row.cells %}
+                        <div
+                            class="heat-cell speed-{{ cell.speed_class }}"
+                            role="cell"
+                            data-python-heat-cell
+                            data-numba-speed-class="{{ cell.baselines.numba.speed_class }}"
+                            data-numba-speedup-label="{{ cell.baselines.numba.speedup_label }}"
+                            data-numba-time-label="{{ cell.baselines.numba.time_label }}"
+                            data-pyarrow-speed-class="{{ cell.baselines.pyarrow.speed_class }}"
+                            data-pyarrow-speedup-label="{{ cell.baselines.pyarrow.speedup_label }}"
+                            data-pyarrow-time-label="{{ cell.baselines.pyarrow.time_label }}"
+                        >
+                            <strong data-heat-speedup
+                                >{{ cell.speedup_label }}</strong
+                            >
+                            <span data-heat-time>{{ cell.time_label }}</span>
+                        </div>
+                        {% endfor %} {% endfor %}
+                    </div>
+                </div>
+            </section>
+
+            <section id="cpp" class="demo-band cpp-band">
+                <div class="demo-section-heading">
+                    <h2>
+                        <span class="section-title-prefix">C++ library:</span>
+                        pointer-based expression kernels for existing engines.
+                    </h2>
+                    <p>
+                        C++ code builds a small expression, passes typed
+                        pointers and row counts, then calls the compiled
+                        function.
+                    </p>
+                </div>
+
+                <div class="panel comparison-panel">
+                    <div class="chart-heading">
+                        <div>
+                            <h3>
+                                Comparison with {{
+                                project_link(project_links.arrow_compute, "Arrow
+                                Compute") }} and {{
+                                project_link(project_links.gandiva, "Gandiva")
+                                }}
+                            </h3>
+                            <p>
+                                4096-row projection and filter kernels. Bars
+                                show throughput relative to Arrow Compute;
+                                higher is better.
+                            </p>
+                        </div>
+                        {{
+                        benchmark_info(cpp_panel.engine_benchmark_environment)
+                        }}
+                    </div>
+                    <div
+                        class="comparison-chart"
+                        aria-label="Arrow Compute, Gandiva, and Simjit execution time bars"
+                    >
+                        {% for item in cpp_panel.engine_comparisons %}
+                        <article
+                            class="comparison-card{% if item.info %} has-info{% endif %}"
+                        >
+                            <div class="comparison-card-heading">
+                                <h4>{{ item.name }}</h4>
+                                <span>{{ item.workload }}</span>
+                                <button
+                                    class="button button-secondary button-small source-button small"
+                                    type="button"
+                                    data-source-template="source-engine-{{ item.id }}"
+                                    data-source-title="{{ item.name }} comparison sources"
+                                >
+                                    Show sources
+                                </button>
+                            </div>
+                            <div class="comparison-bars">
+                                {% for bar in item.bars %}
+                                <div class="comparison-bar-row">
+                                    <span class="comparison-bar-label"
+                                        >{{ bar.label }}</span
+                                    >
+                                    <span
+                                        class="meter comparison-meter {{ bar.kind }}"
+                                        role="img"
+                                        aria-label="{{ bar.label }}: {{ bar.throughput }}"
+                                    >
+                                        <span
+                                            class="meter-fill comparison-meter-fill comparison-meter-fill-w{{ bar.width }}"
+                                        ></span>
+                                    </span>
+                                    <strong>{{ bar.throughput }}</strong>
+                                    <small>{{ bar.time }}</small>
+                                </div>
+                                {% endfor %}
+                            </div>
+                            <p>{{ item.note }}</p>
+                            {% if item.info %}
+                            <div
+                                class="comparison-info"
+                                tabindex="0"
+                                aria-label="{{ item.info_title }}"
+                            >
+                                <span class="comparison-info-chip"
+                                    >Why 35x?</span
+                                >
+                                <div
+                                    class="comparison-info-card"
+                                    role="tooltip"
+                                >
+                                    {% for line in item.info %}
+                                    <p>{{ line }}</p>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            {% endif %}
+                        </article>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div class="engine-code-block">
+                    <article class="panel code-card">
+                        <header>
+                            <strong>Integration with vectorized engines</strong>
+                        </header>
+                        <pre><code class="language-cpp">{{ cpp_engine_code }}</code></pre>
+                    </article>
+                    <div class="engine-note">
+                        <h4>Pointer-based expression calls</h4>
+                        <p>
+                            Simjit takes typed input and output arrays as
+                            pointers, so an engine can keep its own chunks,
+                            vectors, validity buffers, and aggregation state.
+                        </p>
+                        <p>
+                            The API describes the expression as a dataflow; the
+                            surrounding vectorized processing system owns the
+                            data layout and decides where to call the compiled
+                            function.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="demo-subsection-heading">
+                    <h3>
+                        <span class="section-title-prefix"
+                            >DuckDB proof of concept:</span
+                        >
+                        A vectorized engine can hand expression fragments to
+                        Simjit.
+                    </h3>
+                    <p>
+                        DuckDB still handles scanning, chunking, and aggregation
+                        state; Simjit replaces selected expression-fragment
+                        evaluation.
+                    </p>
+                    <p>{{ cpp_panel.duckdb_caveat }}</p>
+                </div>
+
+                <article class="panel fusion-panel">
+                    <div class="fusion-copy">
+                        <h3>
+                            <span class="section-title-prefix"
+                                >Loop fusion:</span
+                            >
+                            {{ cpp_panel.fusion_evidence.title }}
+                        </h3>
+                        <p>{{ cpp_panel.fusion_evidence.text }}</p>
+                    </div>
+                    <div
+                        class="fusion-diagram"
+                        aria-label="Loop fusion before and after diagram"
+                    >
+                        {% include "demo_fusion.svg" %}
+                    </div>
+                </article>
+
+                <div class="panel chart-panel fragment-panel">
+                    <div class="chart-heading">
+                        <div>
+                            <h3>
+                                {{ project_link(project_links.duckdb, "DuckDB")
+                                }} fragment benchmark
+                            </h3>
+                            <p>
+                                10M-row fragments with matching DuckDB SQL
+                                baselines and Simjit extension calls on x86 and
+                                Arm hosts. Results range from a 0.88x control
+                                case to 11.91x on nullable filtered aggregates,
+                                with compile time below 50 µs in the benchmarked
+                                fragments.
+                            </p>
+                        </div>
+                        {{ benchmark_info(duckdb_benchmark_environment) }}
+                    </div>
+
+                    <div
+                        class="fragment-table"
+                        role="table"
+                        aria-label="DuckDB POC fragment speedups"
+                    >
+                        <div class="fragment-corner" role="columnheader">
+                            Fragment
+                        </div>
+                        <div class="fragment-column" role="columnheader">
+                            X86
+                        </div>
+                        <div class="fragment-column" role="columnheader">
+                            Arm
+                        </div>
+                        {% for row in cpp_panel.rows %}
+                        <div class="fragment-row-label" role="rowheader">
+                            <strong>{{ row.label }}</strong>
+                            <span>{{ row.note }}</span>
+                            <button
+                                class="button button-secondary button-small source-button small"
+                                type="button"
+                                data-source-template="source-duckdb-{{ row.id }}"
+                                data-source-title="{{ row.label }} sources"
+                            >
+                                Show sources
+                            </button>
+                        </div>
+                        {% for platform in row.platforms %}
+                        <div
+                            class="fragment-cell speed-{{ platform.speed_class }}"
+                            role="cell"
+                        >
+                            <strong>{{ platform.speedup_label }}</strong>
+                            <span>{{ platform.timing_label }}</span>
+                        </div>
+                        {% endfor %} {% endfor %}
+                    </div>
+                </div>
+            </section>
+
+            <section id="scope" class="demo-band scope-band">
+                <div class="demo-section-heading">
+                    <h2>
+                        <span class="section-title-prefix"
+                            >Scope and positioning:</span
+                        >
+                        A compact compiler for vectorized expression evaluation.
+                    </h2>
+                    <p>
+                        Unlike Hyper and Umbra, which compile whole query plans,
+                        Simjit compiles individual expression fragments: a
+                        filter, a projection, or an aggregate expression. The
+                        surrounding engine keeps its planner, storage, and
+                        scheduler.
+                    </p>
+                </div>
+                <div class="scope-grid">
+                    {% for group in scope_panel.groups %}
+                    <article class="card scope-card">
+                        <h3>{{ group["name"] }}</h3>
+                        <ul>
+                            {% for item in group["items"] %}
+                            <li>{{ item }}</li>
+                            {% endfor %}
+                        </ul>
+                    </article>
+                    {% endfor %}
+                </div>
+            </section>
+        </main>
+
+        <footer class="demo-footer">
+            <span>Simjit 2024-2026 Ilya Vinogradov.</span>
+            <span>Active development.</span>
+            <span
+                >Contact
+                <a href="mailto:holodmoose@gmail.com">holodmoose@gmail.com</a>
+                or
+                <a href="https://t.me/holodome" target="_blank" rel="noreferrer"
+                    >Telegram @holodome</a
+                >.</span
+            >
+        </footer>
+
+        <dialog
+            class="dialog source-modal"
+            data-source-modal
+            aria-labelledby="source-modal-title"
+        >
+            <div class="dialog-shell source-modal-shell">
+                <header class="dialog-header source-modal-header">
+                    <div>
+                        <span class="dialog-eyebrow">Source comparison</span>
+                        <h2 id="source-modal-title" data-source-title>
+                            Sources
+                        </h2>
+                    </div>
+                    <button
+                        class="button button-secondary source-button"
+                        type="button"
+                        data-source-close
+                    >
+                        Close
+                    </button>
+                </header>
+                <div class="dialog-body source-modal-body" data-source-body></div>
+            </div>
+        </dialog>
+
+        {% for row in python_panel.heatmap %}
+        <template id="source-python-{{ row.id }}">
+            <div class="source-grid python-source-grid source-grid-stacked">
+                <div class="source-block">
+                    <span>Simjit Python</span>
+                    <pre><code class="language-python">{{ row.simjit_source }}</code></pre>
+                </div>
+                <div class="source-block">
+                    <span>Numba</span>
+                    <pre><code class="language-python">{{ row.numba_source }}</code></pre>
+                </div>
+                <div class="source-block">
+                    <span>pyarrow.compute</span>
+                    <pre><code class="language-python">{{ row.pyarrow_source }}</code></pre>
+                </div>
+            </div>
+        </template>
+        {% endfor %} {% for row in cpp_panel.rows %}
+        <template id="source-duckdb-{{ row.id }}">
+            <div class="source-grid duckdb-source-grid">
+                <div class="source-block">
+                    <span>DuckDB SQL baseline</span>
+                    <pre><code class="language-sql">{{ row.sql }}</code></pre>
+                </div>
+                <div class="source-block">
+                    <span>DuckDB SQL using Simjit</span>
+                    <pre><code class="language-sql">{{ row.simjit_sql }}</code></pre>
+                </div>
+                <div class="source-block source-block-wide">
+                    <span>Simjit extension source</span>
+                    <pre><code class="language-cpp">{{ row.builder }}</code></pre>
+                </div>
+            </div>
+        </template>
+        {% endfor %} {% for item in cpp_panel.engine_comparisons %}
+        <template id="source-engine-{{ item.id }}">
+            <div class="source-grid engine-source-grid">
+                <div class="source-block">
+                    <span>Arrow Compute</span>
+                    <pre><code class="language-cpp">{{ item.sources.arrow_compute }}</code></pre>
+                </div>
+                <div class="source-block">
+                    <span>Gandiva</span>
+                    <pre><code class="language-cpp">{{ item.sources.gandiva }}</code></pre>
+                </div>
+                <div class="source-block">
+                    <span>Simjit</span>
+                    <pre><code class="language-cpp">{{ item.sources.simjit }}</code></pre>
+                </div>
+            </div>
+        </template>
+        {% endfor %}
+    </body>
+</html>

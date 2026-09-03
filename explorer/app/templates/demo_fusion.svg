@@ -1,0 +1,128 @@
+<svg
+    class="fusion-svg"
+    viewBox="8 8 904 416"
+    role="img"
+    aria-labelledby="fusion-svg-title fusion-svg-desc"
+>
+    <title id="fusion-svg-title">
+        Loop fusion for {{ cpp_panel.fusion_evidence.expression }}
+    </title>
+    <desc id="fusion-svg-desc">
+        Before fusion, vectorized primitives materialize temporary vectors.
+        After fusion, Simjit runs the same expression as one compiled vector
+        primitive without materialized temporaries.
+    </desc>
+    <defs>
+        <marker
+            id="fusion-arrow"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="5"
+            markerHeight="5"
+            orient="auto-start-reverse"
+        >
+            <path class="fusion-arrow-head" d="M 0 0 L 10 5 L 0 10 z"></path>
+        </marker>
+        <marker
+            id="fusion-collapse-arrow"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="5"
+            markerHeight="5"
+            orient="auto-start-reverse"
+        >
+            <path
+                class="fusion-collapse-arrow-head"
+                d="M 0 0 L 10 5 L 0 10 z"
+            ></path>
+        </marker>
+    </defs>
+
+    <rect class="fusion-card" x="20" y="20" width="880" height="199" rx="14"></rect>
+    <text class="fusion-svg-heading" x="40" y="50">
+        Before: temporaries interrupt the dataflow
+    </text>
+    <rect class="fusion-temp-region" x="316" y="72" width="432" height="84" rx="14"></rect>
+    <text class="fusion-region-label" x="532" y="89">
+        materialized temporaries
+    </text>
+
+    <rect class="fusion-box fusion-load-box" x="40" y="86" width="112" height="36" rx="8"></rect>
+    <text class="fusion-box-kind" x="96" y="98">INPUT</text>
+    <text class="fusion-box-value" x="96" y="114">discount</text>
+
+    <rect class="fusion-box" x="40" y="150" width="112" height="36" rx="8"></rect>
+    <text class="fusion-box-kind" x="96" y="162">CONST</text>
+    <text class="fusion-box-value" x="96" y="178">1.0</text>
+
+    <rect class="fusion-op-box" x="180" y="98" width="120" height="50" rx="8"></rect>
+    <text class="fusion-box-kind" x="240" y="114">OP</text>
+    <text class="fusion-box-value" x="240" y="134">1.0 - discount</text>
+
+    <rect class="fusion-temp-box" x="332" y="101" width="112" height="42" rx="8"></rect>
+    <text class="fusion-box-kind" x="388" y="114">TEMP</text>
+    <text class="fusion-box-value" x="388" y="132">disc</text>
+
+    <rect class="fusion-box fusion-load-box" x="332" y="163" width="112" height="36" rx="8"></rect>
+    <text class="fusion-box-kind" x="388" y="175">INPUT</text>
+    <text class="fusion-box-value" x="388" y="191">price</text>
+
+    <rect class="fusion-op-box" x="476" y="98" width="120" height="50" rx="8"></rect>
+    <text class="fusion-box-kind" x="536" y="114">OP</text>
+    <text class="fusion-box-value" x="536" y="134">price * disc</text>
+
+    <rect class="fusion-temp-box" x="628" y="101" width="112" height="42" rx="8"></rect>
+    <text class="fusion-box-kind" x="684" y="114">TEMP</text>
+    <text class="fusion-box-value" x="684" y="132">revenue</text>
+
+    <rect class="fusion-op-box" x="760" y="98" width="120" height="50" rx="8"></rect>
+    <text class="fusion-box-kind" x="820" y="114">OP</text>
+    <text class="fusion-box-value" x="820" y="134">sum</text>
+
+    <rect class="fusion-output-box" x="760" y="163" width="120" height="36" rx="8"></rect>
+    <text class="fusion-box-kind" x="820" y="175">OUTPUT</text>
+    <text class="fusion-box-value" x="820" y="191">sum_revenue</text>
+
+    <path class="fusion-arrow-line-secondary" d="M152 104 H180"></path>
+    <path class="fusion-arrow-line-secondary" d="M152 168 C160 168 160 134 180 134"></path>
+    <path class="fusion-arrow-line-primary" d="M300 123 H332"></path>
+    <path class="fusion-arrow-line-primary" d="M444 122 H476"></path>
+    <path class="fusion-arrow-line-secondary" d="M444 181 C452 181 452 132 476 132"></path>
+    <path class="fusion-arrow-line-primary" d="M596 123 H628"></path>
+    <path class="fusion-arrow-line-primary" d="M740 122 H760"></path>
+    <path class="fusion-arrow-line-secondary" d="M820 148 V163"></path>
+
+    <path class="fusion-collapse-arrow" d="M460 219 V230"></path>
+    <path class="fusion-collapse-arrow" d="M460 254 V266"></path>
+    <rect class="fusion-transition-chip" x="398" y="230" width="124" height="24" rx="12"></rect>
+    <text class="fusion-transition-text" x="460" y="242">loop fusion</text>
+
+    <rect class="fusion-card" x="180" y="266" width="560" height="146" rx="14"></rect>
+    <text class="fusion-svg-heading" x="202" y="296">
+        After: fused dataflow through one primitive
+    </text>
+
+    <rect class="fusion-box fusion-load-box" x="202" y="314" width="104" height="36" rx="8"></rect>
+    <text class="fusion-box-kind" x="254" y="326">INPUT</text>
+    <text class="fusion-box-value" x="254" y="342">discount</text>
+
+    <rect class="fusion-box fusion-load-box" x="202" y="356" width="104" height="36" rx="8"></rect>
+    <text class="fusion-box-kind" x="254" y="368">INPUT</text>
+    <text class="fusion-box-value" x="254" y="384">price</text>
+
+    <rect class="fusion-kernel-box" x="340" y="317" width="240" height="72" rx="12"></rect>
+    <text class="fusion-kernel-value" x="460" y="350">
+        {{ cpp_panel.fusion_evidence.expression }}
+    </text>
+    <text class="fusion-kernel-label" x="460" y="372">SIMD</text>
+
+    <rect class="fusion-output-box" x="614" y="331" width="104" height="44" rx="8"></rect>
+    <text class="fusion-box-kind" x="666" y="346">OUTPUT</text>
+    <text class="fusion-box-value" x="666" y="364">sum_revenue</text>
+
+    <path class="fusion-arrow-line-secondary" d="M306 332 H340"></path>
+    <path class="fusion-arrow-line-secondary" d="M306 374 C314 374 314 356 340 356"></path>
+    <path class="fusion-arrow-line-primary" d="M580 353 H614"></path>
+</svg>

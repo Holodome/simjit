@@ -1,0 +1,148 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "binaryDir": "${sourceDir}/build/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_COLOR_DIAGNOSTICS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "SIMJIT_BUILD_CLI": "ON",
+        "SIMJIT_BUILD_TESTS": "ON",
+        "SIMJIT_ENABLE_SERIALIZATION": "ON",
+        "SIMJIT_BUILD_BENCHMARKS": "OFF",
+        "SIMJIT_BUILD_FUZZ_TOOLS": "OFF",
+        "SIMJIT_BUILD_EXPLORER_LLVM_PROBE": "OFF",
+        "SIMJIT_ENABLE_LTO": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_COLOR_DIAGNOSTICS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "SIMJIT_BUILD_CLI": "ON",
+        "SIMJIT_BUILD_TESTS": "OFF",
+        "SIMJIT_ENABLE_SERIALIZATION": "ON",
+        "SIMJIT_BUILD_BENCHMARKS": "OFF",
+        "SIMJIT_BUILD_FUZZ_TOOLS": "OFF",
+        "SIMJIT_BUILD_EXPLORER_LLVM_PROBE": "OFF",
+        "SIMJIT_ENABLE_LTO": "ON"
+      }
+    },
+    {
+      "name": "reldebug",
+      "displayName": "RelWithDebInfo",
+      "binaryDir": "${sourceDir}/build/reldebug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_COLOR_DIAGNOSTICS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "SIMJIT_BUILD_CLI": "ON",
+        "SIMJIT_BUILD_TESTS": "ON",
+        "SIMJIT_ENABLE_SERIALIZATION": "ON",
+        "SIMJIT_BUILD_BENCHMARKS": "OFF",
+        "SIMJIT_BUILD_FUZZ_TOOLS": "OFF",
+        "SIMJIT_BUILD_EXPLORER_LLVM_PROBE": "OFF",
+        "SIMJIT_ENABLE_LTO": "ON"
+      }
+    },
+    {
+      "name": "reldebug-benchmarks",
+      "displayName": "RelWithDebInfo With Benchmarks",
+      "inherits": "reldebug",
+      "cacheVariables": {
+        "SIMJIT_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "debug-fuzz-tools",
+      "displayName": "Debug With Fuzz Tools",
+      "inherits": "debug",
+      "cacheVariables": {
+        "SIMJIT_BUILD_FUZZ_TOOLS": "ON"
+      }
+    },
+    {
+      "name": "explorer-probe",
+      "displayName": "Explorer LLVM Probe",
+      "binaryDir": "${sourceDir}/build/explorer-probe",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_COLOR_DIAGNOSTICS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "SIMJIT_BUILD_CLI": "OFF",
+        "SIMJIT_BUILD_TESTS": "OFF",
+        "SIMJIT_BUILD_BENCHMARKS": "OFF",
+        "SIMJIT_BUILD_FUZZ_TOOLS": "OFF",
+        "SIMJIT_BUILD_EXPLORER_LLVM_PROBE": "ON",
+        "SIMJIT_ENABLE_SERIALIZATION": "ON",
+        "SIMJIT_ENABLE_LTO": "OFF",
+        "SIMJIT_EXPLORER_PROBE_OUTPUT_DIR": "${sourceDir}/build/python-dev"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug-cli",
+      "configurePreset": "debug",
+      "targets": [
+        "simjit-cli"
+      ]
+    },
+    {
+      "name": "debug-test",
+      "configurePreset": "debug",
+      "targets": [
+        "test"
+      ]
+    },
+    {
+      "name": "debug-fuzz-tools",
+      "configurePreset": "debug-fuzz-tools",
+      "targets": [
+        "simjit-fuzz-tool"
+      ]
+    },
+    {
+      "name": "release-cli",
+      "configurePreset": "release",
+      "targets": [
+        "simjit-cli"
+      ]
+    },
+    {
+      "name": "reldebug-lib",
+      "configurePreset": "reldebug",
+      "targets": [
+        "simjit"
+      ]
+    },
+    {
+      "name": "reldebug-test",
+      "configurePreset": "reldebug",
+      "targets": [
+        "test"
+      ]
+    },
+    {
+      "name": "reldebug-jit-bench",
+      "configurePreset": "reldebug-benchmarks",
+      "targets": [
+        "jit-bench"
+      ]
+    },
+    {
+      "name": "explorer-probe",
+      "configurePreset": "explorer-probe",
+      "targets": [
+        "explorer_llvm_probe"
+      ]
+    }
+  ]
+}

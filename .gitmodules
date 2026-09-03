@@ -1,0 +1,12 @@
+[submodule "thirdparty/asmjit"]
+	path = thirdparty/asmjit
+	url = https://github.com/asmjit/asmjit.git
+[submodule "thirdparty/pybind11"]
+	path = thirdparty/pybind11
+	url = https://github.com/pybind/pybind11.git
+[submodule "thirdparty/libdivide"]
+	path = thirdparty/libdivide
+	url = https://github.com/ridiculousfish/libdivide.git
+[submodule "thirdparty/headerlisp"]
+	path = thirdparty/headerlisp
+	url = https://github.com/holodome/headerlisp.git

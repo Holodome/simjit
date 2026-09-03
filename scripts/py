@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# This file is part of Simjit project <https://simjit.org>
+#
+# See LICENSE for license and copyright information
+# SPDX-License-Identifier: Zlib
+
+# 
+# We use this as a driver for other python scripts. It sets up python path to use built extension.
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+choose_python() {
+  if [[ -n "${SIMJIT_PYTHON:-}" ]]; then
+    printf '%s\n' "$SIMJIT_PYTHON"
+  elif [[ -x "$repo_root/.venv/bin/python" ]]; then
+    printf '%s\n' "$repo_root/.venv/bin/python"
+  elif [[ -x "$HOME/.venv/bin/python" ]]; then
+    printf '%s\n' "$HOME/.venv/bin/python"
+  else
+    command -v python3
+  fi
+}
+
+find_python_build_dir() {
+  if [[ -n "${SIMJIT_PYTHON_BUILD_DIR:-}" ]]; then
+    printf '%s\n' "$SIMJIT_PYTHON_BUILD_DIR"
+    return
+  fi
+  if compgen -G "$repo_root/build/python-dev/simjit/_simjit*.so" > /dev/null; then
+    printf '%s\n' "$repo_root/build/python-dev"
+    return
+  fi
+  local match
+  match="$(find "$repo_root/build/python" -path '*/simjit/_simjit*.so' -print -quit 2>/dev/null || true)"
+  if [[ -n "$match" ]]; then
+    dirname "$(dirname "$match")"
+  fi
+}
+
+debug_env=0
+if [[ "${1:-}" == "--debug-env" ]]; then
+  debug_env=1
+  shift
+fi
+
+if [[ $# -eq 0 ]]; then
+  cat >&2 <<'EOF'
+usage: scripts/py [--debug-env] SCRIPT_OR_MODULE [ARGS...]
+
+Examples:
+  scripts/py -m pytest -q python/tests/test.py
+  scripts/py benchmarks/python/bench.py
+
+Environment overrides:
+  SIMJIT_PYTHON=/path/to/python
+  SIMJIT_PYTHON_BUILD_DIR=/path/to/build/python-dev
+EOF
+  exit 2
+fi
+
+python_bin="$(choose_python)"
+python_build_dir="$(find_python_build_dir)"
+
+pythonpath_parts=()
+if [[ -n "$python_build_dir" ]]; then
+  pythonpath_parts+=("$python_build_dir")
+fi
+pythonpath_parts+=("$repo_root/python" "$repo_root/python/src" "$repo_root/python/tests")
+if [[ -n "${PYTHONPATH:-}" ]]; then
+  pythonpath_parts+=("$PYTHONPATH")
+fi
+
+joined_pythonpath="$(IFS=:; printf '%s' "${pythonpath_parts[*]}")"
+
+if [[ "$debug_env" -eq 1 ]]; then
+  {
+    echo "SIMJIT python: $python_bin"
+    echo "SIMJIT python build dir: ${python_build_dir:-<none>}"
+    echo "PYTHONPATH: $joined_pythonpath"
+  } >&2
+fi
+
+cd "$repo_root"
+PYTHONPATH="$joined_pythonpath" exec "$python_bin" "$@"

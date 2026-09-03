@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+# This file is part of Simjit project <https://simjit.org>
+#
+# See LICENSE for license and copyright information
+# SPDX-License-Identifier: Zlib
+
+# Merge-request validation orchestrator. This intentionally lives outside the
+# Makefile: it composes normal developer targets and the optional repository
+# surfaces into one architecture-native gate.
+
+set -u -o pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workers="${WORKERS:-$(command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+duckdb_dir="${DUCKDB_DIR:-$repo_root/../duckdb}"
+artifact_dir="${SIMJIT_VALIDATE_ARTIFACT_DIR:-$repo_root/test-dump/merge-validation}"
+fuzz_count="${SIMJIT_VALIDATE_FUZZ_COUNT:-10}"
+fail_fast="${SIMJIT_VALIDATE_FAIL_FAST:-0}"
+duckdb_revision_expected="${SIMJIT_VALIDATE_DUCKDB_REVISION:-932e831ce75bd4b6edd1d9e1f9136da6f52bf634}"
+xsmith_checksum_expected="${SIMJIT_VALIDATE_XSMITH_CHECKSUM:-5dd69736542e0b30a5158de81c0dba4868fc8646}"
+
+declare -a step_names=()
+declare -a step_statuses=()
+declare -a step_details=()
+failed=0
+native_arch=""
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/validate-all
+
+Runs the complete merge-request validation gate for the native architecture.
+Supported runners are AVX-512 x86_64 and AArch64.
+
+Environment:
+  DUCKDB_DIR                       DuckDB checkout (default: ../duckdb)
+  WORKERS                          Parallel build workers
+  SIMJIT_VALIDATE_ARCH            Expected arch: x86 or arm (default: detect)
+  SIMJIT_VALIDATE_ARTIFACT_DIR    Smoke/fuzz outputs
+  SIMJIT_VALIDATE_FUZZ_COUNT      Deterministic Xsmith cases (default: 10)
+  SIMJIT_VALIDATE_DUCKDB_REVISION Required DuckDB commit
+  SIMJIT_VALIDATE_XSMITH_CHECKSUM Required Xsmith package checksum
+  SIMJIT_VALIDATE_FAIL_FAST=1     Stop after the first failed stage
+
+See scripts/validate-all.md for required system and Python dependencies.
+EOF
+}
+
+record_step() {
+  local name=$1
+  local status=$2
+  local details=$3
+  step_names+=("$name")
+  step_statuses+=("$status")
+  step_details+=("$details")
+  if [[ "$status" == "FAIL" ]]; then
+    failed=1
+  fi
+}
+
+print_summary() {
+  local pass_count=0
+  local fail_count=0
+
+  echo "Validation summary:"
+  for i in "${!step_names[@]}"; do
+    case "${step_statuses[$i]}" in
+      PASS) pass_count=$((pass_count + 1)) ;;
+      FAIL) fail_count=$((fail_count + 1)) ;;
+    esac
+    if [[ -n "${step_details[$i]}" ]]; then
+      printf '  %-4s %s (%s)\n' "${step_statuses[$i]}" "${step_names[$i]}" "${step_details[$i]}"
+    else
+      printf '  %-4s %s\n' "${step_statuses[$i]}" "${step_names[$i]}"
+    fi
+  done
+  printf '  total=%d passed=%d failed=%d\n' "$((pass_count + fail_count))" "$pass_count" "$fail_count"
+}
+
+run_step() {
+  local name=$1
+  shift
+  local rc
+
+  echo "== $name =="
+  "$@"
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
+    echo "PASS: $name"
+    echo
+    record_step "$name" "PASS" ""
+    return 0
+  fi
+
+  echo "FAIL($rc): $name"
+  echo
+  record_step "$name" "FAIL" "exit=$rc"
+  if [[ "$fail_fast" == 1 ]]; then
+    print_summary
+    exit 1
+  fi
+  return "$rc"
+}
+
+require_command() {
+  local command_name=$1
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "missing required command: $command_name" >&2
+    return 1
+  fi
+}
+
+detect_architecture() {
+  case "$(uname -m)" in
+    x86_64|amd64) native_arch=x86 ;;
+    arm64|aarch64) native_arch=arm ;;
+    *)
+      echo "unsupported merge runner architecture: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ -n "${SIMJIT_VALIDATE_ARCH:-}" && "$SIMJIT_VALIDATE_ARCH" != "$native_arch" ]]; then
+    echo "runner architecture is $native_arch, expected $SIMJIT_VALIDATE_ARCH" >&2
+    return 1
+  fi
+
+  if [[ "$native_arch" == x86 ]]; then
+    local features=""
+    if [[ -r /proc/cpuinfo ]]; then
+      features="$(tr '[:upper:]' '[:lower:]' < /proc/cpuinfo)"
+    elif command -v sysctl >/dev/null 2>&1; then
+      features="$(sysctl -n machdep.cpu.features machdep.cpu.leaf7_features 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    fi
+    if [[ "$features" != *avx512f* ]]; then
+      echo "x86 merge runners must expose AVX-512F" >&2
+      return 1
+    fi
+  fi
+
+  echo "native validation architecture: $native_arch"
+}
+
+check_python_dependencies() {
+  "$repo_root/scripts/py" -c '
+import importlib.util
+import sys
+
+required = {
+    "basedpyright": "basedpyright",
+    "fastapi": "fastapi",
+    "httpx": "httpx",
+    "jinja2": "jinja2",
+    "lark": "lark",
+    "numba": "numba",
+    "numpy": "numpy",
+    "pyarrow": "pyarrow",
+    "pygments": "pygments",
+    "pytest": "pytest",
+    "python-multipart": "multipart",
+    "pyyaml": "yaml",
+    "ruff": "ruff",
+    "uvicorn": "uvicorn",
+}
+missing = [package for package, module in required.items() if importlib.util.find_spec(module) is None]
+if missing:
+    print("missing Python packages: " + ", ".join(missing), file=sys.stderr)
+    raise SystemExit(1)
+'
+}
+
+preflight() {
+  local command_name
+  local xsmith_packages
+  for command_name in \
+    bash clang clang++ clang-format clang-tidy cmake cppcheck c++ git llvm-config make ninja python3 raco racket rsync; do
+    require_command "$command_name" || return 1
+  done
+
+  detect_architecture || return 1
+  check_python_dependencies || return 1
+
+  if [[ ! -d "$duckdb_dir/.git" ]]; then
+    echo "DUCKDB_DIR is not a DuckDB git checkout: $duckdb_dir" >&2
+    return 1
+  fi
+  if ! racket -e '(require xsmith)' >/dev/null; then
+    echo "Xsmith is missing; install it with: raco pkg install --auto xsmith" >&2
+    return 1
+  fi
+
+  cmake_version="$(cmake --version | sed -n '1s/.* //p')"
+  llvm_version="$(llvm-config --version)"
+  duckdb_revision="$(git -C "$duckdb_dir" rev-parse HEAD)"
+  if [[ "$duckdb_revision" != "$duckdb_revision_expected" ]]; then
+    echo "DuckDB revision is $duckdb_revision, expected $duckdb_revision_expected" >&2
+    return 1
+  fi
+  xsmith_packages="$(raco pkg show --all --long xsmith)"
+  if [[ "$xsmith_packages" != *"$xsmith_checksum_expected"* ]]; then
+    echo "Xsmith package does not match checksum $xsmith_checksum_expected" >&2
+    return 1
+  fi
+  echo "cmake=$cmake_version llvm=$llvm_version duckdb=$duckdb_revision workers=$workers"
+}
+
+run_python_benchmark_smoke() {
+  local output_base="$artifact_dir/python-bench"
+  "$repo_root/scripts/py" "$repo_root/benchmarks/python/bench.py" \
+    --sizes 1024 \
+    --repeats 1 \
+    --min-time 0.001 \
+    --libraries numpy,numba,simjit_numpy \
+    --jsonl "$output_base.jsonl" \
+    --markdown "$output_base.md"
+}
+
+run_demo_benchmark_smoke() {
+  "$repo_root/scripts/py" "$repo_root/benchmarks/python/demo_bench.py" \
+    --sizes 1024 \
+    --null-patterns periodic \
+    --null-mods 7 \
+    --workloads nullable_revenue_multiagg,split_valids_revenue,unconditional_div_split_valids,conditional_store_projection,select_store_projection \
+    --libraries all \
+    --repeats 1 \
+    --min-time 0.001 \
+    --jsonl "$artifact_dir/demo-bench.jsonl" \
+    --markdown "$artifact_dir/demo-bench.md" \
+    --no-heatmaps
+}
+
+run_arrow_benchmark_smoke() {
+  "$repo_root/build/reldebug/jit-bench" \
+    --benchmark_filter='^(arrow_compute|gandiva|simjit_scalar)/pricing_projection' \
+    --benchmark_min_time=0.001s \
+    --benchmark_repetitions=1 \
+    --benchmark_format=json \
+    --benchmark_out="$artifact_dir/arrow-gandiva.json"
+}
+
+run_duckdb_benchmark_smoke() {
+  env \
+    DUCKDB_DIR="$duckdb_dir" \
+    RESULT_DIR="$artifact_dir/duckdb" \
+    ROWS=10000 \
+    HOT_RUNS=1 \
+    NULL_DENSITIES=0,10 \
+    NULL_PATTERNS=periodic \
+    python3 "$repo_root/benchmarks/duckdb/bench_simjit_fragments.py"
+}
+
+run_runtime_corpus_benchmark_smoke() {
+  "$repo_root/scripts/py" "$repo_root/tests/scripts/benchmark_corpus.py" \
+    --file "$repo_root/test-dump/tests.jsonl" \
+    --output "$artifact_dir/runtime-corpus.jsonl" \
+    --minimum-time 0.001 \
+    --repetitions 1 \
+    --limit 1
+}
+
+run_fuzzer_smoke() {
+  "$repo_root/fuzz/simjit-fuzz" \
+    --to outcome \
+    --seed 1729 \
+    --count "$fuzz_count" \
+    --batch-size "$fuzz_count" \
+    --jobs 1 \
+    --preset scalar-diff \
+    --arch "$native_arch" \
+    --artifacts-dir "$artifact_dir/fuzz-artifacts" \
+    --clear-artifacts \
+    --output "$artifact_dir/fuzz-outcome.json" && \
+    "$repo_root/scripts/py" "$repo_root/fuzz/render-html.py" \
+      "$artifact_dir/fuzz-outcome.json" \
+      --output "$artifact_dir/fuzz-outcome.html"
+}
+
+if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
+  usage
+  exit 0
+fi
+if [[ $# -ne 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+cd "$repo_root" || exit 1
+
+echo "Simjit complete merge validation"
+echo "DuckDB checkout: $duckdb_dir"
+echo
+
+if ! run_step "Dependency and architecture preflight" preflight; then
+  exit 1
+fi
+
+run_step "C++ format check" "$repo_root/scripts/check-format"
+run_step "License header check" "$repo_root/scripts/py" "$repo_root/scripts/add-license-headers.py" --check
+run_step "Python lint" make py-lint
+run_step "Python type check" make py-typecheck
+run_step "Build configuration matrix" "$repo_root/tests/scripts/check-builds.sh"
+run_step "Install profiles and consumers" make check-installs
+run_step "Clang-Tidy and Cppcheck" make static-analysis
+run_step "Functional and generated-code tests" "$repo_root/tests/scripts/run-all-tests.sh"
+
+run_step "Explorer-capable Python build" env NO_LTO=1 PY_LLVM=1 PY_CPP=1 WORKERS="$workers" make py
+run_step "Explorer LLVM probe" env NO_LTO=1 WORKERS="$workers" "$repo_root/scripts/dev" explorer-probe
+run_step "Explorer tests" env SIMJIT_EXPLORER_TEST_ROUTES=1 \
+  "$repo_root/scripts/py" -m pytest -q "$repo_root/explorer/tests/test_explorer.py"
+
+mkdir -p "$artifact_dir"
+run_step "Explorer real benchmark smoke" "$repo_root/scripts/py" "$repo_root/scripts/run-explorer-benchmarks.py" \
+  --limit 1 --rows 1024 --warmups 1 --runs 1 --strict \
+  --output-json "$artifact_dir/explorer-benchmark.json"
+run_step "Python benchmark smoke" run_python_benchmark_smoke
+run_step "Explorer demo benchmark smoke" run_demo_benchmark_smoke
+run_step "Arrow/Gandiva benchmark build" env NO_LTO=1 WORKERS="$workers" "$repo_root/scripts/dev" jit-bench
+run_step "Arrow/Gandiva benchmark smoke" run_arrow_benchmark_smoke
+run_step "Runtime corpus benchmark smoke" run_runtime_corpus_benchmark_smoke
+run_step "DuckDB extension benchmark smoke" run_duckdb_benchmark_smoke
+
+run_step "Fuzz tool build" make fuzz-tools local-runner
+run_step "Deterministic Xsmith differential smoke" run_fuzzer_smoke
+
+print_summary
+echo "Artifacts: $artifact_dir"
+
+if [[ $failed -ne 0 ]]; then
+  exit 1
+fi

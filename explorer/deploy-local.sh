@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# This file is part of Simjit project <https://simjit.org>
+#
+# See LICENSE for license and copyright information
+# SPDX-License-Identifier: Zlib
+
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+host="${SIMJIT_EXPLORER_LOCAL_HOST:-127.0.0.1}"
+port="${SIMJIT_EXPLORER_LOCAL_PORT:-8002}"
+state_dir="${SIMJIT_EXPLORER_LOCAL_STATE_DIR:-${TMPDIR:-/tmp}/simjit-explorer-local-${USER:-dev}}"
+config_path="${SIMJIT_EXPLORER_LOCAL_CONFIG:-}"
+root_path="${SIMJIT_EXPLORER_ROOT_PATH:-}"
+build_mode="auto"
+run_tests=1
+run_server=1
+reload=0
+print_config=0
+
+usage() {
+  cat <<EOF
+Usage: explorer/deploy-local.sh [options]
+
+Generate a local-only Explorer config with automatic arm/x86 discovery and
+start the development Explorer server.
+
+Default behavior:
+  - detect the local CPU family from uname -m
+  - discover local LLVM_CONFIG/LLVM_CLANG if available
+  - write a generated config under a temp/state directory
+  - run Explorer tests
+  - run make py only if the local Python extension is missing
+  - start uvicorn on http://${host}:${port}
+
+Options:
+  --host HOST          Bind host. Default: ${host}
+  --port PORT          Bind port. Default: ${port}
+  --root-path PATH     ASGI root path, useful for /explorer-style local tests.
+  --state-dir PATH     Directory for generated local config.
+  --config PATH        Exact generated config path.
+  --skip-tests         Do not run the Explorer pytest suite.
+  --skip-build         Do not build the Python extension.
+  --rebuild            Always run make py before starting.
+  --reload             Enable uvicorn reload for explorer/ changes.
+  --print-config       Print generated config path and contents.
+  --no-run             Generate config/build/test only; do not start uvicorn.
+  -h, --help           Show this help.
+
+Environment overrides:
+  SIMJIT_EXPLORER_LOCAL_HOST
+  SIMJIT_EXPLORER_LOCAL_PORT
+  SIMJIT_EXPLORER_LOCAL_STATE_DIR
+  SIMJIT_EXPLORER_LOCAL_CONFIG
+  LLVM_CONFIG
+  LLVM_CLANG
+  SIMJIT_PYTHON
+  SIMJIT_PYTHON_BUILD_DIR
+EOF
+}
+
+log() {
+  printf '[deploy-explorer-local] %s\n' "$*"
+}
+
+while (($#)); do
+  case "$1" in
+    --host)
+      host="${2:?missing value for --host}"
+      shift 2
+      ;;
+    --port)
+      port="${2:?missing value for --port}"
+      shift 2
+      ;;
+    --root-path)
+      root_path="${2:?missing value for --root-path}"
+      shift 2
+      ;;
+    --state-dir)
+      state_dir="${2:?missing value for --state-dir}"
+      shift 2
+      ;;
+    --config)
+      config_path="${2:?missing value for --config}"
+      shift 2
+      ;;
+    --skip-tests)
+      run_tests=0
+      shift
+      ;;
+    --skip-build)
+      build_mode="skip"
+      shift
+      ;;
+    --rebuild)
+      build_mode="force"
+      shift
+      ;;
+    --reload)
+      reload=1
+      shift
+      ;;
+    --print-config)
+      print_config=1
+      shift
+      ;;
+    --no-run)
+      run_server=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$config_path" ]]; then
+  config_path="${state_dir%/}/explorer.yaml"
+fi
+
+detect_arch() {
+  local machine
+  machine="$(uname -m 2>/dev/null || true)"
+  case "${machine}" in
+    arm64|aarch64)
+      printf 'arm|Local arm64|%s\n' "${machine}"
+      ;;
+    x86_64|amd64|x64)
+      printf 'x86|Local x86-64|%s\n' "${machine}"
+      ;;
+    *)
+      printf 'unknown|Local %s|%s\n' "${machine:-unknown}" "${machine:-unknown}"
+      ;;
+  esac
+}
+
+first_command() {
+  local candidate
+  for candidate in "$@"; do
+    if [[ -n "$candidate" ]] && command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+first_executable() {
+  local candidate
+  for candidate in "$@"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+discover_llvm_config() {
+  if [[ -n "${LLVM_CONFIG:-}" ]]; then
+    printf '%s\n' "$LLVM_CONFIG"
+    return 0
+  fi
+  first_command llvm-config-22 llvm-config-21 llvm-config-20 llvm-config-19 llvm-config \
+    || first_executable \
+      /opt/homebrew/opt/llvm/bin/llvm-config \
+      /opt/homebrew/bin/llvm-config \
+      /usr/local/opt/llvm/bin/llvm-config \
+      /usr/bin/llvm-config \
+    || true
+}
+
+discover_llvm_clang() {
+  if [[ -n "${LLVM_CLANG:-}" ]]; then
+    printf '%s\n' "$LLVM_CLANG"
+    return 0
+  fi
+  first_command clang-22 clang-21 clang-20 clang-19 clang \
+    || first_executable \
+      /opt/homebrew/opt/llvm/bin/clang \
+      /opt/homebrew/bin/clang \
+      /usr/local/opt/llvm/bin/clang \
+      /usr/bin/clang \
+    || true
+}
+
+yaml_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+write_config() {
+  local family="$1"
+  local label="$2"
+  local machine="$3"
+  local llvm_config="$4"
+  local llvm_clang="$5"
+  mkdir -p "$(dirname "$config_path")"
+  {
+    printf '# Note: this file is generated by explorer/deploy-local.sh.\n'
+    printf '# Local machine: %s (%s)\n\n' "$machine" "$family"
+    printf 'local:\n'
+    printf '  label: %s\n' "$(yaml_quote "$label")"
+    printf '  public: true\n'
+    if [[ -n "$llvm_config" || -n "$llvm_clang" ]]; then
+      printf '  env:\n'
+      if [[ -n "$llvm_config" ]]; then
+        printf '    LLVM_CONFIG: %s\n' "$(yaml_quote "$llvm_config")"
+      fi
+      if [[ -n "$llvm_clang" ]]; then
+        printf '    LLVM_CLANG: %s\n' "$(yaml_quote "$llvm_clang")"
+      fi
+    else
+      printf '  env: {}\n'
+    fi
+    cat <<'EOF'
+
+security:
+  max_query_bytes: 65536
+  max_share_query_bytes: 131072
+  max_form_bytes: 200000
+  max_form_fields: 32
+  max_form_value_bytes: 131072
+  max_rows: 1000000
+  max_warmups: 10
+  max_runs: 20
+  max_null_density: 1.0
+  max_benchmark_seconds: 120
+  allowed_providers: [google, python, all]
+  allowed_outputs: [pyarrow]
+  allowed_targets: [local]
+
+targets: []
+EOF
+  } > "$config_path"
+}
+
+extension_exists() {
+  compgen -G "${repo_root}/build/python-dev/simjit/_simjit*.so" >/dev/null
+}
+
+extension_has_inspection_emitters() {
+  extension_exists || return 1
+  SIMJIT_PYTHON_BUILD_DIR="${repo_root}/build/python-dev" "${repo_root}/scripts/py" - >/dev/null 2>&1 <<'PY'
+import simjit as sj
+
+program = sj.query({"y": sj.col("x", sj.I32) + sj.i32(1)})
+inspection = sj.inspect(program, {"x": sj.I32}, policy="scalar")
+raise SystemExit(0 if inspection.cpp.strip() and inspection.llvm_ir.strip() else 1)
+PY
+}
+
+maybe_build_extension() {
+  case "$build_mode" in
+    skip)
+      log "skipping make py"
+      ;;
+    force)
+      log "running make py with optional inspection emitters"
+      make -C "$repo_root" PY_LLVM=1 PY_CPP=1 py
+      ;;
+    auto)
+      if extension_has_inspection_emitters; then
+        log "local Python extension already has optional inspection emitters; skipping make py"
+      else
+        log "local Python extension missing optional inspection emitters; running make py"
+        make -C "$repo_root" PY_LLVM=1 PY_CPP=1 py
+      fi
+      ;;
+  esac
+}
+
+IFS='|' read -r arch_family local_label machine < <(detect_arch)
+llvm_config="$(discover_llvm_config)"
+llvm_clang="$(discover_llvm_clang)"
+
+log "detected local architecture: ${machine} (${arch_family})"
+if [[ -n "$llvm_config" ]]; then
+  log "using LLVM_CONFIG=${llvm_config}"
+else
+  log "LLVM_CONFIG not found; LLVM-specific benchmark diagnostics may be unavailable"
+fi
+if [[ -n "$llvm_clang" ]]; then
+  log "using LLVM_CLANG=${llvm_clang}"
+else
+  log "LLVM_CLANG not found; LLVM-specific benchmark diagnostics may be unavailable"
+fi
+
+write_config "$arch_family" "$local_label" "$machine" "$llvm_config" "$llvm_clang"
+log "wrote local config: ${config_path}"
+
+if ((print_config)); then
+  sed 's/^/[deploy-explorer-local config] /' "$config_path"
+fi
+
+if ((run_tests)); then
+  log "running Explorer tests"
+  (cd "$repo_root" && scripts/py -m pytest -q explorer/tests/test_explorer.py)
+fi
+
+maybe_build_extension
+
+if ((run_server == 0)); then
+  log "done; not starting server because --no-run was set"
+  exit 0
+fi
+
+cmd=("${repo_root}/scripts/py" -m uvicorn explorer.app:app --host "$host" --port "$port")
+if [[ -n "$root_path" ]]; then
+  cmd+=(--root-path "$root_path")
+fi
+if ((reload)); then
+  cmd+=(--reload --reload-dir "${repo_root}/explorer")
+fi
+
+log "starting Explorer on http://${host}:${port}${root_path}"
+log "SIMJIT_EXPLORER_TARGETS_FILE=${config_path}"
+cd "$repo_root"
+SIMJIT_EXPLORER_TARGETS_FILE="$config_path" exec "${cmd[@]}"
