@@ -1060,7 +1060,7 @@ struct X86CppEmitter : CppEmitterBase {
                   "(unsigned __int128)sum128_low;\n",
                   show_scalar_operand(data.hi_combined), //
                   data.dst);
-        result += "}";
+        result += '}';
         return result;
     }
 

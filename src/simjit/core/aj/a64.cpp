@@ -3832,25 +3832,25 @@ struct CompileState {
             if (s->dtype.is_mask() &&
                 (s->is(StepKind::Load) ||
                  (s->is(StepKind::Store) && (s->dtype == MaskDataType::M8 || s->dtype == MaskDataType::M16)))) {
-                need_special_constants |= 1 << SpecialConstant::Bits;
+                need_special_constants |= 1ull << SpecialConstant::Bits;
             }
             if (s->dtype == MaskDataType::M16 && s->is(StepKind::Load)) {
-                need_special_constants |= 1 << SpecialConstant::Zero8One8;
+                need_special_constants |= 1ull << SpecialConstant::Zero8One8;
             }
             if (s->dtype == MaskDataType::M2 && (s->is(StepKind::Load) || s->is(StepKind::Store))) {
-                need_special_constants |= 1 << SpecialConstant::I64_MaskBits;
+                need_special_constants |= 1ull << SpecialConstant::I64_MaskBits;
             }
             if (s->dtype == MaskDataType::M4 && (s->is(StepKind::Load) || s->is(StepKind::Store))) {
-                need_special_constants |= 1 << SpecialConstant::I32_MaskBits;
+                need_special_constants |= 1ull << SpecialConstant::I32_MaskBits;
             }
             if (s->is(StepKind::ArithBinary) && s->dtype.is_vec()) {
                 auto op = s->step_data<StepKind::ArithBinary>().op;
                 if (op == ArithBinaryOp::RotateLeft || op == ArithBinaryOp::RotateRight) {
                     VecDataType vdtype = s->dtype.as_vec();
                     if (vdtype.elem == VecElemType::I32) {
-                        need_special_constants |= 1 << SpecialConstant::I32_32;
+                        need_special_constants |= 1ull << SpecialConstant::I32_32;
                     } else if (vdtype.elem == VecElemType::I64) {
-                        need_special_constants |= 1 << SpecialConstant::I64_64;
+                        need_special_constants |= 1ull << SpecialConstant::I64_64;
                     }
                 }
             }
@@ -3858,52 +3858,54 @@ struct CompileState {
                 VecDataType vdtype = s->dtype.as_vec();
                 auto op = s->step_data<StepKind::ArithUnary>().op;
                 if (op == ArithUnaryOp::Lzcnt && vdtype.elem == VecElemType::I64) {
-                    need_special_constants |= 1 << SpecialConstant::I32_32;
+                    need_special_constants |= 1ull << SpecialConstant::I32_32;
                 }
                 if (op == ArithUnaryOp::Popcount && vdtype.elem == VecElemType::I64) {
-                    need_special_constants |= 1 << SpecialConstant::I8_1;
+                    need_special_constants |= 1ull << SpecialConstant::I8_1;
                 }
             }
             if (s->is(StepKind::Fpclass) && s->dtype.is_mask()) {
                 auto flags = s->step_data<StepKind::Fpclass>().flags;
                 VecDataType vdtype = s->step_data<StepKind::Fpclass>().arg->dtype.as_vec();
                 if (bool(flags & FpClass::FPC_INFINITE)) {
-                    if (vdtype.elem == VecElemType::F32) need_special_constants |= 1 << SpecialConstant::F32_Inf;
-                    if (vdtype.elem == VecElemType::F64) need_special_constants |= 1 << SpecialConstant::F64_Inf;
+                    if (vdtype.elem == VecElemType::F32) need_special_constants |= 1ull << SpecialConstant::F32_Inf;
+                    if (vdtype.elem == VecElemType::F64) need_special_constants |= 1ull << SpecialConstant::F64_Inf;
                 }
                 if (bool(flags & FpClass::FPC_SUBNORMAL)) {
                     if (vdtype.elem == VecElemType::F32)
-                        need_special_constants |= (1 << SpecialConstant::F32_Inf) | (1 << SpecialConstant::F32_Mant);
+                        need_special_constants |=
+                            (1ull << SpecialConstant::F32_Inf) | (1ull << SpecialConstant::F32_Mant);
                     if (vdtype.elem == VecElemType::F64)
-                        need_special_constants |= (1 << SpecialConstant::F64_Inf) | (1 << SpecialConstant::F64_Mant);
+                        need_special_constants |=
+                            (1ull << SpecialConstant::F64_Inf) | (1ull << SpecialConstant::F64_Mant);
                 }
             }
             if (s->is(StepKind::Pack) && s->dtype.is_vec()) {
                 VecDataType vdtype = s->dtype.as_vec();
                 if (vdtype.elem == VecElemType::I8) {
                     need_special_constants |=
-                        (1 << SpecialConstant::I8_PackIndices) | (1 << SpecialConstant::I8_MaskBits);
+                        (1ull << SpecialConstant::I8_PackIndices) | (1ull << SpecialConstant::I8_MaskBits);
                 } else if (vdtype.elem == VecElemType::I16) {
                     need_special_constants |=
-                        (1 << SpecialConstant::I16_PackIndices) | (1 << SpecialConstant::I16_MaskBits);
+                        (1ull << SpecialConstant::I16_PackIndices) | (1ull << SpecialConstant::I16_MaskBits);
                 } else if (vdtype.elem == VecElemType::I32 || vdtype.elem == VecElemType::F32) {
                     need_special_constants |=
-                        (1 << SpecialConstant::I32_PackIndices) | (1 << SpecialConstant::I32_MaskBits);
+                        (1ull << SpecialConstant::I32_PackIndices) | (1ull << SpecialConstant::I32_MaskBits);
                 } else if (vdtype.elem == VecElemType::I64 || vdtype.elem == VecElemType::F64) {
                     need_special_constants |=
-                        (1 << SpecialConstant::I64_PackIndices) | (1 << SpecialConstant::I64_MaskBits);
+                        (1ull << SpecialConstant::I64_PackIndices) | (1ull << SpecialConstant::I64_MaskBits);
                 }
             }
         });
 
-        if ((need_special_constants & (1 << SpecialConstant::Bits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::Bits)) != 0) {
             GpR gp = cc.new_gp64();
             VecR reg = cc.new_vec128();
             init_int_const(gp, ConstData::u64(0x8040201008040201ull), ScalarDataType::I64);
             cc.dup(reg.d2(), gp);
             special_constants[SpecialConstant::Bits] = reg;
         }
-        if ((need_special_constants & (1 << SpecialConstant::Zero8One8)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::Zero8One8)) != 0) {
             GpR gp = cc.new_gp64();
             VecR reg = cc.new_vec128();
             cc.mov(gp, 0);
@@ -3911,58 +3913,58 @@ struct CompileState {
             cc.ins(reg.d(0), gp);
             special_constants[SpecialConstant::Zero8One8] = reg;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I32_32)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I32_32)) != 0) {
             VecR reg = cc.new_vec128();
             cc.movi(reg.s4(), 32);
             special_constants[SpecialConstant::I32_32] = reg.s4();
         }
-        if ((need_special_constants & (1 << SpecialConstant::I64_64)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I64_64)) != 0) {
             GpR gp = cc.new_gp64();
             cc.mov(gp, 64);
             VecR reg = cc.new_vec128();
             cc.dup(reg.d2(), gp);
             special_constants[SpecialConstant::I64_64] = reg.d2();
         }
-        if ((need_special_constants & (1 << SpecialConstant::F32_Inf)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::F32_Inf)) != 0) {
             GpR tmpx = cc.new_gp32();
             VecR tmp1 = cc.new_vec128().s4();
             cc.mov(tmpx, 0x7F800000);
             cc.dup(tmp1, tmpx);
             special_constants[SpecialConstant::F32_Inf] = tmp1;
         }
-        if ((need_special_constants & (1 << SpecialConstant::F32_Mant)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::F32_Mant)) != 0) {
             GpR tmpx = cc.new_gp32();
             VecR tmp1 = cc.new_vec128().s4();
             cc.mov(tmpx, 0x007FFFFF);
             cc.dup(tmp1, tmpx);
             special_constants[SpecialConstant::F32_Mant] = tmp1;
         }
-        if ((need_special_constants & (1 << SpecialConstant::F64_Inf)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::F64_Inf)) != 0) {
             GpR tmpx = cc.new_gp64();
             VecR tmp1 = cc.new_vec128().d2();
             cc.mov(tmpx, 0x7FF0000000000000);
             cc.dup(tmp1, tmpx);
             special_constants[SpecialConstant::F64_Inf] = tmp1;
         }
-        if ((need_special_constants & (1 << SpecialConstant::F64_Mant)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::F64_Mant)) != 0) {
             GpR tmpx = cc.new_gp64();
             VecR tmp1 = cc.new_vec128().d2();
             cc.mov(tmpx, 0x000FFFFFFFFFFFFF);
             cc.dup(tmp1, tmpx);
             special_constants[SpecialConstant::F64_Mant] = tmp1;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I8_1)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I8_1)) != 0) {
             VecR reg = cc.new_vec128();
             cc.movi(reg.b16(), 1);
             special_constants[SpecialConstant::I8_1] = reg.b16();
         }
-        if ((need_special_constants & (1 << SpecialConstant::I8_PackIndices)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I8_PackIndices)) != 0) {
             i8_pack_indices_label = cc.new_label();
             GpR gp = cc.new_gp64();
             cc.adr(gp, i8_pack_indices_label);
             special_constants[SpecialConstant::I8_PackIndices] = gp;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I8_MaskBits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I8_MaskBits)) != 0) {
             const static uint8_t data[16] = {
                 1, 2, 4, 8, 16, 32, 64, 128, //
                 1, 2, 4, 8, 16, 32, 64, 128,
@@ -3972,13 +3974,13 @@ struct CompileState {
             cc.ldr(vec.q(), mem);
             special_constants[SpecialConstant::I8_MaskBits] = vec;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I16_PackIndices)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I16_PackIndices)) != 0) {
             i16_pack_indices_label = cc.new_label();
             GpR gp = cc.new_gp64();
             cc.adr(gp, i16_pack_indices_label);
             special_constants[SpecialConstant::I16_PackIndices] = gp;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I16_MaskBits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I16_MaskBits)) != 0) {
             const static uint8_t data[16] = {
                 1, 0, 2, 0, 4, 0, 8, 0, 16, 0, 32, 0, 64, 0, 128, 0,
             };
@@ -3987,13 +3989,13 @@ struct CompileState {
             cc.ldr(vec.q(), mem);
             special_constants[SpecialConstant::I16_MaskBits] = vec;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I32_PackIndices)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I32_PackIndices)) != 0) {
             i32_pack_indices_label = cc.new_label();
             GpR gp = cc.new_gp64();
             cc.adr(gp, i32_pack_indices_label);
             special_constants[SpecialConstant::I32_PackIndices] = gp;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I32_MaskBits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I32_MaskBits)) != 0) {
             const static uint8_t data[16] = {
                 1, 0, 0, 0, //
                 2, 0, 0, 0, //
@@ -4005,13 +4007,13 @@ struct CompileState {
             cc.ldr(vec.q(), mem);
             special_constants[SpecialConstant::I32_MaskBits] = vec;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I64_PackIndices)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I64_PackIndices)) != 0) {
             i64_pack_indices_label = cc.new_label();
             GpR gp = cc.new_gp64();
             cc.adr(gp, i64_pack_indices_label);
             special_constants[SpecialConstant::I64_PackIndices] = gp;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I64_MaskBits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I64_MaskBits)) != 0) {
             const static uint8_t data[16] = {
                 1, 0, 0, 0, 0, 0, 0, 0, //
                 2, 0, 0, 0, 0, 0, 0, 0, //

@@ -235,7 +235,7 @@ function(simjit_apply_sanitizers target)
   endif()
 endfunction()
 
-set(SIMJIT_REQUIRED_LLVM_MAJOR 22 CACHE INTERNAL "Required LLVM major version" FORCE)
+set(SIMJIT_REQUIRED_LLVM_MAJOR 23 CACHE INTERNAL "Required LLVM major version" FORCE)
 
 function(simjit_find_llvm_config output)
   set(candidates)
@@ -590,6 +590,7 @@ set(simjit_jit_install_headers
   detail/arena.h
   detail/span.h
   detail/expected.h
+  detail/function_ref.h
 )
 
 install(

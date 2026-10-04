@@ -178,10 +178,10 @@ NullableValue NullableBuilder::arith_binary(NullableValue left, NullableValue ri
 }
 
 NullableValue NullableBuilder::arith_binary_checked(NullableValue left, NullableValue right, ArithBinaryOp op) {
-    MaybePredicate is_null = combine_selection(left.null, right.null);
-    if (is_null.is_valid()) {
-        Value x = base_->checked_op(base_->arith_binary(left.v, right.v, op), base_->not_(is_null.value()));
-        return {x, is_null};
+    MaybePredicate res_null = combine_selection(left.null, right.null);
+    if (res_null.is_valid()) {
+        Value x = base_->checked_op(base_->arith_binary(left.v, right.v, op), base_->not_(res_null.value()));
+        return {x, res_null};
     }
     return base_->arith_binary(left.v, right.v, op, ArithBinaryOpFlags::SafetyCheck);
 }

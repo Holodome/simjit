@@ -183,7 +183,7 @@ struct ConstData {
 
     constexpr uint64_t as_unsigned() const noexcept {
         switch (dtype) {
-        case ScalarDataType::I1: return bits & 1;
+        case ScalarDataType::I1: return bits & 1ull;
         case ScalarDataType::I8: return bits & UINT8_MAX;
         case ScalarDataType::I16: return bits & UINT16_MAX;
         case ScalarDataType::I32: return bits & UINT32_MAX;
@@ -196,7 +196,7 @@ struct ConstData {
     }
     constexpr int64_t as_signed() const noexcept {
         switch (dtype) {
-        case ScalarDataType::I1: return (int64_t)(bits & 1);
+        case ScalarDataType::I1: return (int64_t)(bits & 1ull);
         case ScalarDataType::I8: return sign_extend_bits(bits, 8);
         case ScalarDataType::I16: return sign_extend_bits(bits, 16);
         case ScalarDataType::I32: return sign_extend_bits(bits, 32);
@@ -358,7 +358,7 @@ enum class FpClass : uint8_t {
 SIMJIT_DEFINE_ENUM_FLAGS(FpClass)
 
 enum class ArithBinaryOpFlags : uint8_t {
-    No = 0,
+    No = 0x0,
     SafetyCheck = 0x1,
     // For shifts and rotates, normalize the count modulo the scalar bit width before lowering.
     ShiftWraparound = 0x2,
@@ -396,46 +396,46 @@ enum class LoadStoreKind : uint8_t {
     Unaligned,
 };
 
-enum class CodeTransformations : uint16_t {
-    No = 0,
+enum class CodeTransformations : uint32_t {
+    No = 0x0,
     // Allow use of 32x32 -> 64 bit multiply
-    MuldqInst = 1 << 0,
+    MuldqInst = 0x1,
     // Replace multiplication by constant with series of shift+add instructions
-    MulConstPeephole = 1 << 1,
+    MulConstPeephole = 0x2,
     // Invert logical operations if that simplifies expression
-    LogicalPeephole = 1 << 2,
+    LogicalPeephole = 0x4,
     // Rewrite comparisons (a <= X) && (X <= b) - analogous to SQL BETWEEN (and variations) to sub+cmp
-    BetweenPeephole = 1 << 3,
+    BetweenPeephole = 0x8,
     // Allow reactive unrolling that equalizes the widths of different root groups.
-    Unroll = 1 << 4,
+    Unroll = 0x10,
     // Give duplicated aggregate work independent accumulators. Without this, unrolled copies update one shared
     // accumulator.
-    AccSplit = 1 << 5,
+    AccSplit = 0x20,
     // Mask combining optimization - join together multiple mask registers, if possible
-    MaskCombine = 1 << 6,
+    MaskCombine = 0x40,
     // Allow use of ternarylogic instruction to replace series of bit operations
-    TernarylogicInst = 1 << 7,
+    TernarylogicInst = 0x80,
     // Allow use of fma instructions
-    FmaInst = 1 << 8,
+    FmaInst = 0x100,
     // Expand i8 vector multiplications and shifts on targets that do not have a native byte multiply instruction.
     // Rewrite i8 shifts into permutes.
     // Implement i8 and i16 lzcnt.
-    SmallArith = 1 << 9,
+    SmallArith = 0x200,
     // Replace integer division by constant with multiply + shift. Requires libdivide compiled in (SIMJIT_USE_LIBDIVIDE)
-    ConstDiv = 1 << 10,
+    ConstDiv = 0x400,
     // Collapse chained integer casts that do not have safety checks.
-    CastPeephole = 1 << 11,
+    CastPeephole = 0x800,
     // Split mixed integer/float casts so coefficient-changing work happens in one domain before same-width
     // cross-domain conversion. Up-casts prefer integer-domain widening; down-casts prefer float-domain narrowing.
     // This enables i8/i16 float casts through i32, and exposes vector-friendly normalization nodes. For float-to-int
     // down-casts, vectorized code can round in the narrower float domain before integer conversion.
-    CastDecomposition = 1 << 12,
+    CastDecomposition = 0x1000,
     // Increase vector loop width for small expression graphs when the node-count budget allows it.
-    ProactiveUnroll = 1 << 13,
+    ProactiveUnroll = 0x2000,
     // Remove simple identity binary operations during HIR construction.
-    BinaryIdentityPeephole = 1 << 14,
+    BinaryIdentityPeephole = 0x4000,
     // Remove constant conditions during HIR construction.
-    ConstantConditionPeephole = 1 << 15,
+    ConstantConditionPeephole = 0x8000,
 
     All = MuldqInst | MulConstPeephole | LogicalPeephole | BetweenPeephole | Unroll | AccSplit | MaskCombine |
         TernarylogicInst | FmaInst | SmallArith | CastPeephole | ProactiveUnroll | CastDecomposition |
@@ -469,14 +469,14 @@ constexpr bool is_x86_arch(Arch arch) noexcept {
 // Automatic classification for arguments.
 enum class ArgumentKind : uint8_t {
     // Value that has not been used
-    Undefined = 0,
-    SrcArr = 1,
-    SrcGatherArr = 2,
-    SrcIdxArr = 4,
-    SrcConst = 8,
-    Dst = 16,
-    DstAgg = 32,
-    DstSafetyCheck = 64,
+    Undefined = 0x0,
+    SrcArr = 0x1,
+    SrcGatherArr = 0x2,
+    SrcIdxArr = 0x4,
+    SrcConst = 0x8,
+    Dst = 0x10,
+    DstAgg = 0x20,
+    DstSafetyCheck = 0x40,
     Table = SrcGatherArr | Dst
 };
 SIMJIT_DEFINE_ENUM_FLAGS(ArgumentKind)
@@ -577,58 +577,58 @@ public:
 
     // Stores
 
-    void store(Value arg, Argument dst, LoadStoreKind kind = LoadStoreKind::Unaligned);
-    void store(Predicate arg, Argument dst);
-    void cond_store(Value arg, MaybePredicate cond, Argument dst, LoadStoreKind kind = LoadStoreKind::Unaligned);
-    void cond_store(Predicate arg, MaybePredicate cond, Argument dst);
-    void pack(Value arg, Predicate cond, Argument dst, Argument dst_size);
-    void scatter(Value arg, Value idx, Argument dst);
-    void cond_scatter(Value arg, Value idx, MaybePredicate cond, Argument dst);
+    void store(Value a, Argument dst, LoadStoreKind kind = LoadStoreKind::Unaligned);
+    void store(Predicate a, Argument dst);
+    void cond_store(Value a, MaybePredicate cond, Argument dst, LoadStoreKind kind = LoadStoreKind::Unaligned);
+    void cond_store(Predicate a, MaybePredicate cond, Argument dst);
+    void pack(Value a, Predicate cond, Argument dst, Argument dst_size);
+    void scatter(Value a, Value idx, Argument dst);
+    void cond_scatter(Value a, Value idx, MaybePredicate cond, Argument dst);
 
     // Aggregates
 
-    void arith_agg(Value arg, ArithBinaryOp op, Argument dst);
-    void cond_arith_agg(Value arg, MaybePredicate cond, ArithBinaryOp op, Argument dst);
-    void predicate_agg(Predicate arg, PredicateBinaryOp op, Argument dst);
-    void grouped_arith_agg(Value arg, Value idx, ArithBinaryOp op, Argument table);
-    void grouped_cond_arith_agg(Value arg, MaybePredicate cond, Value idx, ArithBinaryOp op, Argument table);
+    void arith_agg(Value a, ArithBinaryOp op, Argument dst);
+    void cond_arith_agg(Value a, MaybePredicate cond, ArithBinaryOp op, Argument dst);
+    void predicate_agg(Predicate a, PredicateBinaryOp op, Argument dst);
+    void grouped_arith_agg(Value a, Value idx, ArithBinaryOp op, Argument table);
+    void grouped_cond_arith_agg(Value a, MaybePredicate cond, Value idx, ArithBinaryOp op, Argument table);
 
     // Loads and constants
 
-    Value load(Argument arg, LoadStoreKind kind = LoadStoreKind::Unaligned);
-    Predicate load_predicate(Argument arg);
+    Value load(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
+    Predicate load_predicate(Argument a);
 
-    Value gather(Value idx, Argument arg);
-    Value load_splat(Argument arg);
-    Predicate load_predicate_splat(Argument arg);
+    Value gather(Value idx, Argument a);
+    Value load_splat(Argument a);
+    Predicate load_predicate_splat(Argument a);
     Value con_internal(ConstData data, ScalarDataType dtype);
 
     // Arithmetic and predicate operations
 
     Value arith_binary(Value left, Value right, ArithBinaryOp op, ArithBinaryOpFlags flags = ArithBinaryOpFlags::No);
     Value checked_op(Value op, MaybePredicate mask = {});
-    Value arith_unary(Value arg, ArithUnaryOp op, bool safety_check = false);
-    Predicate predicate_not(Predicate arg);
+    Value arith_unary(Value a, ArithUnaryOp op, bool safety_check = false);
+    Predicate predicate_not(Predicate a);
     Predicate predicate_binary(Predicate left, Predicate right, PredicateBinaryOp op);
     Value select(Predicate cond, Value truthy, Value falsy);
     Predicate select(Predicate cond, Predicate truthy, Predicate falsy);
 
     // Casts
 
-    Value int_cast(Value arg, ScalarDataType dtype, IntCastKind kind, bool safety_check = false);
-    Value float_cast(Value arg, ScalarDataType dtype, bool is_unsigned = false);
-    Value bitcast(Value arg, ScalarDataType to);
+    Value int_cast(Value a, ScalarDataType dtype, IntCastKind kind, bool safety_check = false);
+    Value float_cast(Value a, ScalarDataType dtype, bool is_unsigned = false);
+    Value bitcast(Value a, ScalarDataType to);
 
     // Comparisons
 
     Predicate cmp(Value left, Value right, CmpOp op, bool is_unsigned = false);
-    Predicate fpclass(Value arg, FpClass flags);
+    Predicate fpclass(Value a, FpClass flags);
 
     //
     // Misc operations
     //
 
-    Value permute(Value arg, uint64_t permute_idxs, bool is_bit);
+    Value permute(Value a, uint64_t permute_idxs, bool is_bit);
     Value index(ScalarDataType dtype);
 
     //
@@ -639,79 +639,73 @@ public:
     // Aggregates
     //
 
-    void sum(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::Add, dst); }
-    void product(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::Mul, dst); }
-    void min_agg(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::Min, dst); }
-    void max_agg(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::Max, dst); }
-    void umin_agg(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::UMin, dst); }
-    void umax_agg(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::UMax, dst); }
-    void and_agg(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::And, dst); }
-    void or_agg(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::Or, dst); }
-    void xor_agg(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::Xor, dst); }
-    void andnot_agg(Value arg, Argument dst) { arith_agg(arg, ArithBinaryOp::AndNot, dst); }
-    void sum_if(Value arg, Predicate cond, Argument dst) { cond_arith_agg(arg, cond, ArithBinaryOp::Add, dst); }
-    void product_if(Value arg, Predicate cond, Argument dst) { cond_arith_agg(arg, cond, ArithBinaryOp::Mul, dst); }
-    void min_agg_if(Value arg, Predicate cond, Argument dst) { cond_arith_agg(arg, cond, ArithBinaryOp::Min, dst); }
-    void max_agg_if(Value arg, Predicate cond, Argument dst) { cond_arith_agg(arg, cond, ArithBinaryOp::Max, dst); }
-    void umin_agg_if(Value arg, Predicate cond, Argument dst) { cond_arith_agg(arg, cond, ArithBinaryOp::UMin, dst); }
-    void umax_agg_if(Value arg, Predicate cond, Argument dst) { cond_arith_agg(arg, cond, ArithBinaryOp::UMax, dst); }
-    void and_agg_if(Value arg, Predicate cond, Argument dst) { cond_arith_agg(arg, cond, ArithBinaryOp::And, dst); }
-    void or_agg_if(Value arg, Predicate cond, Argument dst) { cond_arith_agg(arg, cond, ArithBinaryOp::Or, dst); }
-    void xor_agg_if(Value arg, Predicate cond, Argument dst) { cond_arith_agg(arg, cond, ArithBinaryOp::Xor, dst); }
-    void andnot_agg_if(Value arg, Predicate cond, Argument dst) {
-        cond_arith_agg(arg, cond, ArithBinaryOp::AndNot, dst);
-    }
+    void sum(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::Add, dst); }
+    void product(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::Mul, dst); }
+    void min_agg(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::Min, dst); }
+    void max_agg(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::Max, dst); }
+    void umin_agg(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::UMin, dst); }
+    void umax_agg(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::UMax, dst); }
+    void and_agg(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::And, dst); }
+    void or_agg(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::Or, dst); }
+    void xor_agg(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::Xor, dst); }
+    void andnot_agg(Value a, Argument dst) { arith_agg(a, ArithBinaryOp::AndNot, dst); }
+    void sum_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::Add, dst); }
+    void product_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::Mul, dst); }
+    void min_agg_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::Min, dst); }
+    void max_agg_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::Max, dst); }
+    void umin_agg_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::UMin, dst); }
+    void umax_agg_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::UMax, dst); }
+    void and_agg_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::And, dst); }
+    void or_agg_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::Or, dst); }
+    void xor_agg_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::Xor, dst); }
+    void andnot_agg_if(Value a, Predicate cond, Argument dst) { cond_arith_agg(a, cond, ArithBinaryOp::AndNot, dst); }
 
-    void and_agg(Predicate arg, Argument dst) { predicate_agg(arg, PredicateBinaryOp::And, dst); }
-    void or_agg(Predicate arg, Argument dst) { predicate_agg(arg, PredicateBinaryOp::Or, dst); }
-    void andnot_agg(Predicate arg, Argument dst) { predicate_agg(arg, PredicateBinaryOp::AndNot, dst); }
-    void xor_agg(Predicate arg, Argument dst) { predicate_agg(arg, PredicateBinaryOp::Xor, dst); }
+    void and_agg(Predicate a, Argument dst) { predicate_agg(a, PredicateBinaryOp::And, dst); }
+    void or_agg(Predicate a, Argument dst) { predicate_agg(a, PredicateBinaryOp::Or, dst); }
+    void andnot_agg(Predicate a, Argument dst) { predicate_agg(a, PredicateBinaryOp::AndNot, dst); }
+    void xor_agg(Predicate a, Argument dst) { predicate_agg(a, PredicateBinaryOp::Xor, dst); }
     void countif(Predicate cond, Argument dst);
 
     // Grouped aggregates
-    void grouped_sum(Value arg, Value idx, Argument table) { grouped_arith_agg(arg, idx, ArithBinaryOp::Add, table); }
-    void grouped_product(Value arg, Value idx, Argument table) {
-        grouped_arith_agg(arg, idx, ArithBinaryOp::Mul, table);
+    void grouped_sum(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::Add, table); }
+    void grouped_product(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::Mul, table); }
+    void grouped_min(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::Min, table); }
+    void grouped_max(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::Max, table); }
+    void grouped_umin(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::UMin, table); }
+    void grouped_umax(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::UMax, table); }
+    void grouped_and(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::And, table); }
+    void grouped_or(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::Or, table); }
+    void grouped_xor(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::Xor, table); }
+    void grouped_andnot(Value a, Value idx, Argument table) { grouped_arith_agg(a, idx, ArithBinaryOp::AndNot, table); }
+    void grouped_sum_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::Add, table);
     }
-    void grouped_min(Value arg, Value idx, Argument table) { grouped_arith_agg(arg, idx, ArithBinaryOp::Min, table); }
-    void grouped_max(Value arg, Value idx, Argument table) { grouped_arith_agg(arg, idx, ArithBinaryOp::Max, table); }
-    void grouped_umin(Value arg, Value idx, Argument table) { grouped_arith_agg(arg, idx, ArithBinaryOp::UMin, table); }
-    void grouped_umax(Value arg, Value idx, Argument table) { grouped_arith_agg(arg, idx, ArithBinaryOp::UMax, table); }
-    void grouped_and(Value arg, Value idx, Argument table) { grouped_arith_agg(arg, idx, ArithBinaryOp::And, table); }
-    void grouped_or(Value arg, Value idx, Argument table) { grouped_arith_agg(arg, idx, ArithBinaryOp::Or, table); }
-    void grouped_xor(Value arg, Value idx, Argument table) { grouped_arith_agg(arg, idx, ArithBinaryOp::Xor, table); }
-    void grouped_andnot(Value arg, Value idx, Argument table) {
-        grouped_arith_agg(arg, idx, ArithBinaryOp::AndNot, table);
+    void grouped_product_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::Mul, table);
     }
-    void grouped_sum_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::Add, table);
+    void grouped_min_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::Min, table);
     }
-    void grouped_product_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::Mul, table);
+    void grouped_max_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::Max, table);
     }
-    void grouped_min_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::Min, table);
+    void grouped_umin_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::UMin, table);
     }
-    void grouped_max_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::Max, table);
+    void grouped_umax_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::UMax, table);
     }
-    void grouped_umin_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::UMin, table);
+    void grouped_and_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::And, table);
     }
-    void grouped_umax_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::UMax, table);
+    void grouped_or_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::Or, table);
     }
-    void grouped_and_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::And, table);
+    void grouped_xor_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::Xor, table);
     }
-    void grouped_or_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::Or, table);
-    }
-    void grouped_xor_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::Xor, table);
-    }
-    void grouped_andnot_if(Value arg, Predicate cond, Value idx, Argument table) {
-        grouped_cond_arith_agg(arg, cond, idx, ArithBinaryOp::AndNot, table);
+    void grouped_andnot_if(Value a, Predicate cond, Value idx, Argument table) {
+        grouped_cond_arith_agg(a, cond, idx, ArithBinaryOp::AndNot, table);
     }
 
     //
@@ -853,32 +847,32 @@ public:
     // Unary arithmetic
     //
 
-    Value negate(Value arg) { return arith_unary(arg, ArithUnaryOp::Negate); }
-    Value negate_checked(Value arg) { return arith_unary(arg, ArithUnaryOp::Negate, true); }
-    Value abs(Value arg) { return arith_unary(arg, ArithUnaryOp::Abs); }
-    Value abs_checked(Value arg) { return arith_unary(arg, ArithUnaryOp::Abs, true); }
-    Value not_(Value arg) { return arith_unary(arg, ArithUnaryOp::Not); }
-    Value lzcnt(Value arg) { return arith_unary(arg, ArithUnaryOp::Lzcnt); }
-    Value tzcnt(Value arg) { return arith_unary(arg, ArithUnaryOp::Tzcnt); }
-    Value popcnt(Value arg) { return arith_unary(arg, ArithUnaryOp::Popcount); }
-    Value round_nearest_even(Value arg) { return arith_unary(arg, ArithUnaryOp::RoundNearest); }
-    Value round_down(Value arg) { return arith_unary(arg, ArithUnaryOp::RoundDown); }
-    Value round_up(Value arg) { return arith_unary(arg, ArithUnaryOp::RoundUp); }
-    Value round_toward_zero(Value arg) { return arith_unary(arg, ArithUnaryOp::RoundTruncate); }
-    Value sqrt(Value arg) { return arith_unary(arg, ArithUnaryOp::Sqrt); }
-    Value rsqrt(Value arg) { return arith_unary(arg, ArithUnaryOp::Rsqrt); }
-    Value rcp(Value arg) { return arith_unary(arg, ArithUnaryOp::Rcp); }
+    Value negate(Value a) { return arith_unary(a, ArithUnaryOp::Negate); }
+    Value negate_checked(Value a) { return arith_unary(a, ArithUnaryOp::Negate, true); }
+    Value abs(Value a) { return arith_unary(a, ArithUnaryOp::Abs); }
+    Value abs_checked(Value a) { return arith_unary(a, ArithUnaryOp::Abs, true); }
+    Value not_(Value a) { return arith_unary(a, ArithUnaryOp::Not); }
+    Value lzcnt(Value a) { return arith_unary(a, ArithUnaryOp::Lzcnt); }
+    Value tzcnt(Value a) { return arith_unary(a, ArithUnaryOp::Tzcnt); }
+    Value popcnt(Value a) { return arith_unary(a, ArithUnaryOp::Popcount); }
+    Value round_nearest_even(Value a) { return arith_unary(a, ArithUnaryOp::RoundNearest); }
+    Value round_down(Value a) { return arith_unary(a, ArithUnaryOp::RoundDown); }
+    Value round_up(Value a) { return arith_unary(a, ArithUnaryOp::RoundUp); }
+    Value round_toward_zero(Value a) { return arith_unary(a, ArithUnaryOp::RoundTruncate); }
+    Value sqrt(Value a) { return arith_unary(a, ArithUnaryOp::Sqrt); }
+    Value rsqrt(Value a) { return arith_unary(a, ArithUnaryOp::Rsqrt); }
+    Value rcp(Value a) { return arith_unary(a, ArithUnaryOp::Rcp); }
 
     //
     // Casts
     //
 
-    Value trunc(Value arg, ScalarDataType dtype) { return int_cast(arg, dtype, IntCastKind::Trunc); }
-    Value trunc_checked(Value arg, ScalarDataType dtype) { return int_cast(arg, dtype, IntCastKind::Trunc, true); }
-    Value sext(Value arg, ScalarDataType dtype) { return int_cast(arg, dtype, IntCastKind::Sext, false); }
-    Value zext(Value arg, ScalarDataType dtype) { return int_cast(arg, dtype, IntCastKind::Zext, false); }
-    Value signed_cast(Value arg, ScalarDataType to);
-    Value unsigned_cast(Value arg, ScalarDataType to);
+    Value trunc(Value a, ScalarDataType dtype) { return int_cast(a, dtype, IntCastKind::Trunc); }
+    Value trunc_checked(Value a, ScalarDataType dtype) { return int_cast(a, dtype, IntCastKind::Trunc, true); }
+    Value sext(Value a, ScalarDataType dtype) { return int_cast(a, dtype, IntCastKind::Sext, false); }
+    Value zext(Value a, ScalarDataType dtype) { return int_cast(a, dtype, IntCastKind::Zext, false); }
+    Value signed_cast(Value a, ScalarDataType to);
+    Value unsigned_cast(Value a, ScalarDataType to);
 
     //
     // Comparisons
@@ -898,20 +892,19 @@ public:
     Predicate cmp_ule(Value left, Value right) { return cmp(left, right, CmpOp::LessEqual, true); }
     Predicate bit_test(Value left, Value right) { return cmp_ne(and_(left, right), con(0, left.dtype())); }
     Predicate bit_testn(Value left, Value right) { return cmp_eq(and_(left, right), con(0, left.dtype())); }
-    Predicate is_positive(Value arg) { return cmp_gt(arg, con(0, arg.dtype())); }
-    Predicate is_negative(Value arg) { return cmp_lt(arg, con(0, arg.dtype())); }
-    Predicate bool2bit(Value arg) { return cmp_ne(arg, con(0, arg.dtype())); }
+    Predicate is_positive(Value a) { return cmp_gt(a, con(0, a.dtype())); }
+    Predicate is_negative(Value a) { return cmp_lt(a, con(0, a.dtype())); }
+    Predicate bool2bit(Value a) { return cmp_ne(a, con(0, a.dtype())); }
 
     //
     // Fpclass
     //
 
-    Predicate isnan(Value arg) { return fpclass(arg, FpClass::FPC_NAN); }
-    Predicate isinf(Value arg) { return fpclass(arg, FpClass::FPC_INFINITE); }
-    Predicate isfinite(Value arg) { return not_(fpclass(arg, FpClass::FPC_INFINITE | FpClass::FPC_NAN)); }
-    Predicate isnormal(Value arg) {
-        return not_(
-            fpclass(arg, FpClass::FPC_INFINITE | FpClass::FPC_NAN | FpClass::FPC_SUBNORMAL | FpClass::FPC_ZERO));
+    Predicate isnan(Value a) { return fpclass(a, FpClass::FPC_NAN); }
+    Predicate isinf(Value a) { return fpclass(a, FpClass::FPC_INFINITE); }
+    Predicate isfinite(Value a) { return not_(fpclass(a, FpClass::FPC_INFINITE | FpClass::FPC_NAN)); }
+    Predicate isnormal(Value a) {
+        return not_(fpclass(a, FpClass::FPC_INFINITE | FpClass::FPC_NAN | FpClass::FPC_SUBNORMAL | FpClass::FPC_ZERO));
     }
 
     //
@@ -939,43 +932,43 @@ public:
     //
 
     // Compute log2. If argument is zero, behavior is undefined
-    Value log2_no_zero(Value arg);
-    Value log2(Value arg);
-    Predicate has_single_bit(Value arg);
-    Value byteswap(Value arg);
-    Value bit_floor(Value arg);
-    Value bit_ceil(Value arg);
+    Value log2_no_zero(Value a);
+    Value log2(Value a);
+    Predicate has_single_bit(Value a);
+    Value byteswap(Value a);
+    Value bit_floor(Value a);
+    Value bit_ceil(Value a);
 
-    Value permute_i64_i8(Value arg, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6, uint8_t a7,
+    Value permute_i64_i8(Value a, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6, uint8_t a7,
                          uint8_t a8);
-    Value permute_i64_i16(Value arg, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4);
-    Value permute_i64_i32(Value arg, uint8_t a1, uint8_t a2);
-    Value permute_i32_i8(Value arg, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4);
-    Value permute_i32_i16(Value arg, uint8_t a1, uint8_t a2);
-    Value permute_i16_i8(Value arg, uint8_t a1, uint8_t a2);
+    Value permute_i64_i16(Value a, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4);
+    Value permute_i64_i32(Value a, uint8_t a1, uint8_t a2);
+    Value permute_i32_i8(Value a, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4);
+    Value permute_i32_i16(Value a, uint8_t a1, uint8_t a2);
+    Value permute_i16_i8(Value a, uint8_t a1, uint8_t a2);
 
-    Value permute_i8_bits(Value arg, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6, uint8_t a7,
+    Value permute_i8_bits(Value a, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6, uint8_t a7,
                           uint8_t a8);
 
-    Value reverse_bits_i8(Value arg) { return permute_i8_bits(arg, 7, 6, 5, 4, 3, 2, 1, 0); }
-    Value reverse_bits_full(Value arg) { return byteswap(reverse_bits_i8(arg)); }
-    Value replicate_ith_bit_i8(Value arg, int bit_idx) {
-        return permute_i8_bits(arg, bit_idx, bit_idx, bit_idx, bit_idx, bit_idx, bit_idx, bit_idx, bit_idx);
+    Value reverse_bits_i8(Value a) { return permute_i8_bits(a, 7, 6, 5, 4, 3, 2, 1, 0); }
+    Value reverse_bits_full(Value a) { return byteswap(reverse_bits_i8(a)); }
+    Value replicate_ith_bit_i8(Value a, int bit_idx) {
+        return permute_i8_bits(a, bit_idx, bit_idx, bit_idx, bit_idx, bit_idx, bit_idx, bit_idx, bit_idx);
     }
 
     //
     // Library functions
     //
 
-    // if arg < 0 ? -1 : 1
-    Value sign_no_zero(Value arg);
-    // if arg < 0 ? -1 : arg == 0 ? 0 : 1
-    Value sign(Value arg);
+    // if a < 0 ? -1 : 1
+    Value sign_no_zero(Value a);
+    // if a < 0 ? -1 : a == 0 ? 0 : 1
+    Value sign(Value a);
 
-    // if sign < 0 ? -arg : arg
-    Value copysign_no_zero(Value sign, Value arg);
-    // if sign < 0 ? -arg sign == 0 ? 0 : arg
-    Value copysign(Value sign, Value arg);
+    // if sign < 0 ? -a : a
+    Value copysign_no_zero(Value sign, Value a);
+    // if sign < 0 ? -a sign == 0 ? 0 : a
+    Value copysign(Value sign, Value a);
 
 private:
     struct FunctionBuilderImpl *impl_ = nullptr;

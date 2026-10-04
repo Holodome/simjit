@@ -33,7 +33,7 @@ static bool can_jit_target_on_host(Arch target, Arch host) {
 }
 
 struct FunctionRecord {
-    void *fn_ptr;
+    void *fn_ptr{};
     std::vector<ArgumentDecl> args;
     std::string identifier;
 };
@@ -408,7 +408,7 @@ void JitContext::reset_current_compilation() {
     debug_snapshot_ = {};
 }
 
-hir::Function *JitContext::build_hir(function_ref<void(FunctionBuilder &)> build_fn) {
+hir::Function *JitContext::build_hir(const function_ref<void(FunctionBuilder &)> &build_fn) {
     bool capture_hir = debug_options_.enabled() && bool(debug_options_.stages & DebugStage::HIR);
 #if SIMJIT_ENABLE_SERIALIZATION
     bool capture_serialized = debug_options_.enabled() && bool(debug_options_.stages & DebugStage::Serialized);
@@ -504,9 +504,9 @@ static std::string hex_bytes(const std::vector<uint8_t> &bytes) {
     out.reserve(bytes.size() * 3);
     for (size_t i = 0; i < bytes.size(); ++i) {
         if (i != 0) { out += ' '; }
-        uint8_t b = bytes[i];
-        out += kHex[b >> 4];
-        out += kHex[b & 0xf];
+        uint32_t b = bytes[i];
+        out += kHex[b >> 4u];
+        out += kHex[b & 0xfu];
     }
     return out;
 }

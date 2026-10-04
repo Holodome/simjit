@@ -159,7 +159,7 @@ private:
     }
 
     MemoryArenaBlock *current_ = nullptr;
-    size_t minimum_block_size = 1 << 14; // 16 KB
+    size_t minimum_block_size = 16lu * 1024lu;
 };
 
 } // namespace simjit

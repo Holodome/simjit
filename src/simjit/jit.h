@@ -25,7 +25,7 @@ enum class CompilePolicy : uint8_t {
     Scalar
 };
 
-enum class DebugStage : uint8_t {
+enum class DebugStage : uint32_t {
     HIR = 1,
     Vectorizer = 2,
     MIR = 4,
@@ -113,11 +113,11 @@ public:
     JitContext &operator=(const JitContext &) = delete;
     JitContext &operator=(JitContext &&other) noexcept;
 
-    void set_policy(CompilePolicy policy) noexcept { policy_ = policy; }
+    void set_policy(CompilePolicy x) noexcept { policy_ = x; }
     CompilePolicy policy() const noexcept { return policy_; }
-    void set_transformations(CodeTransformations transformations) noexcept { ctx_.transformations = transformations; }
+    void set_transformations(CodeTransformations x) noexcept { ctx_.transformations = x; }
     CodeTransformations transformations() const noexcept { return ctx_.transformations; }
-    void set_build_limits(const BuildLimits &limits) noexcept { ctx_.build_limits = limits; }
+    void set_build_limits(const BuildLimits &x) noexcept { ctx_.build_limits = x; }
     const BuildLimits &build_limits() const noexcept { return ctx_.build_limits; }
 
     DebugOptions &debug_options() noexcept { return debug_options_; }
@@ -150,7 +150,7 @@ private:
     // called in beginning of each new compilation.
     void reset_current_compilation();
 
-    hir::Function *build_hir(function_ref<void(FunctionBuilder &)> build_fn);
+    hir::Function *build_hir(const function_ref<void(FunctionBuilder &)> &build_fn);
 
     void *compile(std::string_view identifier, const hir::Function *hir, const CallerInfo *caller);
 

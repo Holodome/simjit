@@ -221,7 +221,7 @@ std::string show_argument_kind(ArgumentKind kind) {
 
     std::string result{};
     auto append = [&](std::string_view v) {
-        if (!result.empty()) { result += "|"; }
+        if (!result.empty()) { result += '|'; }
         result += v;
     };
 
@@ -239,7 +239,7 @@ std::string show_argument_kind(ArgumentKind kind) {
 std::string show_fpclass(FpClass flags) {
     std::string result{};
     auto append = [&](std::string_view v) {
-        if (!result.empty()) { result += "|"; };
+        if (!result.empty()) { result += '|'; };
         result += v;
     };
 
@@ -256,7 +256,7 @@ std::string show_fpclass(FpClass flags) {
 std::string show_arith_binary_flags(ArithBinaryOpFlags flags) {
     std::string result{};
     auto append = [&](std::string_view v) {
-        if (!result.empty()) { result += "|"; };
+        if (!result.empty()) { result += '|'; };
         result += v;
     };
     if (bool(flags & ArithBinaryOpFlags::SafetyCheck)) append("safety-check");

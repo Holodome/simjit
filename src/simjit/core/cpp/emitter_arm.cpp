@@ -928,7 +928,7 @@ struct ArmNeonCppEmitter : CppEmitterBase {
             format_to(result, "else *mask_byte_%zu_%zu = (uint8_t)(*mask_byte_%zu_%zu & ~mask_bit_%zu_%zu);\n", id,
                       lane, id, lane, id, lane);
         }
-        result += "}";
+        result += '}';
         return result;
     }
 
@@ -1741,7 +1741,7 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             format_to(result, "if (%s) arg%zu[acc%zu++] = pack_values_%zu[%zu];\n", lane_expr(data.cond, lane).c_str(),
                       data.dst, func->accs.index(data.acc), id, lane);
         }
-        result += "}";
+        result += '}';
         return result;
     }
 
@@ -2043,7 +2043,7 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
                   "(unsigned __int128)sum128_low;\n",
                   show_scalar_operand(data.hi_combined), //
                   data.dst);
-        result += "}";
+        result += '}';
         return result;
     }
 

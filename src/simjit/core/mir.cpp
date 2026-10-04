@@ -897,7 +897,7 @@ struct MirConstructState {
         VecDataType dtype = left->dtype.as_vec();
         Step *mask32 = make_const(ConstData::u64(0xffffffffull), dtype);
         Step *right_lo = make_const(ConstData::u64(magic & 0xffffffffull), dtype);
-        Step *right_hi = make_const(ConstData::u64(magic >> 32), dtype);
+        Step *right_hi = make_const(ConstData::u64(magic >> 32ull), dtype);
 
         Step *left_lo = sm.arith_bin({left, mask32, ArithBinaryOp::And}, dtype);
         Step *left_hi = sm.arith_bin({left, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
@@ -931,7 +931,8 @@ struct MirConstructState {
                 Step *sub = sm.arith_bin({left, q, ArithBinaryOp::Sub}, dtype);
                 Step *half = sm.arith_bin({sub, make_const(1, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
                 Step *t = sm.arith_bin({half, q, ArithBinaryOp::Add}, dtype);
-                return sm.arith_bin({t, make_const(div.more & 0x0f, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+                return sm.arith_bin({t, make_const(div.more & uint8_t(0x0f), dtype), ArithBinaryOp::ShiftRightLogical},
+                                    dtype);
             }
             return sm.arith_bin({q, make_const(div.more, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
         }
@@ -1879,9 +1880,9 @@ struct MirConstructState {
                 break;
             }
             case TernarylogicRpnOp::AndNot: {
-                uint8_t rhs = pop();
-                uint8_t lhs = pop();
-                push((uint8_t)(~lhs & rhs));
+                unsigned rhs = pop();
+                unsigned lhs = pop();
+                push(uint8_t(~lhs & rhs));
                 break;
             }
             }
@@ -3464,16 +3465,16 @@ std::vector<uint8_t> generate_bit_permute_lut(uint64_t func) {
     SIMJIT_ASSERT((func & 0x0707070707070707) == func);
 
     uint8_t loc1 = func & 0xff;
-    uint8_t loc2 = (func >> 8) & 0xff;
-    uint8_t loc3 = (func >> 16) & 0xff;
-    uint8_t loc4 = (func >> 24) & 0xff;
-    uint8_t loc5 = (func >> 32) & 0xff;
-    uint8_t loc6 = (func >> 40) & 0xff;
-    uint8_t loc7 = (func >> 48) & 0xff;
-    uint8_t loc8 = (func >> 56) & 0xff;
+    uint8_t loc2 = (func >> UINT64_C(8)) & 0xff;
+    uint8_t loc3 = (func >> UINT64_C(16)) & 0xff;
+    uint8_t loc4 = (func >> UINT64_C(24)) & 0xff;
+    uint8_t loc5 = (func >> UINT64_C(32)) & 0xff;
+    uint8_t loc6 = (func >> UINT64_C(40)) & 0xff;
+    uint8_t loc7 = (func >> UINT64_C(48)) & 0xff;
+    uint8_t loc8 = (func >> UINT64_C(56)) & 0xff;
 
-    auto construct_value = [&](uint8_t src) -> uint8_t {
-        uint8_t result = 0;
+    auto construct_value = [&](unsigned src) -> unsigned {
+        unsigned result = 0;
         result |= ((src >> loc1) & 1);
         result |= ((src >> loc2) & 1) << 1;
         result |= ((src >> loc3) & 1) << 2;

@@ -48,7 +48,7 @@ std::string show_special_ops(SpecialOp ops) {
     result.reserve(64);
     auto append = [&](SpecialOp op, const char *name) {
         if (!bool(ops & op)) { return; }
-        if (!result.empty()) { result += ","; }
+        if (!result.empty()) { result += ','; }
         result += name;
     };
     append(SpecialOp::I64Mul, "i64-mul");

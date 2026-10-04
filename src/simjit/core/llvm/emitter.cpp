@@ -1074,16 +1074,16 @@ struct LLVMBuilder {
                 case ArithBinaryOp::Add:
                     if (vdtype.is_float()) {
                         V *zero = llvm::ConstantFP::getNegativeZero(vty->getElementType());
-                        llvm::CallInst *inst = b->CreateIntrinsic(llvm::Intrinsic::vector_reduce_fadd, {ty},
-                                                                  {zero, step_to_llvm(data.arg)});
+                        V *inst = b->CreateIntrinsic(llvm::Intrinsic::vector_reduce_fadd, {ty},
+                                                     {zero, step_to_llvm(data.arg)});
                         return with_float_contract(inst, false, true);
                     }
                     return unary_reduce(llvm::Intrinsic::vector_reduce_add);
                 case ArithBinaryOp::Mul:
                     if (vdtype.is_float()) {
                         V *one = llvm::ConstantFP::get(vty->getElementType(), 1.0);
-                        llvm::CallInst *inst = b->CreateIntrinsic(llvm::Intrinsic::vector_reduce_fmul, {ty},
-                                                                  {one, step_to_llvm(data.arg)});
+                        V *inst = b->CreateIntrinsic(llvm::Intrinsic::vector_reduce_fmul, {ty},
+                                                     {one, step_to_llvm(data.arg)});
                         return with_float_contract(inst, false, true);
                     }
                     return unary_reduce(llvm::Intrinsic::vector_reduce_mul);

@@ -847,8 +847,8 @@ struct AlgebraicVectorizer {
 
             if (info->family == CastFamily::Float && delta != 1) { continue; }
 
-            int direct = vec_range;
-            int indirect = delta - direct;
+            size_t direct = vec_range;
+            size_t indirect = delta - direct;
             SIMJIT_ASSERT(indirect > 0);
 
             Node *new_node = arg;
@@ -858,8 +858,8 @@ struct AlgebraicVectorizer {
                 new_node = create_cast_direct(new_node, *info, direct_dtype);
             }
 
-            for (int i = 0; i < indirect; ++i) {
-                int shift = direct + i + 1;
+            for (size_t i = 0; i < indirect; ++i) {
+                size_t shift = direct + i + 1;
                 ScalarDataType downcast_dtype =
                     info->family == CastFamily::Float ? to : scalar_dtype_with_size(from_size >> shift);
                 new_node = create_cast_narrow_combine(new_node, *info, downcast_dtype);
@@ -1794,7 +1794,7 @@ struct AlgebraicVectorizer {
 static void print_tree_rec(Node *node, std::string &str, std::vector<size_t> &print_index_by_id,
                            size_t &next_print_index, size_t depth = 0) {
     for (size_t i = 0; i < depth; ++i)
-        str += " ";
+        str += ' ';
 
     if (print_index_by_id[node->id] != SIZE_MAX) {
         simjit::format_to(str, "[%zu] ", print_index_by_id[node->id]);

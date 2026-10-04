@@ -14,106 +14,106 @@ namespace hir {
 struct Step;
 
 struct ArithBinaryData {
-    ArithBinaryOp op;
-    Step *left;
-    Step *right;
-    ArithBinaryOpFlags flags = ArithBinaryOpFlags::No;
+    ArithBinaryOp op{};
+    Step *left{};
+    Step *right{};
+    ArithBinaryOpFlags flags{};
 };
 
 struct CheckedOpData {
-    Step *op;
-    Step *mask = nullptr;
+    Step *op{};
+    Step *mask{};
 };
 
 struct ArithUnaryData {
-    ArithUnaryOp op;
-    Step *arg;
+    ArithUnaryOp op{};
+    Step *arg{};
 };
 
 struct IntCastData {
-    IntCastKind kind;
-    Step *arg;
+    IntCastKind kind{};
+    Step *arg{};
 };
 
 struct FloatCastData {
-    Step *arg;
+    Step *arg{};
     bool is_unsigned = false;
 };
 
 struct StoreData {
-    Step *what;
-    ArgumentIdx addr;
-    LoadStoreKind kind;
+    Step *what{};
+    ArgumentIdx addr{};
+    LoadStoreKind kind{};
     Step *cond = nullptr;
 };
 
 struct CmpData {
-    CmpOp op;
-    Step *left;
-    Step *right;
+    CmpOp op{};
+    Step *left{};
+    Step *right{};
     bool is_unsigned = false;
 };
 
 struct PredicateBinaryData {
-    Step *left;
-    Step *right;
-    PredicateBinaryOp op;
+    Step *left{};
+    Step *right{};
+    PredicateBinaryOp op{};
 };
 
 struct AccArithBinaryData {
-    ArithBinaryOp op;
-    Step *arg;
-    AccIdx acc;
-    Step *cond = nullptr;
+    ArithBinaryOp op{};
+    Step *arg{};
+    AccIdx acc{};
+    Step *cond{};
 };
 
 struct AccPredicateBinData {
-    PredicateBinaryOp op;
-    Step *arg;
-    AccIdx acc;
+    PredicateBinaryOp op{};
+    Step *arg{};
+    AccIdx acc{};
 };
 
 struct SelectData {
-    Step *cond;
-    Step *truthy;
-    Step *falsy;
+    Step *cond{};
+    Step *truthy{};
+    Step *falsy{};
 };
 
 struct IndexData {};
 
 struct ScatterData {
-    Step *arg;
-    Step *idx;
-    ArgumentIdx dst;
-    Step *cond = nullptr;
+    Step *arg{};
+    Step *idx{};
+    ArgumentIdx dst{};
+    Step *cond{};
 };
 
 struct PackData {
-    Step *arg;
-    Step *cond;
-    ArgumentIdx dst;
-    AccIdx dst_size_acc;
+    Step *arg{};
+    Step *cond{};
+    ArgumentIdx dst{};
+    AccIdx dst_size_acc{};
 };
 
 struct GatherData {
-    Step *idx;
-    ArgumentIdx data;
+    Step *idx{};
+    ArgumentIdx data{};
 };
 
 struct PermuteData {
-    Step *arg;
-    uint64_t permute;
-    bool is_bit;
+    Step *arg{};
+    uint64_t permute{};
+    bool is_bit{};
 };
 
 struct LoadData {
-    ArgumentIdx idx;
-    LoadStoreKind kind;
+    ArgumentIdx idx{};
+    LoadStoreKind kind{};
 };
 
 struct FpclassData {
-    FpClass flags;
-    Step *arg;
+    FpClass flags{};
+    Step *arg{};
 };
 
 enum class StepKind : uint8_t {
@@ -285,17 +285,17 @@ struct Accumulator {
 };
 
 enum class SpecialOp : uint16_t {
-    None = 0,
-    I64Mul = 1 << 0,
-    Gather = 1 << 1,
-    Scatter = 1 << 2,
-    CondScatter = 1 << 3,
-    SmallPack = 1 << 4,
-    ArbitraryBitPermute = 1 << 5,
-    I8Mul = 1 << 6,
-    I8VariableShift = 1 << 7,
-    SmallLzcnt = 1 << 8,
-    SmallGather = 1 << 9,
+    None = 0x0,
+    I64Mul = 0x1,
+    Gather = 0x2,
+    Scatter = 0x4,
+    CondScatter = 0x8,
+    SmallPack = 0x10,
+    ArbitraryBitPermute = 0x20,
+    I8Mul = 0x40,
+    I8VariableShift = 0x80,
+    SmallLzcnt = 0x100,
+    SmallGather = 0x200,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(SpecialOp)
 

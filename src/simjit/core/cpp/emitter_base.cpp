@@ -5,7 +5,7 @@
 
 #include "simjit/core/cpp/emitter_internal.h"
 
-#include <math.h>
+#include <cmath>
 #include <type_traits>
 
 namespace simjit {
@@ -246,7 +246,7 @@ template <typename T> static std::string format_float_literal_internal(T value) 
         if (literal.find('.') == std::string::npos && literal.find('e') == std::string::npos) {
             literal += ".0"; // Ensure it's treated as float
         }
-        if constexpr (std::is_same_v<T, float>) { literal += "f"; }
+        if constexpr (std::is_same_v<T, float>) { literal += 'f'; }
         return literal;
     }
 
@@ -1178,7 +1178,7 @@ std::string CppEmitterBase::emit_source() {
         if (true) { decl += " __restrict "; }
         decl += format("arg%zu", arg.idx);
     }
-    decl += ")";
+    decl += ')';
 
     std::string code{};
     const std::string indent1(4, ' ');
@@ -1209,7 +1209,7 @@ std::string CppEmitterBase::emit_source() {
     }
     code += after_loops_to_cpp(1);
     code += compile_steps(func->epilogue_roots, 1, EmitPhase::Epilogue);
-    code += "}";
+    code += '}';
     return code;
 }
 

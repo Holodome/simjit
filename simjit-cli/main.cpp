@@ -186,7 +186,7 @@ static std::string base64_encode(const uint8_t *buf, size_t buf_len) {
     return ret;
 }
 
-static std::string make_base64(const std::vector<uint8_t> &memory) {
+[[maybe_unused]] static std::string make_base64(const std::vector<uint8_t> &memory) {
     return base64_encode(memory.data(), memory.size());
 }
 

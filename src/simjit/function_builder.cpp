@@ -1115,13 +1115,13 @@ static void check_store_dst(const ArgumentDecl &decl, const Step *arg, StepKind 
 }
 
 enum class ArgumentAccess : uint8_t {
-    None = 0,
-    SequentialRead = 1u << 0,
-    SequentialWrite = 1u << 1,
-    RandomRead = 1u << 2,
-    RandomWrite = 1u << 3,
-    AppendWrite = 1u << 4,
-    AggregateWrite = 1u << 5,
+    None = 0x0,
+    SequentialRead = 0x1,
+    SequentialWrite = 0x2,
+    RandomRead = 0x4,
+    RandomWrite = 0x8,
+    AppendWrite = 0x10,
+    AggregateWrite = 0x20,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(ArgumentAccess)
 
@@ -1422,9 +1422,9 @@ void FunctionBuilder::predicate_agg(Predicate arg, PredicateBinaryOp op, Argumen
 }
 
 static uint64_t xorshift64(uint64_t x) noexcept {
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
+    x ^= x << 13ull;
+    x ^= x >> 7ull;
+    x ^= x << 17ull;
     return x;
 }
 
@@ -1449,7 +1449,7 @@ template <> uint64_t to_uint64(Step *value) noexcept {
 }
 
 template <typename... Args> static uint64_t make_hash(StepKind kind, Args... args) noexcept {
-    return xorshift64((((uint64_t)kind) << 32) | (to_uint64(args) + ...));
+    return xorshift64((((uint64_t)kind) << 32ull) | (to_uint64(args) + ...));
 }
 
 Value FunctionBuilder::load(Argument arg, LoadStoreKind kind) {

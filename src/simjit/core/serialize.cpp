@@ -405,7 +405,7 @@ static std::string debug_context_str() {
     std::string result;
     result.reserve(32);
     for (const auto &s : debug_context_stack) {
-        if (!result.empty()) { result += "|"; }
+        if (!result.empty()) { result += '|'; }
         result += s;
     }
     return result;

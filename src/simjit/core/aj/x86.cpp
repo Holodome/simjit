@@ -1547,9 +1547,9 @@ struct CompileState {
             const auto &right_data = right_step->step_data<StepKind::Const>();
             // Only allow 32 bit operands
             if ((int64_t)(int32_t)right_data.as_signed() == right_data.as_signed()) {
-                int64_t imm_value = right_data.as_signed();
+                uint64_t imm_value = right_data.as_unsigned();
                 if ((sdtype == ScalarDataType::I8 || sdtype == ScalarDataType::I16) && is_shift_rotate(op)) {
-                    imm_value &= (int64_t)scalar_dtype_bits(sdtype) - 1;
+                    imm_value &= scalar_dtype_bits(sdtype) - 1;
                 }
                 aj::Imm imm = imm_value;
                 switch (op) {

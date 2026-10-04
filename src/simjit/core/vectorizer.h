@@ -28,7 +28,7 @@ enum class CastFamily : uint8_t {
 // This is because it does not have step_data and similar accessors, as well as it does not support SIMJIT_MATCH.
 struct Node {
     const hir::Step *step = nullptr;
-    Node *children[3];
+    Node *children[3]{};
     uint8_t item_width = 0;
     uint8_t mask_combine_coef = 0;
     uint8_t child_count = 0;

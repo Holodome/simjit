@@ -207,7 +207,7 @@ static std::string schema_json(nonstd::span<ArgumentDecl> args) {
             throw std::runtime_error("invalid arg kind");
         }
         result += std::format("{{ \"dtype\": \"{}\", \"kind\": \"{}\"}}", show_scalar_dtype(arg.dtype), kind);
-        if (i + 1 != args.size()) { result += ","; }
+        if (i + 1 != args.size()) { result += ','; }
     }
     result += "]}";
     return result;
@@ -909,9 +909,9 @@ static std::string error_object_json(const CompileState &state) {
     for (size_t i = 0; i < items.size(); ++i) {
         const auto &[key, value] = items[i];
         result += std::format("\"{}\": \"{}\"", key, escape_json(value));
-        if (i + 1 != items.size()) { result += ","; }
+        if (i + 1 != items.size()) { result += ','; }
     }
-    result += "}";
+    result += '}';
     return result;
 }
 
@@ -942,9 +942,9 @@ static std::string error_metadata_json(const CompileState &state) {
     for (size_t i = 0; i < items.size(); ++i) {
         const auto &[key, info] = items[i];
         result += std::format("\"{}\": {}", key, error_info_json(*info));
-        if (i + 1 != items.size()) { result += ","; }
+        if (i + 1 != items.size()) { result += ','; }
     }
-    result += "}";
+    result += '}';
     return result;
 }
 
@@ -954,10 +954,10 @@ static std::string codes_json(const std::vector<CodeBlob> &codes) {
         const auto &code = codes[i];
         result += std::format("{{\"name\": \"{}\", \"code\": \"{}\"", escape_json(code.name), escape_json(code.code));
         if (code.comparison_unstable) { result += ",\"comparison_unstable\": true"; }
-        result += "}";
-        if (i + 1 != codes.size()) { result += ","; }
+        result += '}';
+        if (i + 1 != codes.size()) { result += ','; }
     }
-    result += "]";
+    result += ']';
     return result;
 }
 
@@ -973,9 +973,9 @@ static std::string build_item_json(const CompileState &state) {
     const char *variant_mode = state.vector_status == "not-requested" ? "scalar" : "vector";
     std::string result = "{";
     result += std::format("\"n\": {}", state.meta.program_index);
-    result += ",";
+    result += ',';
     result += std::format("\"id\": \"{}\"", escape_json(item_id(state.meta)));
-    result += ",";
+    result += ',';
     result += "\"suite\": \"xsmith\"";
     result += ",";
     result += std::format("\"variant\": \"{}-{}\"", escape_json(state.meta.arch), variant_mode);
