@@ -15,6 +15,7 @@
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/IR/Argument.h"
@@ -1555,7 +1556,11 @@ LLVMOptLevel LLVMSession::opt_level() const noexcept {
 void LLVMSession::optimize_module(LLVMModuleOwner &owner) {
     if (!owner.context || !owner.module) { throw std::invalid_argument("cannot optimize an empty LLVM module"); }
     owner.module->setDataLayout(impl_->jit->getDataLayout());
+#if LLVM_VERSION_MAJOR < 21
+    owner.module->setTargetTriple(impl_->target_machine->getTargetTriple().str());
+#else
     owner.module->setTargetTriple(impl_->target_machine->getTargetTriple());
+#endif
     verify_module(*owner.module);
     run_optimization_pipeline(*owner.module, *impl_->target_machine, impl_->opt_level);
 }
@@ -1563,7 +1568,11 @@ void LLVMSession::optimize_module(LLVMModuleOwner &owner) {
 void LLVMSession::add_module(LLVMModuleOwner owner) {
     if (!owner.context || !owner.module) { throw std::invalid_argument("cannot add an empty LLVM module"); }
     owner.module->setDataLayout(impl_->jit->getDataLayout());
+#if LLVM_VERSION_MAJOR < 21
+    owner.module->setTargetTriple(impl_->target_machine->getTargetTriple().str());
+#else
     owner.module->setTargetTriple(impl_->target_machine->getTargetTriple());
+#endif
     verify_module(*owner.module);
     llvm::orc::ThreadSafeModule thread_safe_module(std::move(owner.module), std::move(owner.context));
     if (llvm::Error error = impl_->jit->addIRModule(std::move(thread_safe_module))) {

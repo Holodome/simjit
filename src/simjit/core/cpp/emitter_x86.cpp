@@ -350,6 +350,7 @@ struct X86CppEmitter : CppEmitterBase {
     };
 
     static std::optional<ZeroCompareTestArgs> zero_compare_test_args(const Step *step) {
+        SIMJIT_ASSERT(step != nullptr);
         if (!step->is(StepKind::Compare) || !step->dtype.is_mask()) { return std::nullopt; }
         const auto &data = step->step_data<StepKind::Compare>();
         if (data.op != CmpOp::Equal && data.op != CmpOp::NotEqual) { return std::nullopt; }

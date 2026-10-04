@@ -3,14 +3,14 @@ include("${SIMJIT_SOURCE_ROOT}/cmake/simjitVersion.cmake")
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-option(SIMJIT_ENABLE_LLVM "Include LLVM backend based on system LLVM installation" ON)
+option(SIMJIT_ENABLE_LLVM "Include LLVM backend based on system LLVM installation" OFF)
 option(SIMJIT_ENABLE_ASMJIT "Include AsmJit backend based on AsmJit code" ON)
 option(SIMJIT_ENABLE_ASMJIT_X86 "Include x86 AsmJit backend" ON)
 option(SIMJIT_ENABLE_ASMJIT_ARM "Include AArch64 AsmJit backend" ON)
 option(SIMJIT_ENABLE_CPP "Include C++ backend" ON)
 option(SIMJIT_ENABLE_LIBDIVIDE "Enable optional libdivide support from thirdparty/libdivide" ON)
 option(SIMJIT_ENABLE_SERIALIZATION "Enable HIR serialization and deserialization support" OFF)
-option(SIMJIT_ENABLE_NATIVE_ARCH "Build simjit itself with native CPU flags" ON)
+option(SIMJIT_ENABLE_NATIVE_ARCH "Build simjit itself with native CPU flags" OFF)
 option(SIMJIT_ENABLE_COVERAGE "Enable coverage reporting" OFF)
 option(SIMJIT_ENABLE_ASAN "Enable ASAN" OFF)
 option(SIMJIT_ENABLE_UBSAN "Enable UBSAN" OFF)
@@ -235,7 +235,8 @@ function(simjit_apply_sanitizers target)
   endif()
 endfunction()
 
-set(SIMJIT_REQUIRED_LLVM_MAJOR 23 CACHE INTERNAL "Required LLVM major version" FORCE)
+set(SIMJIT_MIN_SUPPORTED_LLVM_MAJOR 20)
+set(SIMJIT_MAX_SUPPORTED_LLVM_MAJOR 23)
 
 function(simjit_find_llvm_config output)
   set(candidates)
@@ -244,7 +245,10 @@ function(simjit_find_llvm_config output)
   elseif(NOT "$ENV{LLVM_CONFIG}" STREQUAL "")
     list(APPEND candidates "$ENV{LLVM_CONFIG}")
   endif()
-  list(APPEND candidates llvm-config "llvm-config-${SIMJIT_REQUIRED_LLVM_MAJOR}")
+  list(APPEND candidates llvm-config)
+  foreach(llvm_major RANGE ${SIMJIT_MAX_SUPPORTED_LLVM_MAJOR} ${SIMJIT_MIN_SUPPORTED_LLVM_MAJOR} -1)
+    list(APPEND candidates "llvm-config-${llvm_major}")
+  endforeach()
   list(REMOVE_DUPLICATES candidates)
 
   set(attempts)
@@ -273,20 +277,23 @@ function(simjit_find_llvm_config output)
       list(APPEND attempts "${executable}: could not determine version")
       continue()
     endif()
-    if(NOT CMAKE_MATCH_1 STREQUAL "${SIMJIT_REQUIRED_LLVM_MAJOR}")
+    if(CMAKE_MATCH_1 LESS SIMJIT_MIN_SUPPORTED_LLVM_MAJOR OR
+       CMAKE_MATCH_1 GREATER SIMJIT_MAX_SUPPORTED_LLVM_MAJOR)
       list(APPEND attempts "${executable}: version ${version}")
       continue()
     endif()
 
-    set(LLVM_CONFIG "${executable}" CACHE FILEPATH "llvm-config for LLVM ${SIMJIT_REQUIRED_LLVM_MAJOR}" FORCE)
+    set(LLVM_CONFIG "${executable}" CACHE FILEPATH "llvm-config for the selected supported LLVM" FORCE)
+    set(SIMJIT_LLVM_MAJOR "${CMAKE_MATCH_1}" CACHE INTERNAL "Selected LLVM major version" FORCE)
     set(${output} "${executable}" PARENT_SCOPE)
     return()
   endforeach()
 
   string(JOIN ", " attempts_text ${attempts})
   message(FATAL_ERROR
-    "LLVM ${SIMJIT_REQUIRED_LLVM_MAJOR} is required, but no matching llvm-config was found. "
-    "Tried ${attempts_text}. Set LLVM_CONFIG to the LLVM ${SIMJIT_REQUIRED_LLVM_MAJOR} executable.")
+    "SIMJIT_ENABLE_LLVM=ON requires LLVM ${SIMJIT_MIN_SUPPORTED_LLVM_MAJOR} through "
+    "${SIMJIT_MAX_SUPPORTED_LLVM_MAJOR}, but no matching llvm-config was found. Tried ${attempts_text}. "
+    "Set LLVM_CONFIG to a supported executable or configure with -DSIMJIT_ENABLE_LLVM=OFF.")
 endfunction()
 
 function(simjit_find_llvm_clang output diagnostics llvm_bindir)
@@ -299,8 +306,8 @@ function(simjit_find_llvm_clang output diagnostics llvm_bindir)
   list(APPEND candidates
     "${llvm_bindir}/clang"
     clang
-    "${llvm_bindir}/clang-${SIMJIT_REQUIRED_LLVM_MAJOR}"
-    "clang-${SIMJIT_REQUIRED_LLVM_MAJOR}")
+    "${llvm_bindir}/clang-${SIMJIT_LLVM_MAJOR}"
+    "clang-${SIMJIT_LLVM_MAJOR}")
   list(REMOVE_DUPLICATES candidates)
 
   set(attempts)
@@ -329,13 +336,13 @@ function(simjit_find_llvm_clang output diagnostics llvm_bindir)
       list(APPEND attempts "${executable}: could not determine version")
       continue()
     endif()
-    if(NOT CMAKE_MATCH_1 STREQUAL "${SIMJIT_REQUIRED_LLVM_MAJOR}")
+    if(NOT CMAKE_MATCH_1 STREQUAL "${SIMJIT_LLVM_MAJOR}")
       string(REGEX MATCH "^[^\n]*" version_line "${version}")
       list(APPEND attempts "${executable}: ${version_line}")
       continue()
     endif()
 
-    set(CLANG_EXECUTABLE "${executable}" CACHE FILEPATH "Clang ${SIMJIT_REQUIRED_LLVM_MAJOR} executable" FORCE)
+    set(CLANG_EXECUTABLE "${executable}" CACHE FILEPATH "Clang matching the selected LLVM" FORCE)
     set(${output} "${executable}" PARENT_SCOPE)
     set(${diagnostics} "" PARENT_SCOPE)
     return()
@@ -344,7 +351,7 @@ function(simjit_find_llvm_clang output diagnostics llvm_bindir)
   string(JOIN ", " attempts_text ${attempts})
   set(${output} "" PARENT_SCOPE)
   set(${diagnostics}
-    "Clang ${SIMJIT_REQUIRED_LLVM_MAJOR} executable (tried ${attempts_text})"
+    "Clang ${SIMJIT_LLVM_MAJOR} executable matching the selected LLVM (tried ${attempts_text})"
     PARENT_SCOPE)
 endfunction()
 
@@ -467,6 +474,7 @@ if(SIMJIT_ENABLE_CPP)
 endif()
 
 add_library(simjit STATIC ${simjit_sources})
+add_library(simjit::simjit ALIAS simjit)
 set_target_properties(simjit PROPERTIES
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED ON
@@ -489,6 +497,7 @@ target_compile_options(simjit PRIVATE -fexceptions)
 if(SIMJIT_ENABLE_NATIVE_ARCH)
   target_compile_options(simjit PRIVATE -march=native)
 endif()
+message(STATUS "simjit: install=${SIMJIT_ENABLE_INSTALL} (default=${SIMJIT_ENABLE_INSTALL_DEFAULT})")
 simjit_apply_lto(simjit)
 
 set(SIMJIT_DEF_ENABLE_LLVM 0)

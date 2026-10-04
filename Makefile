@@ -1,7 +1,7 @@
 .PHONY: help all opt clean distclean debug release reldebug test test-reldebug \
 	fuzz-tools py py-clean py-rebuild py-debug py-release py-test py-typecheck py-lint py-e2e \
 	regen-pyi dump-tests-json run-local-runner local-runner run-min-tests run-all-tests \
-	check-builds check-installs static-analysis compile-commands clang-format
+	check-builds check-installs check-install-quick static-analysis compile-commands clang-format
 
 all: debug
 opt: release
@@ -32,6 +32,7 @@ help:
 		'  make run-all-tests         Run complete all-suite project workflow' \
 		'  make check-builds          Check selected build configurations' \
 		'  make check-installs        Build and check jit/toolkit install profiles' \
+		'  make check-install-quick   Install and run one portable JIT-package consumer smoke' \
 		'  make static-analysis       Build C++ library and Python extension with static analysis' \
 		'  make compile-commands      Merge configured CMake compile databases' \
 		'  make dump-tests-json       Dump full JSONL test bundle' \
@@ -92,6 +93,7 @@ PY_SCRIPT ?= $(ROOT)/scripts/py
 PY_LLVM ?= 0
 PY_CPP ?= 0
 INSTALL_CHECK_DIR ?= $(BUILD_DIR)/install-check
+INSTALL_QUICK_CHECK_DIR ?= $(BUILD_DIR)/install-quick-check
 
 ifeq ($(GEN),ninja)
 	export CMAKE_GENERATOR := Ninja
@@ -247,6 +249,9 @@ check-builds:
 
 check-installs:
 	"$(ROOT)/tests/scripts/check-installs.sh" "$(INSTALL_CHECK_DIR)" "$(WORKERS)"
+
+check-install-quick:
+	"$(ROOT)/tests/scripts/check-installs.sh" "$(INSTALL_QUICK_CHECK_DIR)" "$(WORKERS)" quick
 
 static-analysis: export ENABLE_STATIC_ANALYSIS=1
 static-analysis: reldebug py
