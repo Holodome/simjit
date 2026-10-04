@@ -292,8 +292,8 @@ static TypeSlot choose_promoted_numeric_type(std::string_view where, const TypeS
                                              const TypeSlot &b = TypeSlot::none(),
                                              const TypeSlot &c = TypeSlot::none()) {
     TypeSlot chosen{};
-    TypeSlot values[] = {a, b, c};
-    for (TypeSlot value : values) {
+    const TypeSlot values[] = {a, b, c};
+    for (const TypeSlot &value : values) {
         if (!value.has) { continue; }
         if (value.is_timestamp()) {
             throw std::invalid_argument(

@@ -82,7 +82,7 @@ struct SuggestedReg {
 };
 
 struct ArgInfo {
-    const ArgumentDecl *arg;
+    const ArgumentDecl *arg = nullptr;
     aja64::Gp gp;
 };
 
@@ -306,6 +306,7 @@ static bool vector_binary_const_can_fold(VecDataType vdtype, ArithBinaryOp op, c
 namespace {
 struct CompileState {
     MemoryArena *arena;
+    // cppcheck-suppress uninitMemberVarNoCtor
     aja64::Compiler &cc;
     GpR counter{};
     GpR row_count{};
@@ -363,10 +364,12 @@ struct CompileState {
 
     VecR vec_special_const(unsigned constant) noexcept {
         SIMJIT_ASSERT(constant < SpecialConstant::Count);
+        // cppcheck-suppress arrayIndexOutOfBoundsCond
         return special_constants[constant].as<VecR>();
     }
     GpR gp_special_const(unsigned constant) noexcept {
         SIMJIT_ASSERT(constant < SpecialConstant::Count);
+        // cppcheck-suppress arrayIndexOutOfBoundsCond
         return special_constants[constant].as<GpR>();
     }
 
@@ -384,7 +387,7 @@ struct CompileState {
         return refcounts[step->id] != 0 && refcounts[step->id] == folded_const_refcounts[step->id];
     }
 
-    void record_folded_const_ref(Step *step) {
+    void record_folded_const_ref(const Step *step) {
         switch (step->kind) {
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 if (!SIMJIT_A64_ASMJIT_CONST_OPS || !data.right->is(StepKind::Const)) { return; }
@@ -3530,7 +3533,7 @@ struct CompileState {
         });
     }
 
-    bool is_second_paired_load(Step *step) const {
+    bool is_second_paired_load(const Step *step) const {
         if (!SIMJIT_A64_ASMJIT_LDP || !step->is(StepKind::Load) || !step->dtype.is_vec()) { return false; }
         for (const Step *paired : paired_ops) {
             if (paired == step) { return true; }
@@ -3538,7 +3541,7 @@ struct CompileState {
         return false;
     }
 
-    std::optional<std::pair<ArgumentAddress, size_t>> post_index_access(Step *step) const {
+    std::optional<std::pair<ArgumentAddress, size_t>> post_index_access(const Step *step) const {
         if (is_second_paired_load(step)) { return {}; }
 
         if (step->is(StepKind::Load)) {
@@ -3679,7 +3682,7 @@ struct CompileState {
         }
     }
 
-    void emit_mask_shift_append(Step *root) {
+    void emit_mask_shift_append(const Step *root) {
         SIMJIT_ASSERT(is_mask_shift_writer_root(root));
         auto data = root->step_data<StepKind::Store>();
         MSSWriterState &writer = mask_shift_writers[data.addr.arg];
@@ -3735,7 +3738,7 @@ struct CompileState {
         cc.bind(no_flush);
     }
 
-    bool try_emit_store_pair(Step *left, Step *right) {
+    bool try_emit_store_pair(const Step *left, const Step *right) {
         bool can_pair_stores = SIMJIT_A64_ASMJIT_STP && left != nullptr && right != nullptr &&
                                left->is(StepKind::Store) && right->is(StepKind::Store) && left->dtype.is_vec() &&
                                right->dtype.is_vec() && left->dtype == right->dtype;
@@ -4101,8 +4104,8 @@ struct CompileState {
     void init_accs(nonstd::span<Step *const> prologue_roots) {
         for (const Step *step : prologue_roots) {
             if (!step->is(StepKind::AccStore)) continue;
-            const auto &store = step->step_data<StepKind::AccStore>();
-            size_t idx = mir_func->accs.index(store.acc);
+            const auto &store_data = step->step_data<StepKind::AccStore>();
+            size_t idx = mir_func->accs.index(store_data.acc);
             switch (step->dtype.kind) {
             case DataTypeKind::Scalar: {
                 ScalarDataType dtype = step->dtype.as_scalar();

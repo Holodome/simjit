@@ -966,7 +966,7 @@ struct NativeBuilderImpl {
             builder.cond_store(builder.bit2bool(null_mask), cond, out_null, sj::LoadStoreKind::Unaligned);
     }
 
-    void store_expr(NodeId id, LogicalType ty, std::string_view output_name) {
+    void store_expr(NodeId id, const LogicalType &ty, std::string_view output_name) {
         const DslNode &node = native_node(id);
         mark_buffer_usage(output_name, BufferUsageFlags::BufferUsageOutputVector);
         sj::Argument out = get_output(output_name, ty);
@@ -999,7 +999,7 @@ struct NativeBuilderImpl {
         }
     }
 
-    void scatter_expr(NodeId id, LogicalType ty, std::string_view output_name) {
+    void scatter_expr(NodeId id, const LogicalType &ty, std::string_view output_name) {
         const DslNode &node = native_node(id);
         mark_buffer_usage(output_name, BufferUsageFlags::BufferUsageOutputTable);
         sj::Argument out = get_output(output_name, ty);

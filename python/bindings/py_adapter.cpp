@@ -95,7 +95,7 @@ struct DslModule {
 
 static const DslModule &get_dsl() {
     // Keep the cached Python objects alive until process exit to avoid Python destruction-order dependencies.
-    static const DslModule *instance = []() -> const DslModule * {
+    static const DslModule &instance = *[]() -> const DslModule * {
         auto mod = py::module_::import("simjit.ir");
 
         alignas(DslModule) static unsigned char memory[sizeof(DslModule)];
@@ -105,7 +105,7 @@ static const DslModule &get_dsl() {
 #undef X
         };
     }();
-    return *instance;
+    return instance;
 }
 
 #define SV(x) static_cast<int>((x).size()), ((x).data() == nullptr ? "" : (x).data())

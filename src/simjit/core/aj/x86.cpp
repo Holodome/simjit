@@ -54,7 +54,7 @@ using AnyR = aj::Reg;
 
 namespace {
 struct ArgInfo {
-    const ArgumentDecl *arg;
+    const ArgumentDecl *arg = nullptr;
     GpR gp;
     ax86::Mem spilled{};
 };
@@ -1064,6 +1064,7 @@ static bool scalar_const_binary_can_fold(ScalarDataType sdtype, ArithBinaryOp op
 namespace {
 struct CompileState {
     MemoryArena *arena;
+    // cppcheck-suppress uninitMemberVarNoCtor
     ax86::Compiler &cc;
     GpR counter{};
     GpR row_count{};
@@ -1126,7 +1127,7 @@ struct CompileState {
         return refcounts[step->id] != 0 && refcounts[step->id] == folded_const_refcounts[step->id];
     }
 
-    void record_folded_const_ref(Step *step) noexcept {
+    void record_folded_const_ref(const Step *step) noexcept {
         switch (step->kind) {
             SIMJIT_MATCH (StepKind::AccStore) {
                 if (!SIMJIT_X64_ASMJIT_INLINE_ACC_INIT || !data.arg->is(StepKind::Const)) { return; }
@@ -3893,7 +3894,7 @@ struct CompileState {
         }
     }
 
-    bool prologue_root_is_delayed(Step *root) const {
+    bool prologue_root_is_delayed(const Step *root) const {
         if (!SIMJIT_X64_ASMJIT_DELAY_SCALAR_ACC_INIT) { return false; }
         if (!has_main_loop) { return false; }
         if (!root->is(StepKind::AccStore)) { return false; }

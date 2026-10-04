@@ -61,7 +61,7 @@ struct StoreData {
 struct CmpData {
     Step *left;
     Step *right;
-    CmpOp op;
+    CmpOp op{};
     bool is_unsigned = false;
 };
 
@@ -77,7 +77,7 @@ struct AggResultData {
 
 struct ArithReduceData {
     Step *arg;
-    ArithBinaryOp op;
+    ArithBinaryOp op{};
 };
 
 struct PredicateReduceData {
@@ -141,10 +141,10 @@ struct TernarylogicData {
 };
 
 struct ScalarBinWithSafetyCheck {
-    ArithBinaryOp op;
+    ArithBinaryOp op{};
     Step *left;
     Step *right;
-    AccId overflow_flag;
+    AccId overflow_flag{};
     Step *mask = nullptr;
 };
 
@@ -179,7 +179,7 @@ struct LoadData {
 struct StoreSum128Data {
     ArenaArray<Step *> low_steps;
     Step *hi_combined;
-    ArgumentIdx dst;
+    ArgumentIdx dst{};
 };
 
 enum class FmaKind : uint8_t {

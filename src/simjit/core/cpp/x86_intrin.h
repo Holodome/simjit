@@ -195,7 +195,7 @@ using ScalarIntrinsicUnaryMap = UnaryIntrinsicMap<ScalarDataType>;
 using VecIntrinsicUnaryMap = UnaryIntrinsicMap<VecDataType>;
 
 template <typename D> struct BinaryContainer {
-    VecDataType vdtype;
+    VecDataType vdtype{};
     D d;
 };
 
@@ -245,8 +245,8 @@ private:
 
     struct Tagged {
         Intrinsic i;
-        VecDataType x;
-        VecDataType y;
+        VecDataType x{};
+        VecDataType y{};
     };
     const char *name_;
     std::vector<Tagged> tagged_;

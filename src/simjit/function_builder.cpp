@@ -1265,67 +1265,67 @@ Argument FunctionBuilder::arg_safety_check() {
     return x;
 }
 
-void FunctionBuilder::store(Value arg, Argument dst, LoadStoreKind kind) {
-    cond_store(arg, {}, dst, kind);
+void FunctionBuilder::store(Value value, Argument dst, LoadStoreKind kind) {
+    cond_store(value, {}, dst, kind);
 }
 
-void FunctionBuilder::store(Predicate arg, Argument dst) {
-    cond_store(arg, {}, dst);
+void FunctionBuilder::store(Predicate value, Argument dst) {
+    cond_store(value, {}, dst);
 }
 
-void FunctionBuilder::cond_store(Value arg, MaybePredicate cond, Argument dst, LoadStoreKind kind) {
-    check_value(arg);
+void FunctionBuilder::cond_store(Value value, MaybePredicate cond, Argument dst, LoadStoreKind kind) {
+    check_value(value);
 
     ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
-    check_store_dst(func_arg, arg.step_, StepKind::Store);
+    check_store_dst(func_arg, value.step_, StepKind::Store);
     update_argument_kind(func_arg, ArgumentKind::Dst);
 
-    auto *step = impl_->store(arg.step_, cond.step_, func_arg, kind);
+    auto *step = impl_->store(value.step_, cond.step_, func_arg, kind);
     impl_->step_roots.push_back(step);
 }
 
-void FunctionBuilder::cond_store(Predicate arg, MaybePredicate cond, Argument dst) {
-    check_predicate(arg);
+void FunctionBuilder::cond_store(Predicate value, MaybePredicate cond, Argument dst) {
+    check_predicate(value);
 
     ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
-    check_store_dst(func_arg, arg.step_, StepKind::Store);
+    check_store_dst(func_arg, value.step_, StepKind::Store);
     update_argument_kind(func_arg, ArgumentKind::Dst);
 
     if (cond.is_valid()) {
         Predicate old = load_predicate(dst);
-        arg = select(cond.value(), arg, old);
+        value = select(cond.value(), value, old);
     }
 
-    auto *step = impl_->store(arg.step_, nullptr, func_arg, LoadStoreKind::Unaligned);
+    auto *step = impl_->store(value.step_, nullptr, func_arg, LoadStoreKind::Unaligned);
     impl_->step_roots.push_back(step);
 }
 
-void FunctionBuilder::pack(Value arg, Predicate cond, Argument dst, Argument dst_size) {
-    check_value(arg);
+void FunctionBuilder::pack(Value value, Predicate cond, Argument dst, Argument dst_size) {
+    check_value(value);
     check_predicate(cond);
     ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
-    check_store_dst(func_arg, arg.step_, StepKind::Pack);
+    check_store_dst(func_arg, value.step_, StepKind::Pack);
     update_argument_kind(func_arg, ArgumentKind::Dst);
 
     ArgumentDecl &size_arg = impl_->get_arg(dst_size.idx_);
     if (size_arg.dtype != ScalarDataType::I64) { invalid_type("Pack result size must be i64"); }
     update_argument_kind(size_arg, ArgumentKind::DstAgg);
-    if (arg.dtype() == ScalarDataType::I8 || arg.dtype() == ScalarDataType::I16) {
+    if (value.dtype() == ScalarDataType::I8 || value.dtype() == ScalarDataType::I16) {
         impl_->special_ops |= SpecialOp::SmallPack;
     }
     impl_->accs.push_back(Accumulator{ScalarDataType::I64, AccIdx{impl_->accs.size()}, dst_size.idx_, nullptr});
     Accumulator &acc = impl_->accs.back();
-    auto *step = impl_->pack(arg.step_, cond.step_, func_arg, acc);
+    auto *step = impl_->pack(value.step_, cond.step_, func_arg, acc);
     acc.agg_expr = step;
     impl_->step_roots.push_back(step);
 }
 
-void FunctionBuilder::scatter(Value arg, Value idx, Argument dst) {
-    cond_scatter(arg, idx, {}, dst);
+void FunctionBuilder::scatter(Value value, Value idx, Argument dst) {
+    cond_scatter(value, idx, {}, dst);
 }
 
-void FunctionBuilder::cond_scatter(Value arg, Value idx, MaybePredicate cond, Argument dst) {
-    check_value(arg);
+void FunctionBuilder::cond_scatter(Value value, Value idx, MaybePredicate cond, Argument dst) {
+    check_value(value);
     check_value(idx);
     if (!is_simple_int_dtype(idx.dtype())) {
         invalid_type("Only i8, i16, i32 and i64 indices are supported in scatter. Got %s",
@@ -1338,7 +1338,7 @@ void FunctionBuilder::cond_scatter(Value arg, Value idx, MaybePredicate cond, Ar
     }
     Step *cond_step = simplify_optional_cond(impl_->ctx, cond.step_);
     impl_->special_ops |= cond_step != nullptr ? SpecialOp::CondScatter : SpecialOp::Scatter;
-    check_store_dst(func_arg, arg.step_, StepKind::Scatter);
+    check_store_dst(func_arg, value.step_, StepKind::Scatter);
     update_argument_kind(func_arg, ArgumentKind::Dst);
     if (idx.step_->is(StepKind::Load)) {
         impl_->args[idx.step_->step_data<StepKind::Load>().idx].kind = ArgumentKind::SrcIdxArr;
@@ -1347,76 +1347,76 @@ void FunctionBuilder::cond_scatter(Value arg, Value idx, MaybePredicate cond, Ar
         idx = zext(idx, ScalarDataType::I32);
     }
 
-    auto *step = impl_->scatter(arg.step_, idx.step_, cond_step, func_arg);
+    auto *step = impl_->scatter(value.step_, idx.step_, cond_step, func_arg);
     impl_->step_roots.push_back(step);
 }
 
-void FunctionBuilder::arith_agg(Value arg, ArithBinaryOp op, Argument dst) {
-    cond_arith_agg(arg, {}, op, dst);
+void FunctionBuilder::arith_agg(Value value, ArithBinaryOp op, Argument dst) {
+    cond_arith_agg(value, {}, op, dst);
 }
 
-void FunctionBuilder::cond_arith_agg(Value arg, MaybePredicate cond, ArithBinaryOp op, Argument dst) {
-    check_value(arg);
+void FunctionBuilder::cond_arith_agg(Value value, MaybePredicate cond, ArithBinaryOp op, Argument dst) {
+    check_value(value);
     check_arith_agg_op(op);
     ArgumentDecl &dst_info = impl_->get_arg(dst.idx_);
     ScalarDataType dtype = dst_info.dtype;
     if (dst_info.dtype == ScalarDataType::I128) {
-        if (arg.dtype() != ScalarDataType::I64) {
-            unsupported("Only support calculating 128-bit sum of i64 values, got %s", show_scalar_dtype(arg.dtype()));
+        if (value.dtype() != ScalarDataType::I64) {
+            unsupported("Only support calculating 128-bit sum of i64 values, got %s", show_scalar_dtype(value.dtype()));
         }
         if (op != ArithBinaryOp::Add) { unsupported("Don't support 128-bit %s agg", show_arith_binary_op(op)); }
     } else {
-        check_store_dst(dst_info, arg.step_, StepKind::AccArithBinary);
+        check_store_dst(dst_info, value.step_, StepKind::AccArithBinary);
     }
     update_argument_kind(dst_info, ArgumentKind::DstAgg);
 
     if (op == ArithBinaryOp::Mul) {
-        if (arg.dtype() == ScalarDataType::I64) { impl_->special_ops |= SpecialOp::I64Mul; }
-        if (arg.dtype() == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::I8Mul; }
+        if (value.dtype() == ScalarDataType::I64) { impl_->special_ops |= SpecialOp::I64Mul; }
+        if (value.dtype() == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::I8Mul; }
     }
 
     impl_->accs.push_back(Accumulator{dtype, AccIdx{impl_->accs.size()}, dst.idx_, nullptr});
     Accumulator &acc = impl_->accs.back();
-    auto *step = impl_->arith_agg(arg.step_, cond.step_, op, acc);
+    auto *step = impl_->arith_agg(value.step_, cond.step_, op, acc);
     acc.agg_expr = step;
     impl_->step_roots.push_back(step);
 }
 
-void FunctionBuilder::grouped_arith_agg(Value arg, Value idx, ArithBinaryOp op, Argument table) {
-    check_value(arg);
+void FunctionBuilder::grouped_arith_agg(Value value, Value idx, ArithBinaryOp op, Argument table) {
+    check_value(value);
     check_value(idx);
     scalar_only();
 
     Value loaded = gather(idx, table);
-    Value updated = arith_binary(arg, loaded, op);
+    Value updated = arith_binary(value, loaded, op);
     scatter(updated, idx, table);
 }
 
-void FunctionBuilder::grouped_cond_arith_agg(Value arg, MaybePredicate cond, Value idx, ArithBinaryOp op,
+void FunctionBuilder::grouped_cond_arith_agg(Value value, MaybePredicate cond, Value idx, ArithBinaryOp op,
                                              Argument table) {
-    check_value(arg);
+    check_value(value);
     check_predicate(cond);
     check_value(idx);
     scalar_only();
 
     Value loaded = gather(idx, table);
-    Value updated = arith_binary(arg, loaded, op);
+    Value updated = arith_binary(value, loaded, op);
     updated = select(cond.value(), updated, loaded);
     scatter(updated, idx, table);
 }
 
-void FunctionBuilder::predicate_agg(Predicate arg, PredicateBinaryOp op, Argument dst) {
-    check_predicate(arg);
+void FunctionBuilder::predicate_agg(Predicate value, PredicateBinaryOp op, Argument dst) {
+    check_predicate(value);
     check_predicate_agg_op(op);
 
     ArgumentDecl &dst_info = impl_->get_arg(dst.idx_);
-    check_store_dst(dst_info, arg.step_, StepKind::AccPredicateBinary);
+    check_store_dst(dst_info, value.step_, StepKind::AccPredicateBinary);
     update_argument_kind(dst_info, ArgumentKind::DstAgg);
 
-    ScalarDataType dtype = arg.dtype();
+    ScalarDataType dtype = value.dtype();
     impl_->accs.push_back(Accumulator{dtype, AccIdx{impl_->accs.size()}, dst.idx_, nullptr});
     Accumulator &acc = impl_->accs.back();
-    auto *step = impl_->predicate_agg(arg.step_, op, acc);
+    auto *step = impl_->predicate_agg(value.step_, op, acc);
     acc.agg_expr = step;
     impl_->step_roots.push_back(step);
 }
@@ -1452,13 +1452,13 @@ template <typename... Args> static uint64_t make_hash(StepKind kind, Args... arg
     return xorshift64((((uint64_t)kind) << 32ull) | (to_uint64(args) + ...));
 }
 
-Value FunctionBuilder::load(Argument arg, LoadStoreKind kind) {
-    ArgumentDecl &func_arg = impl_->get_arg(arg.idx_);
+Value FunctionBuilder::load(Argument argument, LoadStoreKind kind) {
+    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype == ScalarDataType::I1) { invalid_type("load should not be used with i1 type"); }
 
-    uint64_t hash = make_hash(StepKind::Load, arg, kind);
+    uint64_t hash = make_hash(StepKind::Load, argument, kind);
     if (auto *result = impl_->cse<StepKind::Load>(
-            hash, [arg, kind](const auto &x) { return x.idx == arg.idx_ && x.kind == kind; })) {
+            hash, [argument, kind](const auto &x) { return x.idx == argument.idx_ && x.kind == kind; })) {
         return result;
     }
     update_argument_kind(func_arg, ArgumentKind::SrcArr);
@@ -1467,12 +1467,12 @@ Value FunctionBuilder::load(Argument arg, LoadStoreKind kind) {
     return impl_->remember_expr(hash, s);
 }
 
-Predicate FunctionBuilder::load_predicate(Argument arg) {
-    ArgumentDecl &func_arg = impl_->get_arg(arg.idx_);
+Predicate FunctionBuilder::load_predicate(Argument argument) {
+    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype != ScalarDataType::I1) { invalid_type("load_predicate should use I1 dtype"); }
 
-    uint64_t hash = make_hash(StepKind::Load, arg);
-    if (auto *result = impl_->cse<StepKind::Load>(hash, [arg](const auto &x) { return x.idx == arg.idx_; })) {
+    uint64_t hash = make_hash(StepKind::Load, argument);
+    if (auto *result = impl_->cse<StepKind::Load>(hash, [argument](const auto &x) { return x.idx == argument.idx_; })) {
         return result;
     }
     update_argument_kind(func_arg, ArgumentKind::SrcArr);
@@ -1481,7 +1481,7 @@ Predicate FunctionBuilder::load_predicate(Argument arg) {
     return impl_->remember_expr(hash, s);
 }
 
-Value FunctionBuilder::gather(Value idx, Argument arg) {
+Value FunctionBuilder::gather(Value idx, Argument argument) {
     check_value(idx);
 
     if (!is_simple_int_dtype(idx.dtype())) {
@@ -1494,12 +1494,12 @@ Value FunctionBuilder::gather(Value idx, Argument arg) {
     if (idx.dtype() == ScalarDataType::I8 || idx.dtype() == ScalarDataType::I16) {
         idx = zext(idx, ScalarDataType::I32);
     }
-    uint64_t hash = make_hash(StepKind::Gather, arg, idx);
+    uint64_t hash = make_hash(StepKind::Gather, argument, idx);
     if (auto *result = impl_->cse<StepKind::Gather>(
-            hash, [idx, arg](const auto &x) { return x.idx == idx.step_ && x.data == arg.idx_; })) {
+            hash, [idx, argument](const auto &x) { return x.idx == idx.step_ && x.data == argument.idx_; })) {
         return result;
     }
-    ArgumentDecl &func_arg = impl_->get_arg(arg.idx_);
+    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype == ScalarDataType::I8 || func_arg.dtype == ScalarDataType::I16) {
         impl_->special_ops |= SpecialOp::SmallGather;
     }
@@ -1509,12 +1509,13 @@ Value FunctionBuilder::gather(Value idx, Argument arg) {
     return impl_->remember_expr(hash, s);
 }
 
-Value FunctionBuilder::load_splat(Argument arg) {
-    ArgumentDecl &func_arg = impl_->get_arg(arg.idx_);
+Value FunctionBuilder::load_splat(Argument argument) {
+    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype == ScalarDataType::I1) { invalid_type("load should not be used with i1 type"); }
 
-    uint64_t hash = make_hash(StepKind::LoadSplat, arg);
-    if (auto *result = impl_->cse<StepKind::LoadSplat>(hash, [arg](const auto &x) { return x.idx == arg.idx_; })) {
+    uint64_t hash = make_hash(StepKind::LoadSplat, argument);
+    if (auto *result =
+            impl_->cse<StepKind::LoadSplat>(hash, [argument](const auto &x) { return x.idx == argument.idx_; })) {
         return result;
     }
     update_argument_kind(func_arg, ArgumentKind::SrcConst);
@@ -1522,12 +1523,13 @@ Value FunctionBuilder::load_splat(Argument arg) {
     return impl_->remember_expr(hash, s);
 }
 
-Predicate FunctionBuilder::load_predicate_splat(Argument arg) {
-    ArgumentDecl &func_arg = impl_->get_arg(arg.idx_);
+Predicate FunctionBuilder::load_predicate_splat(Argument argument) {
+    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype != ScalarDataType::I1) { invalid_type("load_predicate_splat should use I1 dtype"); }
 
-    uint64_t hash = make_hash(StepKind::LoadSplat, arg);
-    if (auto *result = impl_->cse<StepKind::LoadSplat>(hash, [arg](const auto &x) { return x.idx == arg.idx_; })) {
+    uint64_t hash = make_hash(StepKind::LoadSplat, argument);
+    if (auto *result =
+            impl_->cse<StepKind::LoadSplat>(hash, [argument](const auto &x) { return x.idx == argument.idx_; })) {
         return result;
     }
     update_argument_kind(func_arg, ArgumentKind::SrcConst);
@@ -1621,17 +1623,17 @@ Value FunctionBuilder::arith_binary(Value left, Value right, ArithBinaryOp op, A
     return impl_->remember_expr(hash, s, key);
 }
 
-Value FunctionBuilder::checked_op(Value arg, MaybePredicate mask) {
-    check_value(arg);
+Value FunctionBuilder::checked_op(Value value, MaybePredicate mask) {
+    check_value(value);
     if (mask.is_valid()) { check_predicate(mask); }
-    if (arg.step_->is(StepKind::ArithBinary)) {
-        ArithBinaryOp optimized_op = arg.step_->step_data<StepKind::ArithBinary>().op;
+    if (value.step_->is(StepKind::ArithBinary)) {
+        ArithBinaryOp optimized_op = value.step_->step_data<StepKind::ArithBinary>().op;
         if (optimized_op == ArithBinaryOp::Mul64SE || optimized_op == ArithBinaryOp::Mul64ZE) {
             impl_->ensure_has_safety_check_arg();
-            return arg;
+            return value;
         }
     }
-    Step *operation = impl_->original_expr(arg.step_);
+    Step *operation = impl_->original_expr(value.step_);
     if (operation->is(StepKind::ArithBinary)) {
         const auto &arith = operation->step_data<StepKind::ArithBinary>();
         ArithBinaryOp op = arith.op;
@@ -1647,15 +1649,15 @@ Value FunctionBuilder::checked_op(Value arg, MaybePredicate mask) {
         }
         bool supports_all_int_widths =
             op == ArithBinaryOp::Add || op == ArithBinaryOp::Sub || op == ArithBinaryOp::Mul || is_shift_or_rotate;
-        bool supported_type = arg.dtype() == ScalarDataType::I32 || arg.dtype() == ScalarDataType::I64 ||
-                              (supports_all_int_widths && is_simple_int_dtype(arg.dtype()));
+        bool supported_type = value.dtype() == ScalarDataType::I32 || value.dtype() == ScalarDataType::I64 ||
+                              (supports_all_int_widths && is_simple_int_dtype(value.dtype()));
         if (!supported_type) {
             if (supports_all_int_widths) {
                 unsupported("safety checking is not supported for op %s type %s; Only integer types are supported",
-                            show_arith_binary_op(op), show_scalar_dtype(arg.dtype()));
+                            show_arith_binary_op(op), show_scalar_dtype(value.dtype()));
             }
             unsupported("safety checking is not supported for op %s type %s; Only support i32, i64",
-                        show_arith_binary_op(op), show_scalar_dtype(arg.dtype()));
+                        show_arith_binary_op(op), show_scalar_dtype(value.dtype()));
         }
         if (arith.flags != ArithBinaryOpFlags::No) {
             invalid_input("Checked operation must not already have arithmetic flags");
@@ -1672,9 +1674,9 @@ Value FunctionBuilder::checked_op(Value arg, MaybePredicate mask) {
             invalid_input("safety checking is not supported for unary arithmetic operation %s",
                           show_arith_unary_op(data.op));
         }
-        if (!is_simple_int_dtype(arg.dtype())) {
+        if (!is_simple_int_dtype(value.dtype())) {
             unsupported("safety checking is not supported for op %s type %s; Only integer types are supported",
-                        show_arith_unary_op(data.op), show_scalar_dtype(arg.dtype()));
+                        show_arith_unary_op(data.op), show_scalar_dtype(value.dtype()));
         }
     } else {
         invalid_input("Unsupported checked operation %s", show_step_kind(operation->kind));
@@ -1690,38 +1692,38 @@ Value FunctionBuilder::checked_op(Value arg, MaybePredicate mask) {
         return result;
     }
     impl_->special_ops |= arith_binary_special_ops(operation);
-    Step *result = impl_->sm.checked_op({operation, mask_step}, arg.dtype());
+    Step *result = impl_->sm.checked_op({operation, mask_step}, value.dtype());
     return impl_->remember_expr(hash, result);
 }
 
-Value FunctionBuilder::arith_unary(Value arg, ArithUnaryOp op, bool safety_check) {
-    check_value(arg);
+Value FunctionBuilder::arith_unary(Value value, ArithUnaryOp op, bool safety_check) {
+    check_value(value);
 
     if (safety_check) {
         // a bit dumb recursion
-        return checked_op(arith_unary(arg, op, false));
+        return checked_op(arith_unary(value, op, false));
     }
 
-    uint64_t hash = make_hash(StepKind::ArithUnary, arg, op, safety_check);
+    uint64_t hash = make_hash(StepKind::ArithUnary, value, op, safety_check);
     if (auto *result = impl_->cse<StepKind::ArithUnary>(
-            hash, [arg, op](const auto &x) { return x.arg == arg.step_ && x.op == op; })) {
+            hash, [value, op](const auto &x) { return x.arg == value.step_ && x.op == op; })) {
         return result;
     }
     switch (op) {
     case ArithUnaryOp::Not:
     case ArithUnaryOp::Negate:
     case ArithUnaryOp::Abs:
-        if (!(is_simple_int_dtype(arg.dtype()) || is_float_dtype(arg.dtype()))) {
+        if (!(is_simple_int_dtype(value.dtype()) || is_float_dtype(value.dtype()))) {
             invalid_type("Invalid unary arithmetic operation %s for type %s", show_arith_unary_op(op),
-                         show_scalar_dtype(arg.dtype()));
+                         show_scalar_dtype(value.dtype()));
         }
         break;
     case ArithUnaryOp::Lzcnt:
     case ArithUnaryOp::Tzcnt:
     case ArithUnaryOp::Popcount:
-        if (!is_simple_int_dtype(arg.dtype())) {
+        if (!is_simple_int_dtype(value.dtype())) {
             invalid_type("Invalid unary arithmetic operation %s for type %s", show_arith_unary_op(op),
-                         show_scalar_dtype(arg.dtype()));
+                         show_scalar_dtype(value.dtype()));
         }
         break;
     case ArithUnaryOp::RoundNearest:
@@ -1731,20 +1733,20 @@ Value FunctionBuilder::arith_unary(Value arg, ArithUnaryOp op, bool safety_check
     case ArithUnaryOp::Rcp:
     case ArithUnaryOp::Sqrt:
     case ArithUnaryOp::Rsqrt:
-        if (!is_float_dtype(arg.dtype())) {
+        if (!is_float_dtype(value.dtype())) {
             invalid_type("Invalid unary arithmetic operation %s for type %s", show_arith_unary_op(op),
-                         show_scalar_dtype(arg.dtype()));
+                         show_scalar_dtype(value.dtype()));
         }
         break;
     }
 
-    Step *s = impl_->arith_unary(arg.step_, op);
+    Step *s = impl_->arith_unary(value.step_, op);
     impl_->special_ops |= arith_unary_special_ops(s);
     return impl_->remember_expr(hash, s);
 }
 
-void FunctionBuilder::countif(Predicate arg, Argument dst) {
-    check_predicate(arg);
+void FunctionBuilder::countif(Predicate value, Argument dst) {
+    check_predicate(value);
 
     ArgumentDecl &dst_info = impl_->get_arg(dst.idx_);
     ScalarDataType dtype = dst_info.dtype;
@@ -1755,31 +1757,31 @@ void FunctionBuilder::countif(Predicate arg, Argument dst) {
 
     impl_->accs.push_back(Accumulator{dtype, AccIdx{impl_->accs.size()}, dst.idx_, nullptr});
     Accumulator &acc = impl_->accs.back();
-    auto *step = impl_->countif(arg.step_, acc);
+    auto *step = impl_->countif(value.step_, acc);
     acc.agg_expr = step;
     impl_->step_roots.push_back(step);
 }
 
-Predicate FunctionBuilder::predicate_not(Predicate arg) {
-    check_predicate(arg);
+Predicate FunctionBuilder::predicate_not(Predicate value) {
+    check_predicate(value);
 
-    uint64_t hash = make_hash(StepKind::PredicateNot, arg);
-    if (auto *result = impl_->cse<StepKind::PredicateNot>(hash, [arg](const auto &x) { return x == arg.step_; })) {
+    uint64_t hash = make_hash(StepKind::PredicateNot, value);
+    if (auto *result = impl_->cse<StepKind::PredicateNot>(hash, [value](const auto &x) { return x == value.step_; })) {
         return result;
     }
     Step *key = nullptr;
-    Step *s = impl_->predicate_not(arg.step_, &key);
+    Step *s = impl_->predicate_not(value.step_, &key);
     return impl_->remember_expr(hash, s, key);
 }
 
-Value FunctionBuilder::int_cast(Value arg, ScalarDataType dtype, IntCastKind kind, bool safety_check) {
-    check_value(arg);
-    if (arg.dtype() == dtype) { invalid_type("Invalid cast from type %s to itself", show_scalar_dtype(dtype)); }
-    if (!is_simple_int_dtype(arg.dtype()) || !is_simple_int_dtype(dtype)) {
-        invalid_type("Invalid int_cast from %s to %s", show_scalar_dtype(arg.dtype()), show_scalar_dtype(dtype));
+Value FunctionBuilder::int_cast(Value value, ScalarDataType dtype, IntCastKind kind, bool safety_check) {
+    check_value(value);
+    if (value.dtype() == dtype) { invalid_type("Invalid cast from type %s to itself", show_scalar_dtype(dtype)); }
+    if (!is_simple_int_dtype(value.dtype()) || !is_simple_int_dtype(dtype)) {
+        invalid_type("Invalid int_cast from %s to %s", show_scalar_dtype(value.dtype()), show_scalar_dtype(dtype));
     }
     {
-        ScalarDataType from = arg.dtype();
+        ScalarDataType from = value.dtype();
         ScalarDataType to = dtype;
         bool extend = scalar_dtype_size(from) < scalar_dtype_size(to);
         switch (kind) {
@@ -1810,57 +1812,58 @@ Value FunctionBuilder::int_cast(Value arg, ScalarDataType dtype, IntCastKind kin
                           show_int_cast_kind(kind));
         }
         impl_->ensure_has_safety_check_arg();
-        return checked_op(int_cast(arg, dtype, kind, false));
+        return checked_op(int_cast(value, dtype, kind, false));
     }
 
-    uint64_t hash = make_hash(StepKind::IntCast, arg, dtype, kind);
+    uint64_t hash = make_hash(StepKind::IntCast, value, dtype, kind);
     if (auto *result = impl_->cse<StepKind::IntCast>(
-            hash, dtype, [arg, kind](const auto &x) { return x.arg == arg.step_ && x.kind == kind; })) {
+            hash, dtype, [value, kind](const auto &x) { return x.arg == value.step_ && x.kind == kind; })) {
         return result;
     }
     Step *key = nullptr;
-    Step *s = impl_->int_cast(arg.step_, dtype, kind, &key);
+    Step *s = impl_->int_cast(value.step_, dtype, kind, &key);
     return impl_->remember_expr(hash, s, key);
 }
 
-Value FunctionBuilder::float_cast(Value arg, ScalarDataType dtype, bool is_unsigned) {
-    check_value(arg);
+Value FunctionBuilder::float_cast(Value value, ScalarDataType dtype, bool is_unsigned) {
+    check_value(value);
 
-    bool valid_compact = (is_float_dtype(dtype) && is_float_dtype(arg.dtype())) ||
-                         (is_compact_float_cast_int_dtype(arg.dtype()) && is_float_dtype(dtype)) ||
-                         (is_compact_float_cast_int_dtype(dtype) && is_float_dtype(arg.dtype()));
+    bool valid_compact = (is_float_dtype(dtype) && is_float_dtype(value.dtype())) ||
+                         (is_compact_float_cast_int_dtype(value.dtype()) && is_float_dtype(dtype)) ||
+                         (is_compact_float_cast_int_dtype(dtype) && is_float_dtype(value.dtype()));
     bool valid_decomposed = bool(impl_->ctx->transformations & CodeTransformations::CastDecomposition) &&
-                            ((is_simple_int_dtype(arg.dtype()) && is_float_dtype(dtype)) ||
-                             (is_simple_int_dtype(dtype) && is_float_dtype(arg.dtype())));
+                            ((is_simple_int_dtype(value.dtype()) && is_float_dtype(dtype)) ||
+                             (is_simple_int_dtype(dtype) && is_float_dtype(value.dtype())));
     if (!valid_compact && !valid_decomposed) {
-        invalid_type("Invalid float_cast %s -> %s", show_scalar_dtype(arg.dtype()), show_scalar_dtype(dtype));
+        invalid_type("Invalid float_cast %s -> %s", show_scalar_dtype(value.dtype()), show_scalar_dtype(dtype));
     }
-    uint64_t hash = make_hash(StepKind::FloatCast, arg, dtype, is_unsigned);
-    if (auto *result = impl_->cse<StepKind::FloatCast>(hash, dtype, [arg, is_unsigned](const auto &x) {
-            return x.arg == arg.step_ && x.is_unsigned == is_unsigned;
+    uint64_t hash = make_hash(StepKind::FloatCast, value, dtype, is_unsigned);
+    if (auto *result = impl_->cse<StepKind::FloatCast>(hash, dtype, [value, is_unsigned](const auto &x) {
+            return x.arg == value.step_ && x.is_unsigned == is_unsigned;
         })) {
         return result;
     }
     Step *key = nullptr;
-    Step *s = impl_->float_cast(arg.step_, dtype, is_unsigned, &key);
+    Step *s = impl_->float_cast(value.step_, dtype, is_unsigned, &key);
     return impl_->remember_expr(hash, s, key);
 }
 
-Value FunctionBuilder::bitcast(Value arg, ScalarDataType dtype) {
-    check_value(arg);
+Value FunctionBuilder::bitcast(Value value, ScalarDataType dtype) {
+    check_value(value);
 
-    if (!((arg.dtype() == ScalarDataType::F32 && dtype == ScalarDataType::I32) ||
-          (arg.dtype() == ScalarDataType::F64 && dtype == ScalarDataType::I64) ||
-          (arg.dtype() == ScalarDataType::I32 && dtype == ScalarDataType::F32) ||
-          (arg.dtype() == ScalarDataType::I64 && dtype == ScalarDataType::F64))) {
-        invalid_type("Invalid bitcast %s -> %s", show_scalar_dtype(arg.dtype()), show_scalar_dtype(dtype));
+    if (!((value.dtype() == ScalarDataType::F32 && dtype == ScalarDataType::I32) ||
+          (value.dtype() == ScalarDataType::F64 && dtype == ScalarDataType::I64) ||
+          (value.dtype() == ScalarDataType::I32 && dtype == ScalarDataType::F32) ||
+          (value.dtype() == ScalarDataType::I64 && dtype == ScalarDataType::F64))) {
+        invalid_type("Invalid bitcast %s -> %s", show_scalar_dtype(value.dtype()), show_scalar_dtype(dtype));
     }
 
-    uint64_t hash = make_hash(StepKind::BitCast, arg, dtype);
-    if (auto *result = impl_->cse<StepKind::BitCast>(hash, dtype, [arg](const auto &x) { return x == arg.step_; })) {
+    uint64_t hash = make_hash(StepKind::BitCast, value, dtype);
+    if (auto *result =
+            impl_->cse<StepKind::BitCast>(hash, dtype, [value](const auto &x) { return x == value.step_; })) {
         return result;
     }
-    Step *s = impl_->bitcast(arg.step_, dtype);
+    Step *s = impl_->bitcast(value.step_, dtype);
     return impl_->remember_expr(hash, s);
 }
 
@@ -1888,20 +1891,20 @@ Predicate FunctionBuilder::cmp(Value left, Value right, CmpOp op, bool is_unsign
     return impl_->remember_expr(hash, s, key);
 }
 
-Predicate FunctionBuilder::fpclass(Value arg, FpClass flags) {
-    check_value(arg);
+Predicate FunctionBuilder::fpclass(Value value, FpClass flags) {
+    check_value(value);
 
-    if (!is_float_dtype(arg.dtype())) {
-        invalid_type("Fpclass argument must have floating point type, got %s", show_scalar_dtype(arg.dtype()));
+    if (!is_float_dtype(value.dtype())) {
+        invalid_type("Fpclass argument must have floating point type, got %s", show_scalar_dtype(value.dtype()));
     }
 
-    uint64_t hash = make_hash(StepKind::Fpclass, arg, flags);
+    uint64_t hash = make_hash(StepKind::Fpclass, value, flags);
     if (auto *result = impl_->cse<StepKind::Fpclass>(
-            hash, [arg, flags](const auto &x) { return x.arg == arg.step_ && x.flags == flags; })) {
+            hash, [value, flags](const auto &x) { return x.arg == value.step_ && x.flags == flags; })) {
         return result;
     }
 
-    Step *s = impl_->fpclass(arg.step_, flags);
+    Step *s = impl_->fpclass(value.step_, flags);
     return impl_->remember_expr(hash, s);
 }
 
@@ -1982,27 +1985,27 @@ static void check_permute_idx(uint8_t x) {
     if (x >= 8) { invalid_input("Permute byte index can't be larger or equal 8"); }
 }
 
-Value FunctionBuilder::permute(Value arg, uint64_t permute_idxs, bool is_bit) {
-    check_value(arg);
+Value FunctionBuilder::permute(Value value, uint64_t permute_idxs, bool is_bit) {
+    check_value(value);
 
-    if (!is_simple_int_dtype(arg.dtype())) {
+    if (!is_simple_int_dtype(value.dtype())) {
         invalid_type("Byte permute input must be one of the i8,i16,i32,i64 types. Got %s",
-                     show_scalar_dtype(arg.dtype()));
+                     show_scalar_dtype(value.dtype()));
     }
     if (is_bit && permute_idxs != REVERSE_BITS) { impl_->special_ops |= SpecialOp::ArbitraryBitPermute; }
 
-    uint64_t hash = make_hash(StepKind::Permute, arg, permute_idxs);
-    if (auto *result = impl_->cse<StepKind::Permute>(hash, [arg, permute_idxs, is_bit](const auto &x) {
-            return x.is_bit == is_bit && x.arg == arg.step_ && x.permute == permute_idxs;
+    uint64_t hash = make_hash(StepKind::Permute, value, permute_idxs);
+    if (auto *result = impl_->cse<StepKind::Permute>(hash, [value, permute_idxs, is_bit](const auto &x) {
+            return x.is_bit == is_bit && x.arg == value.step_ && x.permute == permute_idxs;
         })) {
         return result;
     }
-    Step *s = is_bit ? impl_->bit_permute(arg.step_, permute_idxs) : impl_->byte_permute(arg.step_, permute_idxs);
+    Step *s = is_bit ? impl_->bit_permute(value.step_, permute_idxs) : impl_->byte_permute(value.step_, permute_idxs);
     return impl_->remember_expr(hash, s);
 }
 
-Value FunctionBuilder::permute_i64_i8(Value arg, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6,
-                                      uint8_t a7, uint8_t a8) {
+Value FunctionBuilder::permute_i64_i8(Value value, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5,
+                                      uint8_t a6, uint8_t a7, uint8_t a8) {
     check_permute_idx(a1);
     check_permute_idx(a2);
     check_permute_idx(a3);
@@ -2011,50 +2014,52 @@ Value FunctionBuilder::permute_i64_i8(Value arg, uint8_t a1, uint8_t a2, uint8_t
     check_permute_idx(a6);
     check_permute_idx(a7);
     check_permute_idx(a8);
-    if (!is_simple_int_dtype(arg.dtype())) {
+    if (!is_simple_int_dtype(value.dtype())) {
         invalid_type("Byte permute input must be one of the i8,i16,i32,i64 types. Got %s",
-                     show_scalar_dtype(arg.dtype()));
+                     show_scalar_dtype(value.dtype()));
     }
     uint64_t permute_idxs = combine_i8_to_i64(a1, a2, a3, a4, a5, a6, a7, a8);
-    return permute(arg, permute_idxs, false);
+    return permute(value, permute_idxs, false);
 }
 
-Value FunctionBuilder::permute_i64_i16(Value arg, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4) {
-    if (arg.dtype() != ScalarDataType::I64) {
-        invalid_type("permute_i64_i16 input type is not i64 (%s)", show_scalar_dtype(arg.dtype()));
+Value FunctionBuilder::permute_i64_i16(Value value, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4) {
+    if (value.dtype() != ScalarDataType::I64) {
+        invalid_type("permute_i64_i16 input type is not i64 (%s)", show_scalar_dtype(value.dtype()));
     }
-    return permute_i64_i8(arg, a1 * 2, a1 * 2 + 1, a2 * 2, a2 * 2 + 1, a3 * 2, a3 * 2 + 1, a4 * 2, a4 * 2 + 1);
+    return permute_i64_i8(value, a1 * 2, a1 * 2 + 1, a2 * 2, a2 * 2 + 1, a3 * 2, a3 * 2 + 1, a4 * 2, a4 * 2 + 1);
 }
 
-Value FunctionBuilder::permute_i64_i32(Value arg, uint8_t a1, uint8_t a2) {
-    if (arg.dtype() != ScalarDataType::I64) {
-        invalid_type("permute_i64_i32 input type is not i64 (%s)", show_scalar_dtype(arg.dtype()));
+Value FunctionBuilder::permute_i64_i32(Value value, uint8_t a1, uint8_t a2) {
+    if (value.dtype() != ScalarDataType::I64) {
+        invalid_type("permute_i64_i32 input type is not i64 (%s)", show_scalar_dtype(value.dtype()));
     }
-    return permute_i64_i8(arg, a1 * 4, a1 * 4 + 1, a1 * 4 + 2, a1 * 4 + 3, a2 * 4, a2 * 4 + 1, a2 * 4 + 2, a2 * 4 + 3);
+    return permute_i64_i8(value, a1 * 4, a1 * 4 + 1, a1 * 4 + 2, a1 * 4 + 3, a2 * 4, a2 * 4 + 1, a2 * 4 + 2,
+                          a2 * 4 + 3);
 }
 
-Value FunctionBuilder::permute_i32_i8(Value arg, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4) {
-    if (arg.dtype() != ScalarDataType::I32) {
-        invalid_type("permute_i32_i8 input type is not i32 (%s)", show_scalar_dtype(arg.dtype()));
+Value FunctionBuilder::permute_i32_i8(Value value, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4) {
+    if (value.dtype() != ScalarDataType::I32) {
+        invalid_type("permute_i32_i8 input type is not i32 (%s)", show_scalar_dtype(value.dtype()));
     }
-    return permute_i64_i8(arg, a1, a2, a3, a4, a1 + 4, a2 + 4, a3 + 4, a4 + 4);
+    return permute_i64_i8(value, a1, a2, a3, a4, a1 + 4, a2 + 4, a3 + 4, a4 + 4);
 }
 
-Value FunctionBuilder::permute_i32_i16(Value arg, uint8_t a1, uint8_t a2) {
-    if (arg.dtype() != ScalarDataType::I32) {
-        invalid_type("permute_i32_i16 input type is not i32 (%s)", show_scalar_dtype(arg.dtype()));
+Value FunctionBuilder::permute_i32_i16(Value value, uint8_t a1, uint8_t a2) {
+    if (value.dtype() != ScalarDataType::I32) {
+        invalid_type("permute_i32_i16 input type is not i32 (%s)", show_scalar_dtype(value.dtype()));
     }
-    return permute_i64_i8(arg, a1 * 2, a1 * 2 + 1, a2 * 2, a2 * 2 + 1, a1 * 2 + 4, a1 * 2 + 5, a2 * 2 + 4, a2 * 2 + 5);
+    return permute_i64_i8(value, a1 * 2, a1 * 2 + 1, a2 * 2, a2 * 2 + 1, a1 * 2 + 4, a1 * 2 + 5, a2 * 2 + 4,
+                          a2 * 2 + 5);
 }
 
-Value FunctionBuilder::permute_i16_i8(Value arg, uint8_t a1, uint8_t a2) {
-    if (arg.dtype() != ScalarDataType::I16) {
-        invalid_type("permute_i16_i8 input type is not i16 (%s)", show_scalar_dtype(arg.dtype()));
+Value FunctionBuilder::permute_i16_i8(Value value, uint8_t a1, uint8_t a2) {
+    if (value.dtype() != ScalarDataType::I16) {
+        invalid_type("permute_i16_i8 input type is not i16 (%s)", show_scalar_dtype(value.dtype()));
     }
-    return permute_i64_i8(arg, a1, a2, a1 + 2, a2 + 2, a1 + 4, a2 + 4, a1 + 6, a2 + 6);
+    return permute_i64_i8(value, a1, a2, a1 + 2, a2 + 2, a1 + 4, a2 + 4, a1 + 6, a2 + 6);
 }
 
-Value FunctionBuilder::permute_i8_bits(Value arg, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5,
+Value FunctionBuilder::permute_i8_bits(Value value, uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5,
                                        uint8_t a6, uint8_t a7, uint8_t a8) {
     auto transformidx_ = [](uint8_t idx) -> uint8_t {
         if (idx == (uint8_t)-1) { return 0; }
@@ -2070,12 +2075,12 @@ Value FunctionBuilder::permute_i8_bits(Value arg, uint8_t a1, uint8_t a2, uint8_
     a6 = transformidx_(a6);
     a7 = transformidx_(a7);
     a8 = transformidx_(a8);
-    if (!is_simple_int_dtype(arg.dtype())) {
+    if (!is_simple_int_dtype(value.dtype())) {
         invalid_type("Bit permute input must be one of the i8,i16,i32,i64 types. Got %s",
-                     show_scalar_dtype(arg.dtype()));
+                     show_scalar_dtype(value.dtype()));
     }
     uint64_t permute_idxs = combine_i8_to_i64(a1, a2, a3, a4, a5, a6, a7, a8);
-    return permute(arg, permute_idxs, true);
+    return permute(value, permute_idxs, true);
 }
 
 Function *FunctionBuilder::build() {
@@ -2102,18 +2107,18 @@ Function *FunctionBuilder::build() {
     return func;
 }
 
-Value FunctionBuilder::signed_cast(Value arg, ScalarDataType to) {
-    ScalarDataType from = arg.dtype();
-    if (is_float_dtype(from) || is_float_dtype(to)) { return float_cast(arg, to); }
-    if (scalar_dtype_size(from) < scalar_dtype_size(to)) { return sext(arg, to); }
-    return trunc(arg, to);
+Value FunctionBuilder::signed_cast(Value value, ScalarDataType to) {
+    ScalarDataType from = value.dtype();
+    if (is_float_dtype(from) || is_float_dtype(to)) { return float_cast(value, to); }
+    if (scalar_dtype_size(from) < scalar_dtype_size(to)) { return sext(value, to); }
+    return trunc(value, to);
 }
 
-Value FunctionBuilder::unsigned_cast(Value arg, ScalarDataType to) {
-    ScalarDataType from = arg.dtype();
-    if (is_float_dtype(from) || is_float_dtype(to)) { return float_cast(arg, to, true); }
-    if (scalar_dtype_size(from) < scalar_dtype_size(to)) { return zext(arg, to); }
-    return trunc(arg, to);
+Value FunctionBuilder::unsigned_cast(Value value, ScalarDataType to) {
+    ScalarDataType from = value.dtype();
+    if (is_float_dtype(from) || is_float_dtype(to)) { return float_cast(value, to, true); }
+    if (scalar_dtype_size(from) < scalar_dtype_size(to)) { return zext(value, to); }
+    return trunc(value, to);
 }
 
 static void check_simple_int_bit_helper_arg(ScalarDataType dtype, const char *func_name) {
@@ -2123,92 +2128,92 @@ static void check_simple_int_bit_helper_arg(ScalarDataType dtype, const char *fu
     }
 }
 
-Value FunctionBuilder::log2_no_zero(Value arg) {
-    ScalarDataType dtype = arg.dtype();
+Value FunctionBuilder::log2_no_zero(Value value) {
+    ScalarDataType dtype = value.dtype();
     check_simple_int_bit_helper_arg(dtype, "log2_no_zero");
     size_t bits = scalar_dtype_bits(dtype) - 1;
-    return sub(con((int64_t)bits, dtype), lzcnt(arg));
+    return sub(con((int64_t)bits, dtype), lzcnt(value));
 }
 
-Value FunctionBuilder::log2(Value arg) {
-    ScalarDataType dtype = arg.dtype();
+Value FunctionBuilder::log2(Value value) {
+    ScalarDataType dtype = value.dtype();
     check_simple_int_bit_helper_arg(dtype, "log2");
-    auto is_predicate_notzero = cmp_ne(arg, con(0, dtype));
+    auto is_predicate_notzero = cmp_ne(value, con(0, dtype));
     size_t bits = scalar_dtype_bits(dtype) - 1;
-    return zero_select(sub(con((int64_t)bits, dtype), lzcnt(arg)), is_predicate_notzero);
+    return zero_select(sub(con((int64_t)bits, dtype), lzcnt(value)), is_predicate_notzero);
 }
 
-Predicate FunctionBuilder::has_single_bit(Value arg) {
-    check_simple_int_bit_helper_arg(arg.dtype(), "has_single_bit");
-    return bit_testn(arg, sub(arg, con(1, arg.dtype())));
+Predicate FunctionBuilder::has_single_bit(Value value) {
+    check_simple_int_bit_helper_arg(value.dtype(), "has_single_bit");
+    return bit_testn(value, sub(value, con(1, value.dtype())));
 }
 
-Value FunctionBuilder::byteswap(Value arg) {
-    switch (arg.dtype()) {
+Value FunctionBuilder::byteswap(Value value) {
+    switch (value.dtype()) {
     case ScalarDataType::I8: invalid_type("can't byteswap i8");
-    case ScalarDataType::I16: return permute_i16_i8(arg, 1, 0);
-    case ScalarDataType::I32: return permute_i32_i8(arg, 3, 2, 1, 0);
-    case ScalarDataType::I64: return permute_i64_i8(arg, 7, 6, 5, 4, 3, 2, 1, 0);
+    case ScalarDataType::I16: return permute_i16_i8(value, 1, 0);
+    case ScalarDataType::I32: return permute_i32_i8(value, 3, 2, 1, 0);
+    case ScalarDataType::I64: return permute_i64_i8(value, 7, 6, 5, 4, 3, 2, 1, 0);
     case ScalarDataType::I1:
-    case ScalarDataType::I128: invalid_type("invalid input type %s to byteswap", show_scalar_dtype(arg.dtype()));
+    case ScalarDataType::I128: invalid_type("invalid input type %s to byteswap", show_scalar_dtype(value.dtype()));
     case ScalarDataType::F32:
-    case ScalarDataType::F64: invalid_type("can't byteswap float type %s", show_scalar_dtype(arg.dtype()));
+    case ScalarDataType::F64: invalid_type("can't byteswap float type %s", show_scalar_dtype(value.dtype()));
     }
     SIMJIT_UNREACHABLE();
 }
 
-Value FunctionBuilder::bit_floor(Value arg) {
-    ScalarDataType dtype = arg.dtype();
+Value FunctionBuilder::bit_floor(Value value) {
+    ScalarDataType dtype = value.dtype();
     check_simple_int_bit_helper_arg(dtype, "bit_floor");
-    return zero_select(sll(con(1, dtype), sub(con((int64_t)scalar_dtype_bits(dtype) - 1, dtype), lzcnt(arg))),
-                       cmp_ne(arg, con(0, dtype)));
+    return zero_select(sll(con(1, dtype), sub(con((int64_t)scalar_dtype_bits(dtype) - 1, dtype), lzcnt(value))),
+                       cmp_ne(value, con(0, dtype)));
 }
 
-Value FunctionBuilder::bit_ceil(Value arg) {
-    ScalarDataType dtype = arg.dtype();
+Value FunctionBuilder::bit_ceil(Value value) {
+    ScalarDataType dtype = value.dtype();
     check_simple_int_bit_helper_arg(dtype, "bit_ceil");
     // log2
-    Value x = sub(con((int64_t)scalar_dtype_bits(dtype), dtype), lzcnt(sub(arg, con(1, dtype))));
-    return select(cmp_ule(arg, con(1, dtype)), con(1, dtype), sll(con(1, dtype), x));
+    Value x = sub(con((int64_t)scalar_dtype_bits(dtype), dtype), lzcnt(sub(value, con(1, dtype))));
+    return select(cmp_ule(value, con(1, dtype)), con(1, dtype), sll(con(1, dtype), x));
 }
 
-Value FunctionBuilder::sign_no_zero(Value arg) {
-    ScalarDataType dtype = arg.dtype();
+Value FunctionBuilder::sign_no_zero(Value value) {
+    ScalarDataType dtype = value.dtype();
     if (is_float_dtype(dtype)) {
         // Really nothing special in float case
-        auto is_neg = is_negative(arg);
+        auto is_neg = is_negative(value);
         auto one = con(1, dtype);
         auto mone = con(-1, dtype);
         return select(is_neg, mone, one);
     }
     size_t bits = scalar_dtype_bits(dtype) - 1;
-    auto neg = sra(arg, con((int64_t)bits, dtype));
+    auto neg = sra(value, con((int64_t)bits, dtype));
     return or_(neg, con(1, dtype));
 }
 
-Value FunctionBuilder::sign(Value arg) {
-    ScalarDataType dtype = arg.dtype();
+Value FunctionBuilder::sign(Value value) {
+    ScalarDataType dtype = value.dtype();
     if (is_float_dtype(dtype)) {
         // Really nothing special in float case
-        auto is_neg = is_negative(arg);
-        auto is_predicate_notzero = cmp_ne(arg, con(0, dtype));
+        auto is_neg = is_negative(value);
+        auto is_predicate_notzero = cmp_ne(value, con(0, dtype));
         auto one = con(1, dtype);
         auto mone = con(-1, dtype);
         return select(is_neg, mone, zero_select(one, is_predicate_notzero));
     }
     size_t bits = scalar_dtype_bits(dtype) - 1;
-    auto is_zero = cmp_ne(arg, con(0, dtype));
-    auto neg = sra(arg, con((int64_t)bits, dtype));
+    auto is_zero = cmp_ne(value, con(0, dtype));
+    auto neg = sra(value, con((int64_t)bits, dtype));
     return zero_select(or_(neg, con(1, dtype)), is_zero);
 }
 
-Value FunctionBuilder::copysign_no_zero(Value sign, Value arg) {
-    return select(is_negative(sign), negate(arg), arg);
+Value FunctionBuilder::copysign_no_zero(Value sign_value, Value value) {
+    return select(is_negative(sign_value), negate(value), value);
 }
 
-Value FunctionBuilder::copysign(Value sign, Value arg) {
-    auto is_nonzero = cmp_ne(sign, con(0, sign.dtype()));
-    auto a_neg = select(is_negative(sign), negate(arg), arg);
+Value FunctionBuilder::copysign(Value sign_value, Value value) {
+    auto is_nonzero = cmp_ne(sign_value, con(0, sign_value.dtype()));
+    auto a_neg = select(is_negative(sign_value), negate(value), value);
     return zero_select(a_neg, is_nonzero);
 }
 

@@ -138,7 +138,7 @@ public:
     // identifier is the cache key. On cache hit, the stored function is reused without rebuilding the expression or
     // comparing it with build_fn. If caller is provided, only the declared argument count/kinds/types are checked.
     // Use stable, unique identifiers for distinct expressions.
-    void *build_and_compile(std::string_view identifier, function_ref<void(FunctionBuilder &)> build_fn,
+    void *build_and_compile(std::string_view identifier, const function_ref<void(FunctionBuilder &)> &build_fn,
                             const CallerInfo *caller = nullptr);
 
 private:

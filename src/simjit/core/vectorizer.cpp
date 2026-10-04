@@ -538,7 +538,7 @@ struct AlgebraicVectorizer {
             simjit::format("vectorization creates too many roots (%zu > %zu)", root_count, max_roots));
     }
 
-    void assign_carrier(Node *node, ScalarDataType dtype) noexcept {
+    void assign_carrier(const Node *node, ScalarDataType dtype) noexcept {
         auto &slot = assignment.carrier_dtypes[node->id];
         if (slot.has_value()) {
             SIMJIT_ASSERT(*slot == dtype);
@@ -589,7 +589,7 @@ struct AlgebraicVectorizer {
         return {};
     }
 
-    bool graph_unify_carriers(Node *left, Node *right) noexcept {
+    bool graph_unify_carriers(const Node *left, const Node *right) noexcept {
         auto &left_carrier = assignment.carrier_dtypes[left->id];
         auto &right_carrier = assignment.carrier_dtypes[right->id];
         if (left_carrier.has_value() && !right_carrier.has_value()) {

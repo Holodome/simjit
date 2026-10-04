@@ -70,7 +70,7 @@ struct ConstantKey {
 struct ConstQuotientKey {
     const mir::Step *numerator;
     ConstData divisor;
-    bool is_signed;
+    bool is_signed = false;
 
     bool operator==(const ConstQuotientKey &right) const noexcept {
         return numerator == right.numerator && divisor == right.divisor && is_signed == right.is_signed;
@@ -250,9 +250,9 @@ enum class SafetyCheckKind : uint8_t {
 };
 
 struct SafetyCheckInfo {
-    SafetyCheckKind kind;
+    SafetyCheckKind kind{};
     DataType acc_dtype;
-    AccId acc;
+    AccId acc{};
 };
 } // namespace
 
@@ -1373,6 +1373,8 @@ struct MirConstructState {
     }
 
     Step *agg_acc_init_value(DataType target_dtype, const hir::Step *agg_expr) {
+        // A null expression is valid only for non-aggregation accumulator kinds.
+        // cppcheck-suppress ctunullpointer
         if (agg_expr->is(hir::StepKind::Countif)) { return make_const(0, target_dtype); }
         if (agg_expr->is(hir::StepKind::AccArithBinary)) {
             ArithBinaryOp op = agg_expr->step_data<hir::StepKind::AccArithBinary>().op;
@@ -1852,6 +1854,7 @@ struct MirConstructState {
         };
         auto push = [&](uint8_t value) {
             SIMJIT_ASSERT(stack_size < TernarylogicRpn::MaxOps);
+            // cppcheck-suppress arrayIndexOutOfBoundsCond
             stack[stack_size++] = value;
         };
 
@@ -2419,7 +2422,7 @@ struct MirConstructState {
                     if (auto *it = i8_shift_peephole(node, ctx)) return it;
                 }
                 Step *left = ref_left();
-                Step *right = nullptr;
+                Step *right = ref_right();
 #if SIMJIT_USE_LIBDIVIDE
                 if (bool(hir->ctx->transformations & CodeTransformations::ConstDiv) &&
                     data.right->is(hir::StepKind::Const) &&
@@ -2438,7 +2441,6 @@ struct MirConstructState {
                     simjit_exception(ErrorModule::MIR, ErrorKind::Unsupported, ErrorSubKind::UnsupportedFeature,
                                      "vectorization is not supported for non-constant divisions");
                 }
-                if (right == nullptr) { right = ref_right(); }
                 invariant_same_vec_type(left, right);
                 invariant_same_vec_type(node, left);
                 invariant_imply(bool(data.flags & ArithBinaryOpFlags::ShiftWraparound),

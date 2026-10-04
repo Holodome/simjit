@@ -441,7 +441,7 @@ void *JitContext::find_cached_function(std::string_view identifier, const Caller
     return nullptr;
 }
 
-void *JitContext::build_and_compile(std::string_view identifier, function_ref<void(FunctionBuilder &)> build_fn,
+void *JitContext::build_and_compile(std::string_view identifier, const function_ref<void(FunctionBuilder &)> &build_fn,
                                     const CallerInfo *caller) {
     if (auto result = find_and_typecheck_function(identifier, caller)) {
         ++cache_hits_;
