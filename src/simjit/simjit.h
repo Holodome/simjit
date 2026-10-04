@@ -438,12 +438,12 @@ enum class CodeTransformations : uint16_t {
     ConstantConditionPeephole = 1 << 15,
 
     All = MuldqInst | MulConstPeephole | LogicalPeephole | BetweenPeephole | Unroll | AccSplit | MaskCombine |
-          TernarylogicInst | FmaInst | SmallArith | CastPeephole | ProactiveUnroll | CastDecomposition |
-          BinaryIdentityPeephole |
-          ConstantConditionPeephole
+        TernarylogicInst | FmaInst | SmallArith | CastPeephole | ProactiveUnroll | CastDecomposition |
+        BinaryIdentityPeephole |
+        ConstantConditionPeephole
 #if SIMJIT_USE_LIBDIVIDE
-          // Actually we can just set it always, but I want to make it clear that libdivide is required.
-          | ConstDiv
+        // Actually we can just set it always, but I want to make it clear that libdivide is required.
+        | ConstDiv
 #endif
         ,
 };

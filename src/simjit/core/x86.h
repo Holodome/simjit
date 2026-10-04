@@ -115,7 +115,7 @@ constexpr Vector YMMI64V = Vector{VecRegisterKind::YMM, VecElemType::I64};
 constexpr Vector YMMF32V = Vector{VecRegisterKind::YMM, VecElemType::F32};
 constexpr Vector YMMF64V = Vector{VecRegisterKind::YMM, VecElemType::F64};
 
-constexpr Vector ZMMI8V = Vector{VecRegisterKind ::ZMM, VecElemType::I8};
+constexpr Vector ZMMI8V = Vector{VecRegisterKind::ZMM, VecElemType::I8};
 constexpr Vector ZMMI16V = Vector{VecRegisterKind::ZMM, VecElemType::I16};
 constexpr Vector ZMMI32V = Vector{VecRegisterKind::ZMM, VecElemType::I32};
 constexpr Vector ZMMI64V = Vector{VecRegisterKind::ZMM, VecElemType::I64};

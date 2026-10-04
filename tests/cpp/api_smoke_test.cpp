@@ -86,6 +86,29 @@ static void api_smoke_build_many_outputs(FunctionBuilder &b) {
     }
 }
 
+static void api_smoke_raw_build_callbacks() {
+    JitContext ctx{};
+    ctx.set_policy(CompilePolicy::Scalar);
+
+    int32_t offset = 7;
+    void *temporary_lambda = ctx.build_and_compile("api-smoke-temporary-builder", [offset](FunctionBuilder &b) {
+        Value src = b.input_arg(I32);
+        b.sum(b.add(src, b.i32(offset)), b.arg(I32));
+    });
+    require_api_smoke(temporary_lambda != nullptr, "temporary builder lambda");
+
+    auto mutable_builder = [offset](FunctionBuilder &b) mutable {
+        Value src = b.input_arg(I32);
+        b.sum(b.add(src, b.i32(offset)), b.arg(I32));
+    };
+    void *mutable_callable = ctx.build_and_compile("api-smoke-mutable-builder", mutable_builder);
+    require_api_smoke(mutable_callable != nullptr, "mutable builder callable");
+
+    const auto const_builder = [](FunctionBuilder &b) { api_smoke_build_sum_i32(b); };
+    void *const_callable = ctx.build_and_compile("api-smoke-const-builder", const_builder);
+    require_api_smoke(const_callable != nullptr, "const builder callable");
+}
+
 static Arch api_smoke_host_arch() {
 #if defined(__aarch64__) || defined(_M_ARM64)
     return Arch::Arm64_NEON;
@@ -99,8 +122,15 @@ static Arch api_smoke_host_arch() {
 static void api_smoke_sum() {
     JitContext ctx{};
     ctx.set_policy(CompilePolicy::Scalar);
+    require_api_smoke(ctx.statistics().last_compilation_ns == 0, "initial compilation timing");
 
     auto func = vectorized_function<InputArr<I32>, OutputScalar<I32>>(ctx, "api-smoke-sum", api_smoke_build_sum_i32);
+    const uint64_t compilation_ns = ctx.statistics().last_compilation_ns;
+    require_api_smoke(compilation_ns > 0, "successful compilation timing");
+
+    auto cached = find_vectorized_function<InputArr<I32>, OutputScalar<I32>>(ctx, "api-smoke-sum");
+    require_api_smoke(cached.has_value(), "sum cache hit");
+    require_api_smoke(ctx.statistics().last_compilation_ns == compilation_ns, "cache hit preserves compilation timing");
 
     int32_t input[1000];
     for (int32_t i = 0; i < 1000; ++i) {
@@ -140,6 +170,7 @@ static void api_smoke_try_compile_generic_error() {
     require_api_smoke(stats.compilation_attempts == 1, "std::exception attempt count");
     require_api_smoke(stats.compilation_failures == 1, "std::exception failure count");
     require_api_smoke(stats.compilation_successes == 0, "std::exception success count");
+    require_api_smoke(stats.last_compilation_ns > 0, "std::exception compilation timing");
 }
 
 static void api_smoke_cache_and_casts() {
@@ -345,6 +376,7 @@ static void api_smoke_jit_context_move_constructor() {
     require_api_smoke(moved.debug_options().stages == DebugStage::HIR, "move ctor debug stages");
     require_api_smoke(!moved.debug_snapshot().hir.empty(), "move ctor debug snapshot");
     require_api_smoke(moved.statistics().function_count == 1, "move ctor moved function count");
+    require_api_smoke(moved.statistics().last_compilation_ns > 0, "move ctor compilation timing");
     require_api_smoke_identifier(moved.function_identifiers(), "api-smoke-move-ctor", "move ctor function identifier");
 
     auto cached = find_vectorized_function<InputArr<I32>, OutputScalar<I32>>(moved, "api-smoke-move-ctor");
@@ -405,6 +437,8 @@ static void api_smoke_jit_context_move_assignment() {
     require_api_smoke(old_owner.policy() == CompilePolicy::Scalar, "move assignment clear preserves policy");
     require_api_smoke(old_owner.debug_options().capture_on_success, "move assignment clear preserves debug options");
     require_api_smoke(old_owner.statistics().function_count == 0, "move assignment clear function count");
+    require_api_smoke(old_owner.statistics().last_compilation_ns == 0,
+                      "move assignment clear resets compilation timing");
 }
 
 static void api_smoke_bitmask_roundtrip() {
@@ -493,6 +527,7 @@ static void api_smoke_transform_and_aggregate() {
 static void run_public_api_smoke_tests() {
 #if SIMJIT_ASMJIT_BACKEND
     api_smoke_sum();
+    api_smoke_raw_build_callbacks();
     api_smoke_try_compile_and_debug();
     api_smoke_try_compile_generic_error();
     api_smoke_cache_and_casts();

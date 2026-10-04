@@ -1396,52 +1396,6 @@ static void compile_function(LLVMBuilder &builder, const Function *func) {
     llvm::verifyFunction(*builder.function);
 }
 
-std::unique_ptr<llvm::MemoryBuffer> generateA64MachineCode(llvm::Module *module) {
-    // Initialize native target (only needed once per process)
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllAsmPrinters();
-    llvm::InitializeAllTargetMCs();
-
-    // Get the ARM64 target
-    llvm::Triple triple("aarch64-none-unknown");
-    std::string Error;
-    const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, Error);
-    if (!target) {
-        llvm::errs() << "Error getting target: " << Error << "\n";
-        return {};
-    }
-
-    // Create target machine
-    llvm::TargetOptions options;
-
-    std::unique_ptr<llvm::TargetMachine> target_machine{
-        //
-        target->createTargetMachine( //
-            triple,
-            "generic", // CPU type
-            "+neon",   // Features
-            options, llvm::Reloc::Model::PIC_, {}, llvm::CodeGenOptLevel::Less)};
-    // Configure module
-    module->setDataLayout(target_machine->createDataLayout());
-
-    // Create output buffer
-    llvm::SmallVector<char, 0> obj_buffer_sv;
-    llvm::raw_svector_ostream obj_stream(obj_buffer_sv);
-
-    // Create a pass manager
-    llvm::legacy::PassManager pass_manager;
-
-    // Ask the target machine to add passes to emit an object file
-    if (target_machine->addPassesToEmitFile(pass_manager, obj_stream, nullptr, llvm::CodeGenFileType::ObjectFile)) {
-        llvm::errs() << "TargetMachine can't emit an object file\n";
-        return {};
-    }
-    pass_manager.run(*module);
-
-    // Create MemoryBuffer from the generated code
-    return llvm::MemoryBuffer::getMemBufferCopy(llvm::StringRef(obj_buffer_sv.data(), obj_buffer_sv.size()));
-}
-
 static std::string get_ir_string(llvm::Module &module) {
     std::string ir;
     llvm::raw_string_ostream os(ir);

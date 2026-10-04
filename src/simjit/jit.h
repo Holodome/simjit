@@ -7,7 +7,9 @@
 
 #include "simjit/compiler.h"
 #include "simjit/detail/expected.h"
+#include "simjit/detail/function_ref.h"
 
+#include <cstdint>
 #include <optional>
 
 namespace simjit {
@@ -68,6 +70,9 @@ struct Statistics {
     size_t compilation_attempts;
     size_t compilation_successes;
     size_t compilation_failures;
+
+    // Wall-clock latency of the most recent cache-miss compilation attempt, in nanoseconds.
+    uint64_t last_compilation_ns;
 
     // Compilation memory arena reserved memory size.
     size_t last_compilation_arena_used_memory;
@@ -134,31 +139,8 @@ public:
     // identifier is the cache key. On cache hit, the stored function is reused without rebuilding the expression or
     // comparing it with build_fn. If caller is provided, only the declared argument count/kinds/types are checked.
     // Use stable, unique identifiers for distinct expressions.
-    template <typename BuildFn>
-    void *build_and_compile(std::string_view identifier, BuildFn build_fn, const CallerInfo *caller = nullptr) {
-        if (auto result = find_and_typecheck_function(identifier, caller)) {
-            ++cache_hits_;
-            return result;
-        }
-
-        ++cache_misses_;
-        ++compilation_attempts_;
-
-        void *result = nullptr;
-        hir::Function *hir = nullptr;
-        try {
-            reset_current_compilation();
-            hir = build_hir(build_fn);
-            result = compile(identifier, hir, caller);
-        } catch (...) {
-            ++compilation_failures_;
-            if (debug_options_.capture_on_error) { capture_debug_information(hir); }
-            throw;
-        }
-        if (debug_options_.capture_on_success) { capture_debug_information(hir); }
-        ++compilation_successes_;
-        return result;
-    }
+    void *build_and_compile(std::string_view identifier, function_ref<void(FunctionBuilder &)> build_fn,
+                            const CallerInfo *caller = nullptr);
 
 private:
     // identifier is used as unique key that can be used to save and look up compiled functions. This function looks up
@@ -169,24 +151,7 @@ private:
     // called in beginning of each new compilation.
     void reset_current_compilation();
 
-    template <typename BuildFn> hir::Function *build_hir(BuildFn build_fn) {
-        bool debug_info = debug_options_.enabled() && bool(debug_options_.stages & DebugStage::HIR);
-
-        FunctionBuilder builder{ctx_};
-        build_fn(builder);
-        hir::Function *fn = builder.build();
-
-        // Eager capture for HIR info. This makes sure we have enough debug information available to easily reproduce
-        // the error. Obviously, this has non-zero overhead. However, we don't expect debug information to be enabled
-        // always.
-        if (debug_info) {
-            debug_snapshot_.hir = hir::print_function(fn);
-#if SIMJIT_ENABLE_SERIALIZATION
-            debug_snapshot_.serialized = serialize(fn);
-#endif
-        }
-        return fn;
-    }
+    hir::Function *build_hir(function_ref<void(FunctionBuilder &)> build_fn);
 
     void *compile(std::string_view identifier, const hir::Function *hir, const CallerInfo *caller);
 
@@ -205,6 +170,7 @@ private:
     size_t compilation_attempts_ = 0;
     size_t compilation_successes_ = 0;
     size_t compilation_failures_ = 0;
+    uint64_t last_compilation_ns_ = 0;
 
     MemoryArena arena_{};
     Context ctx_;

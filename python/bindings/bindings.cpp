@@ -206,6 +206,7 @@ PYBIND11_MODULE(_simjit, m) {
         .def_readonly("compilation_attempts", &sj::jit::Statistics::compilation_attempts)
         .def_readonly("compilation_successes", &sj::jit::Statistics::compilation_successes)
         .def_readonly("compilation_failures", &sj::jit::Statistics::compilation_failures)
+        .def_readonly("last_compilation_ns", &sj::jit::Statistics::last_compilation_ns)
         .def_readonly("last_compilation_arena_used_memory", &sj::jit::Statistics::last_compilation_arena_used_memory)
         .def_readonly("last_compilation_arena_reserved_memory",
                       &sj::jit::Statistics::last_compilation_arena_reserved_memory)

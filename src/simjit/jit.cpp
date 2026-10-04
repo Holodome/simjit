@@ -8,6 +8,7 @@
 #include "simjit/core/vectorizer.h"
 
 #include <array>
+#include <chrono>
 #include <unordered_map>
 #include <utility>
 
@@ -273,6 +274,7 @@ public:
         s.compilation_attempts = parent_->compilation_attempts_;
         s.compilation_failures = parent_->compilation_failures_;
         s.compilation_successes = parent_->compilation_successes_;
+        s.last_compilation_ns = parent_->last_compilation_ns_;
 
         auto inner = session_.allocator_statistics();
         s.jit_memory_allocation_count = inner.allocation_count;
@@ -318,7 +320,7 @@ JitContext::JitContext(JitContext &&other) noexcept
       debug_snapshot_(std::move(other.debug_snapshot_)), cache_hits_(other.cache_hits_),
       cache_misses_(other.cache_misses_), compilation_attempts_(other.compilation_attempts_),
       compilation_successes_(other.compilation_successes_), compilation_failures_(other.compilation_failures_),
-      arena_(std::move(other.arena_)), ctx_(std::move(other.ctx_)) {
+      last_compilation_ns_(other.last_compilation_ns_), arena_(std::move(other.arena_)), ctx_(std::move(other.ctx_)) {
     ctx_.arena = &arena_;
     if (impl_ != nullptr) { impl_->rebind_parent(this); }
 
@@ -343,6 +345,7 @@ JitContext &JitContext::operator=(JitContext &&other) noexcept {
         compilation_attempts_ = other.compilation_attempts_;
         compilation_successes_ = other.compilation_successes_;
         compilation_failures_ = other.compilation_failures_;
+        last_compilation_ns_ = other.last_compilation_ns_;
         arena_ = std::move(other.arena_);
         ctx_ = std::move(other.ctx_);
         ctx_.arena = &arena_;
@@ -401,6 +404,25 @@ void JitContext::reset_current_compilation() {
     debug_snapshot_ = {};
 }
 
+hir::Function *JitContext::build_hir(function_ref<void(FunctionBuilder &)> build_fn) {
+    bool debug_info = debug_options_.enabled() && bool(debug_options_.stages & DebugStage::HIR);
+
+    FunctionBuilder builder{ctx_};
+    build_fn(builder);
+    hir::Function *fn = builder.build();
+
+    // Eager capture for HIR info. This makes sure we have enough debug information available to easily reproduce
+    // the error. Obviously, this has non-zero overhead. However, we don't expect debug information to be enabled
+    // always.
+    if (debug_info) {
+        debug_snapshot_.hir = hir::print_function(fn);
+#if SIMJIT_ENABLE_SERIALIZATION
+        debug_snapshot_.serialized = serialize(fn);
+#endif
+    }
+    return fn;
+}
+
 void *JitContext::find_and_typecheck_function(std::string_view identifier, const CallerInfo *caller) {
     return impl_->find_and_typecheck_function(identifier, caller);
 }
@@ -412,6 +434,39 @@ void *JitContext::find_cached_function(std::string_view identifier, const Caller
     }
     ++cache_misses_;
     return nullptr;
+}
+
+void *JitContext::build_and_compile(std::string_view identifier, function_ref<void(FunctionBuilder &)> build_fn,
+                                    const CallerInfo *caller) {
+    if (auto result = find_and_typecheck_function(identifier, caller)) {
+        ++cache_hits_;
+        return result;
+    }
+
+    ++cache_misses_;
+    ++compilation_attempts_;
+    const auto compilation_start = std::chrono::steady_clock::now();
+
+    void *result = nullptr;
+    hir::Function *hir = nullptr;
+    try {
+        reset_current_compilation();
+        hir = build_hir(build_fn);
+        result = compile(identifier, hir, caller);
+    } catch (...) {
+        last_compilation_ns_ = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compilation_start)
+                .count());
+        ++compilation_failures_;
+        if (debug_options_.capture_on_error) { capture_debug_information(hir); }
+        throw;
+    }
+    last_compilation_ns_ = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compilation_start)
+            .count());
+    if (debug_options_.capture_on_success) { capture_debug_information(hir); }
+    ++compilation_successes_;
+    return result;
 }
 
 void *JitContext::compile(std::string_view identifier, const hir::Function *hir, const CallerInfo *caller) {
@@ -471,6 +526,7 @@ std::string JitContext::bug_report() const {
     simjit::format_to(out, "compilation_attempts: %zu\n", s.compilation_attempts);
     simjit::format_to(out, "compilation_successes: %zu\n", s.compilation_successes);
     simjit::format_to(out, "compilation_failures: %zu\n", s.compilation_failures);
+    simjit::format_to(out, "last_compilation_ns: %llu\n", (unsigned long long)s.last_compilation_ns);
     simjit::format_to(out, "last_compilation_arena_used_memory: %zu\n", s.last_compilation_arena_used_memory);
     simjit::format_to(out, "last_compilation_arena_reserved_memory: %zu\n", s.last_compilation_arena_reserved_memory);
     simjit::format_to(out, "jit_memory_block_count: %zu\n", s.jit_memory_block_count);
@@ -529,6 +585,7 @@ void JitContext::clear() {
     compilation_attempts_ = 0;
     compilation_successes_ = 0;
     compilation_failures_ = 0;
+    last_compilation_ns_ = 0;
 
     policy_ = p;
     debug_options_ = d;

@@ -145,7 +145,7 @@ static FloatCastRewrite classify_float_cast_rewrite(ScalarDataType from, ScalarD
                                      {BFTI, O, BFTI},
                                      {O, ID, O},
                                  },
-                             };
+    };
     return matrix[(size_t)from_group][(size_t)to_group][(size_t)size_relation(from, to)];
 }
 
