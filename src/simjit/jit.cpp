@@ -370,11 +370,15 @@ void JitContext::capture_debug_information(const hir::Function *fn) noexcept {
     if (bool(debug_options_.stages & DebugStage::HIR)) {
         try {
             debug_snapshot_.hir = hir::print_function(fn);
-#if SIMJIT_ENABLE_SERIALIZATION
-            debug_snapshot_.serialized = serialize(fn);
-#endif
         } catch (...) {}
     }
+#if SIMJIT_ENABLE_SERIALIZATION
+    if (bool(debug_options_.stages & DebugStage::Serialized)) {
+        try {
+            debug_snapshot_.serialized = serialize(fn);
+        } catch (...) {}
+    }
+#endif
     if (bool(debug_options_.stages & DebugStage::Vectorizer) && policy_ != CompilePolicy::Scalar) {
         try {
             const auto *vec_result = vect::hir_to_vect(fn);
@@ -405,7 +409,10 @@ void JitContext::reset_current_compilation() {
 }
 
 hir::Function *JitContext::build_hir(function_ref<void(FunctionBuilder &)> build_fn) {
-    bool debug_info = debug_options_.enabled() && bool(debug_options_.stages & DebugStage::HIR);
+    bool capture_hir = debug_options_.enabled() && bool(debug_options_.stages & DebugStage::HIR);
+#if SIMJIT_ENABLE_SERIALIZATION
+    bool capture_serialized = debug_options_.enabled() && bool(debug_options_.stages & DebugStage::Serialized);
+#endif
 
     FunctionBuilder builder{ctx_};
     build_fn(builder);
@@ -414,12 +421,10 @@ hir::Function *JitContext::build_hir(function_ref<void(FunctionBuilder &)> build
     // Eager capture for HIR info. This makes sure we have enough debug information available to easily reproduce
     // the error. Obviously, this has non-zero overhead. However, we don't expect debug information to be enabled
     // always.
-    if (debug_info) {
-        debug_snapshot_.hir = hir::print_function(fn);
+    if (capture_hir) { debug_snapshot_.hir = hir::print_function(fn); }
 #if SIMJIT_ENABLE_SERIALIZATION
-        debug_snapshot_.serialized = serialize(fn);
+    if (capture_serialized) { debug_snapshot_.serialized = serialize(fn); }
 #endif
-    }
     return fn;
 }
 

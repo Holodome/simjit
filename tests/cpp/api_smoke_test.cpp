@@ -154,6 +154,21 @@ static void api_smoke_try_compile_and_debug() {
     require_api_smoke(!ctx.debug_snapshot().hir.empty(), "debug HIR should be captured on error");
 }
 
+static void api_smoke_serialized_debug_stage() {
+#if SIMJIT_ENABLE_SERIALIZATION
+    JitContext ctx{};
+    ctx.set_policy(CompilePolicy::Scalar);
+    ctx.debug_options().capture_on_success = true;
+    ctx.debug_options().stages = DebugStage::Serialized;
+
+    (void)vectorized_function<InputArr<I32>, OutputScalar<I32>>(ctx, "api-smoke-serialized-debug-stage",
+                                                                api_smoke_build_sum_i32);
+    const DebugSnapshot &snapshot = ctx.debug_snapshot();
+    require_api_smoke(snapshot.hir.empty(), "serialized debug stage does not capture HIR");
+    require_api_smoke(!snapshot.serialized.empty(), "serialized debug stage captures serialized HIR");
+#endif
+}
+
 static void api_smoke_try_compile_generic_error() {
     JitContext ctx{};
     ctx.set_policy(CompilePolicy::Scalar);
@@ -529,6 +544,7 @@ static void run_public_api_smoke_tests() {
     api_smoke_sum();
     api_smoke_raw_build_callbacks();
     api_smoke_try_compile_and_debug();
+    api_smoke_serialized_debug_stage();
     api_smoke_try_compile_generic_error();
     api_smoke_cache_and_casts();
     api_smoke_cache_error_paths();

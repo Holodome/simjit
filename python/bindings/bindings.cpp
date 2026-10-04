@@ -85,6 +85,7 @@ PYBIND11_MODULE(_simjit, m) {
         .value("MIR", sj::jit::DebugStage::MIR)
         .value("ASM", sj::jit::DebugStage::ASM)
         .value("MachineCode", sj::jit::DebugStage::MachineCode)
+        .value("Serialized", sj::jit::DebugStage::Serialized)
         .value("All", sj::jit::DebugStage::All);
     py::enum_<sj::CodeTransformations>(m, "CodeTransformations")
         .value("No", sj::CodeTransformations::No)

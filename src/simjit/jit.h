@@ -31,8 +31,9 @@ enum class DebugStage : uint8_t {
     MIR = 4,
     ASM = 8,
     MachineCode = 16,
+    Serialized = 32,
 
-    All = HIR | Vectorizer | MIR | ASM | MachineCode,
+    All = HIR | Vectorizer | MIR | ASM | MachineCode | Serialized,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(DebugStage)
 
@@ -131,8 +132,6 @@ public:
     // Returns nullptr on cache miss. If caller is provided and the identifier exists, declared argument
     // count/kinds/types are checked before returning the cached function pointer.
     void *find_cached_function(std::string_view identifier, const CallerInfo *caller = nullptr);
-
-    // Same cache operation as release(), named for callers that think in cache terms.
     bool delete_cached_function(std::string_view identifier);
     void clear();
 
