@@ -2,8 +2,8 @@ local:
   label: Local x86 Linux
   public: true
   env:
-    LLVM_CONFIG: llvm-config-22
-    LLVM_CLANG: clang-22
+    LLVM_CONFIG: llvm-config-23
+    LLVM_CLANG: clang-23
 
 security:
   max_query_bytes: 65536

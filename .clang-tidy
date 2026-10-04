@@ -41,3 +41,5 @@ Checks: >-
   
 WarningsAsErrors: '*'
 FormatStyle:     none
+CheckOptions:
+  bugprone-signed-bitwise.IgnorePositiveIntegerLiterals: true

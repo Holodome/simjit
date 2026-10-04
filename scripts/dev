@@ -153,10 +153,10 @@ case "$command_name" in
     docker build "${platform_args[@]}" \
       --build-arg "PYTHON_IMAGE=${DOCKER_EXPLORER_PYTHON_IMAGE:-python:3.13-slim-bookworm}" \
       --build-arg "BUILD_WORKERS=${DOCKER_EXPLORER_BUILD_WORKERS:-2}" \
-      --build-arg "LLVM_MAJOR=${DOCKER_EXPLORER_LLVM_MAJOR:-22}" \
+      --build-arg "LLVM_MAJOR=${DOCKER_EXPLORER_LLVM_MAJOR:-23}" \
       --build-arg "LLVM_DEBIAN_CODENAME=${DOCKER_EXPLORER_LLVM_DEBIAN_CODENAME:-bookworm}" \
-      --build-arg "LLVM_CONFIG=${DOCKER_EXPLORER_LLVM_CONFIG:-llvm-config-${DOCKER_EXPLORER_LLVM_MAJOR:-22}}" \
-      --build-arg "LLVM_CLANG=${DOCKER_EXPLORER_LLVM_CLANG:-clang-${DOCKER_EXPLORER_LLVM_MAJOR:-22}}" \
+      --build-arg "LLVM_CONFIG=${DOCKER_EXPLORER_LLVM_CONFIG:-llvm-config-${DOCKER_EXPLORER_LLVM_MAJOR:-23}}" \
+      --build-arg "LLVM_CLANG=${DOCKER_EXPLORER_LLVM_CLANG:-clang-${DOCKER_EXPLORER_LLVM_MAJOR:-23}}" \
       --build-arg "EXTRA_APT_PACKAGES=${DOCKER_EXPLORER_EXTRA_APT_PACKAGES:-}" \
       -f "$repo_root/explorer/docker/Dockerfile" --target runtime -t "$image" "$repo_root"
     ;;
