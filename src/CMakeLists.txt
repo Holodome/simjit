@@ -208,6 +208,10 @@ function(simjit_apply_warnings target)
       -Wnon-virtual-dtor
       -Wextra-semi
     )
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      # GCC's maybe-uninitialized can become confused about tagged unions.
+      target_compile_options(${target} PRIVATE -Wno-maybe-uninitialized)
+    endif()
   endif()
 endfunction()
 
