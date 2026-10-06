@@ -113,7 +113,8 @@ public:
     JitContext &operator=(const JitContext &) = delete;
     JitContext &operator=(JitContext &&other) noexcept;
 
-    void set_policy(CompilePolicy x) noexcept { policy_ = x; }
+    // Selecting Vectorized requires host vectorization support and throws otherwise.
+    void set_policy(CompilePolicy x);
     CompilePolicy policy() const noexcept { return policy_; }
     void set_transformations(CodeTransformations x) noexcept { ctx_.transformations = x; }
     CodeTransformations transformations() const noexcept { return ctx_.transformations; }

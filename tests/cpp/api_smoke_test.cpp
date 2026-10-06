@@ -3,6 +3,7 @@
 // See LICENSE for license and copyright information
 // SPDX-License-Identifier: Zlib
 
+#include "simjit/asmjit.h"
 #include "simjit/jit.h"
 
 #include <array>
@@ -117,6 +118,11 @@ static Arch api_smoke_host_arch() {
 #else
 #error "Unsupported public API smoke host architecture"
 #endif
+}
+
+static bool api_smoke_host_supports_vectorization() {
+    AsmjitSession session(Arch::Native);
+    return session.host_supports_vectorization();
 }
 
 static void api_smoke_sum() {
@@ -273,6 +279,15 @@ static void api_smoke_cache_limit_error() {
 
 static void api_smoke_vectorized_policy_error() {
     JitContext ctx{};
+    if (!api_smoke_host_supports_vectorization()) {
+        ErrorInfo info = expect_api_smoke_simjit_error(
+            [&]() { ctx.set_policy(CompilePolicy::Vectorized); }, ErrorModule::JIT, ErrorKind::JitFailure,
+            ErrorSubKind::UnsupportedHostFeature, "vectorized policy host capability");
+        require_api_smoke_contains(info.message, "does not support vectorization", "vectorized policy host message");
+        require_api_smoke(ctx.policy() == CompilePolicy::BestEffort,
+                          "rejected vectorized policy leaves policy unchanged");
+        return;
+    }
     ctx.set_policy(CompilePolicy::Vectorized);
 
     ErrorInfo info = expect_api_smoke_simjit_error(
@@ -293,9 +308,14 @@ static void api_smoke_best_effort_records_vectorization_error() {
 
     void *fn = ctx.build_and_compile("api-smoke-best-effort-vectorization-error", api_smoke_build_many_outputs);
     require_api_smoke(fn != nullptr, "best-effort fallback compile");
-    require_api_smoke(!ctx.debug_snapshot().vectorization_exception.empty(), "recorded vectorization error");
-    require_api_smoke_contains(ctx.debug_snapshot().vectorization_exception, "too many roots",
-                               "vectorization error details");
+    if (api_smoke_host_supports_vectorization()) {
+        require_api_smoke(!ctx.debug_snapshot().vectorization_exception.empty(), "recorded vectorization error");
+        require_api_smoke_contains(ctx.debug_snapshot().vectorization_exception, "too many roots",
+                                   "vectorization error details");
+    } else {
+        require_api_smoke(ctx.debug_snapshot().vectorization_exception.empty(),
+                          "no vectorization attempt without host support");
+    }
 }
 
 static void api_smoke_raw_call_errors() {
@@ -316,9 +336,11 @@ static void api_smoke_bug_report() {
     require_api_smoke_contains(empty_report, "function_identifiers: <empty>", "empty bug report identifiers");
     require_api_smoke_contains(empty_report, "=== HIR ===\n<empty>", "empty bug report section");
 
-    JitContext vectorized_ctx{};
-    vectorized_ctx.set_policy(CompilePolicy::Vectorized);
-    require_api_smoke_contains(vectorized_ctx.bug_report(), "policy: vectorized", "vectorized bug report policy");
+    if (api_smoke_host_supports_vectorization()) {
+        JitContext vectorized_ctx{};
+        vectorized_ctx.set_policy(CompilePolicy::Vectorized);
+        require_api_smoke_contains(vectorized_ctx.bug_report(), "policy: vectorized", "vectorized bug report policy");
+    }
 
     JitContext ctx{};
     ctx.set_policy(CompilePolicy::Scalar);
@@ -408,7 +430,7 @@ static void api_smoke_jit_context_move_constructor() {
 
 static void api_smoke_jit_context_move_assignment() {
     JitContext old_owner{};
-    old_owner.set_policy(CompilePolicy::Vectorized);
+    old_owner.set_policy(CompilePolicy::Scalar);
     (void)vectorized_function<InputArr<I32>, OutputScalar<I32>>(old_owner, "api-smoke-move-assign-old",
                                                                 api_smoke_build_sum_i32);
     require_api_smoke(old_owner.statistics().function_count == 1, "move assignment old owner function count");

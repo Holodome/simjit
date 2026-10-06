@@ -184,6 +184,12 @@ public:
         return call_asmjit(func, false, false, result);
     }
 
+    void require_host_vectorization() const {
+        if (!host_supports_vectorization_) {
+            jit_failure(ErrorSubKind::UnsupportedHostFeature, "Host machine does not support vectorization");
+        }
+    }
+
     mir::Function *lower_function(const hir::Function *fn) {
         switch (parent_->policy_) {
         case CompilePolicy::BestEffort:
@@ -195,11 +201,7 @@ public:
                 }
             }
             return lower_scalar(fn);
-        case CompilePolicy::Vectorized:
-            if (!host_supports_vectorization_) {
-                jit_failure(ErrorSubKind::UnsupportedHostFeature, "Host machine does not support vectorization");
-            }
-            return lower_vectorized(fn);
+        case CompilePolicy::Vectorized: require_host_vectorization(); return lower_vectorized(fn);
         case CompilePolicy::Scalar: return lower_scalar(fn);
         }
         SIMJIT_UNREACHABLE();
@@ -208,7 +210,7 @@ public:
     void *lower_and_compile_function(const hir::Function *fn) {
         switch (parent_->policy_) {
         case CompilePolicy::BestEffort:
-            if (!fn->scalar_only) {
+            if (host_supports_vectorization_ && !fn->scalar_only) {
                 auto vectorized = try_lower_vectorized(fn);
                 if (vectorized) {
                     try {
@@ -229,6 +231,7 @@ public:
             }
             return compile(lower_scalar(fn));
         case CompilePolicy::Vectorized:
+            require_host_vectorization();
             if (fn->scalar_only) {
                 jit_failure(ErrorSubKind::UnsupportedFeature,
                             "Failed to compile vectorized: function is marked as only scalar");
@@ -330,6 +333,11 @@ JitContext::JitContext(JitContext &&other) noexcept
 
 JitContext::~JitContext() noexcept {
     delete impl_;
+}
+
+void JitContext::set_policy(CompilePolicy policy) {
+    if (policy == CompilePolicy::Vectorized) { impl_->require_host_vectorization(); }
+    policy_ = policy;
 }
 
 JitContext &JitContext::operator=(JitContext &&other) noexcept {
