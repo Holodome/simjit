@@ -292,12 +292,20 @@ enum class SpecialOp : uint16_t {
     CondScatter = 0x8,
     SmallPack = 0x10,
     ArbitraryBitPermute = 0x20,
-    I8Mul = 0x40,
-    I8VariableShift = 0x80,
-    SmallLzcnt = 0x100,
     SmallGather = 0x200,
+    SmallPopcount = 0x400,
+    LargePopcount = 0x800,
+    I8ConstantShift = 0x1000,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(SpecialOp)
+
+// Early vectorization outcome recorded during HIR construction. Lowering has equivalent validation,
+// but this lets the JIT choose scalar code without beginning vectorization.
+enum class VectorizationHint : uint8_t {
+    None,
+    ScalarOnly,
+    UnsupportedSpecialOps,
+};
 
 struct Function {
     Context *ctx = nullptr;
@@ -307,9 +315,13 @@ struct Function {
     ArenaArray<Step *> step_roots;
     std::optional<ArgumentIdx> safety_check_arg{};
     SpecialOp special_ops = SpecialOp::None;
-    bool scalar_only = false;
+    VectorizationHint vectorization_hint = VectorizationHint::None;
+
+    bool is_scalar_only() const noexcept { return vectorization_hint != VectorizationHint::None; }
+    SpecialOp unsupported_vector_special_ops() const noexcept;
 };
 
+SpecialOp supported_vector_special_ops_for_arch(Arch arch) noexcept;
 const char *show_step_kind(StepKind kind) noexcept;
 std::string show_special_ops(SpecialOp ops);
 

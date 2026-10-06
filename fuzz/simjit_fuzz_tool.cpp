@@ -1031,7 +1031,7 @@ static CompileState compile_item(std::string_view input, const ParseResult &conf
     try {
         deserialize(input, builder);
         fn = builder.build();
-        state.hir_scalar_only = fn->scalar_only;
+        state.hir_scalar_only = fn->is_scalar_only();
         state.comparison_unstable = has_float_to_int_cast(fn);
         state.serialized = serialize(fn);
         state.schema = schema_json(fn->args);

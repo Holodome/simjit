@@ -57,11 +57,31 @@ std::string show_special_ops(SpecialOp ops) {
     append(SpecialOp::CondScatter, "cond-scatter");
     append(SpecialOp::SmallPack, "small-pack");
     append(SpecialOp::ArbitraryBitPermute, "arbitrary-bit-permute");
-    append(SpecialOp::I8Mul, "i8-mul");
-    append(SpecialOp::I8VariableShift, "i8-variable-shift");
-    append(SpecialOp::SmallLzcnt, "small-lzcnt");
     append(SpecialOp::SmallGather, "small-gather");
+    append(SpecialOp::SmallPopcount, "small-popcount");
+    append(SpecialOp::LargePopcount, "large-popcount");
+    append(SpecialOp::I8ConstantShift, "i8-constant-shift");
     return result;
+}
+
+SpecialOp supported_vector_special_ops_for_arch(Arch arch) noexcept {
+    switch (arch) {
+    case Arch::Amd64_AVX512:
+    case Arch::Amd64_AVX512_YMM:
+        // We treat Ice Lake as baseline supported version - it has everything we need. Other versions are treated as
+        // 'reduced ice lake', where some special ops will be removed from supported list.
+        return SpecialOp::I64Mul | SpecialOp::Gather | SpecialOp::Scatter | SpecialOp::CondScatter |
+               SpecialOp::SmallPack | SpecialOp::ArbitraryBitPermute | SpecialOp::SmallPopcount |
+               SpecialOp::LargePopcount | SpecialOp::I8ConstantShift;
+    case Arch::Arm64_NEON:
+        return SpecialOp::Gather | SpecialOp::SmallPack | SpecialOp::SmallPopcount | SpecialOp::LargePopcount |
+               SpecialOp::I8ConstantShift;
+    }
+    SIMJIT_UNREACHABLE();
+}
+
+SpecialOp Function::unsupported_vector_special_ops() const noexcept {
+    return special_ops & ~(supported_vector_special_ops_for_arch(ctx->arch) & ctx->host_supported_vector_special_ops);
 }
 
 static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache, std::string &buf) {
@@ -150,6 +170,10 @@ std::string print_function(const Function *func) {
     if (func->special_ops != SpecialOp::None) {
         simjit::format_to(buf, "# special-ops=%s\n", show_special_ops(func->special_ops).c_str());
     }
+    if (func->vectorization_hint == VectorizationHint::UnsupportedSpecialOps) {
+        simjit::format_to(buf, "# unsupported-vector-special-ops=%s\n",
+                          show_special_ops(func->unsupported_vector_special_ops()).c_str());
+    }
     std::vector<uint32_t> show_cache(func->step_id_count, 0);
     std::vector<uint8_t> traversal_state(func->step_id_count, 0);
     uint32_t counter = 1;
@@ -166,5 +190,6 @@ std::string print_function(const Function *func) {
     }
     return buf;
 }
+
 } // namespace hir
 } // namespace simjit

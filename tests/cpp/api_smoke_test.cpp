@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: Zlib
 
 #include "simjit/asmjit.h"
+#include "simjit/compiler.h"
+#include "simjit/core/hir.h"
 #include "simjit/jit.h"
 
 #include <array>
@@ -123,6 +125,76 @@ static Arch api_smoke_host_arch() {
 static bool api_smoke_host_supports_vectorization() {
     AsmjitSession session(Arch::Native);
     return session.host_supports_vectorization();
+}
+
+template <typename BuildFn>
+static void require_api_smoke_cascade_scalar_special_op(hir::SpecialOp expected, BuildFn build_fn,
+                                                        const char *message) {
+    MemoryArena arena{};
+    Context context{arena, "cascade-lake", CodeTransformations::All, Arch::Amd64_AVX512};
+    hir::SpecialOp ice_lake = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+    context.host_supported_vector_special_ops =
+        ice_lake & ~(hir::SpecialOp::SmallPack | hir::SpecialOp::ArbitraryBitPermute | hir::SpecialOp::I8ConstantShift |
+                     hir::SpecialOp::SmallPopcount | hir::SpecialOp::LargePopcount);
+    FunctionBuilder builder{context};
+    build_fn(builder);
+    hir::Function *fn = builder.build();
+    require_api_smoke(fn->is_scalar_only(), message);
+    require_api_smoke(bool(fn->unsupported_vector_special_ops() & expected), message);
+}
+
+static void api_smoke_special_op_capabilities() {
+    using hir::SpecialOp;
+
+    SpecialOp ice_lake = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+    require_api_smoke(bool(ice_lake & SpecialOp::SmallPack), "Ice Lake small pack capability");
+    require_api_smoke(bool(ice_lake & SpecialOp::ArbitraryBitPermute), "Ice Lake GFNI capability");
+    require_api_smoke(bool(ice_lake & SpecialOp::SmallPopcount), "Ice Lake small popcount capability");
+    require_api_smoke(bool(ice_lake & SpecialOp::LargePopcount), "Ice Lake large popcount capability");
+
+    SpecialOp arm = hir::supported_vector_special_ops_for_arch(Arch::Arm64_NEON);
+    require_api_smoke(bool(arm & SpecialOp::SmallPack), "Arm small pack capability");
+    require_api_smoke(bool(arm & SpecialOp::SmallPopcount), "Arm small popcount capability");
+    require_api_smoke(bool(arm & SpecialOp::LargePopcount), "Arm large popcount capability");
+    require_api_smoke(!bool(arm & SpecialOp::ArbitraryBitPermute), "Arm arbitrary bit permute capability");
+
+    MemoryArena scalar_arena{};
+    Context scalar_context{scalar_arena, "cascade-lake", CodeTransformations::All, Arch::Amd64_AVX512};
+    // Synthetic Cascade Lake host mask: retain the AVX-512 baseline but exclude the Ice Lake extensions.
+    scalar_context.host_supported_vector_special_ops =
+        ice_lake & ~(SpecialOp::SmallPack | SpecialOp::ArbitraryBitPermute | SpecialOp::I8ConstantShift |
+                     SpecialOp::SmallPopcount | SpecialOp::LargePopcount);
+    FunctionBuilder scalar_builder{scalar_context};
+    scalar_builder.pack(scalar_builder.input_arg(I8), scalar_builder.input_predicate_arg(), scalar_builder.arg(I8),
+                        scalar_builder.arg(I64));
+    hir::Function *scalar_fn = scalar_builder.build();
+    require_api_smoke(scalar_fn->is_scalar_only(), "Cascade small pack forces scalar");
+    require_api_smoke(bool(scalar_fn->unsupported_vector_special_ops() & SpecialOp::SmallPack),
+                      "Cascade small pack reason");
+    require_api_smoke_contains(hir::print_function(scalar_fn), "unsupported-vector-special-ops=small-pack",
+                               "Cascade special op HIR report");
+
+    require_api_smoke_cascade_scalar_special_op(
+        SpecialOp::SmallPopcount, [](FunctionBuilder &b) { b.output_arg(b.popcnt(b.input_arg(I8))); },
+        "Cascade small popcount forces scalar");
+    require_api_smoke_cascade_scalar_special_op(
+        SpecialOp::LargePopcount, [](FunctionBuilder &b) { b.output_arg(b.popcnt(b.input_arg(I32))); },
+        "Cascade large popcount forces scalar");
+    require_api_smoke_cascade_scalar_special_op(
+        SpecialOp::ArbitraryBitPermute,
+        [](FunctionBuilder &b) { b.output_arg(b.permute_i8_bits(b.input_arg(I8), 1, 2, 3, 4, 5, 6, 7, 0)); },
+        "Cascade arbitrary bit permute forces scalar");
+    require_api_smoke_cascade_scalar_special_op(
+        SpecialOp::I8ConstantShift, [](FunctionBuilder &b) { b.output_arg(b.sll(b.input_arg(I8), b.i8(1))); },
+        "Cascade i8 constant shift forces scalar");
+
+    MemoryArena vector_arena{};
+    Context vector_context{vector_arena, "cascade-lake", CodeTransformations::All, Arch::Amd64_AVX512};
+    vector_context.host_supported_vector_special_ops = scalar_context.host_supported_vector_special_ops;
+    FunctionBuilder vector_builder{vector_context};
+    vector_builder.output_arg(vector_builder.input_arg(I32));
+    hir::Function *vector_fn = vector_builder.build();
+    require_api_smoke(!vector_fn->is_scalar_only(), "Cascade baseline vector HIR remains eligible");
 }
 
 static void api_smoke_sum() {
@@ -564,6 +636,7 @@ static void api_smoke_transform_and_aggregate() {
 static void run_public_api_smoke_tests() {
 #if SIMJIT_ASMJIT_BACKEND
     api_smoke_sum();
+    api_smoke_special_op_capabilities();
     api_smoke_raw_build_callbacks();
     api_smoke_try_compile_and_debug();
     api_smoke_serialized_debug_stage();

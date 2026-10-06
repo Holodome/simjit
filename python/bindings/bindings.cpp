@@ -98,7 +98,6 @@ PYBIND11_MODULE(_simjit, m) {
         .value("MaskCombine", sj::CodeTransformations::MaskCombine)
         .value("TernarylogicInst", sj::CodeTransformations::TernarylogicInst)
         .value("FmaInst", sj::CodeTransformations::FmaInst)
-        .value("SmallArith", sj::CodeTransformations::SmallArith)
         .value("All", sj::CodeTransformations::All);
     py::enum_<sj::LoadStoreKind>(m, "LoadStoreKind")
         .value("Aligned", sj::LoadStoreKind::Aligned)

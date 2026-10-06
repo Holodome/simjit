@@ -5,7 +5,7 @@
 
 #include "simjit/asmjit.h"
 
-#include "simjit/detail/base.h"
+#include "simjit/core/hir.h"
 
 #if SIMJIT_ASMJIT_BACKEND_ARM
 #include "asmjit/a64.h"
@@ -79,11 +79,11 @@ static bool runtime_supports_vectorization(const asmjit::JitRuntime &runtime) no
     switch (runtime.arch()) {
 #if SIMJIT_ASMJIT_BACKEND_X86
     case asmjit::Arch::kX64: {
-        const auto &feat = runtime.cpu_features();
-        const auto &x86 = feat.x86();
-        return x86.has_avx512_bitalg() && x86.has_avx512_bw() && x86.has_avx512_cd() && x86.has_avx512_dq() &&
-               x86.has_avx512_f() && x86.has_avx512_vbmi() && x86.has_avx512_vbmi2() && x86.has_avx512_vl() &&
-               x86.has_avx512_vpopcntdq() && x86.has_gfni();
+        const auto &x86 = runtime.cpu_features().x86();
+        // Cascade Lake is the baseline. It can execute ordinary AVX-512 vector code, but it lacks the
+        // Ice Lake additions used by some special operations.
+        return x86.has_avx512_bw() && x86.has_avx512_cd() && x86.has_avx512_dq() && x86.has_avx512_f() &&
+               x86.has_avx512_vl();
     }
 #endif
 #if SIMJIT_ASMJIT_BACKEND_ARM
@@ -118,6 +118,26 @@ Arch AsmjitSession::host_arch() const {
 
 bool AsmjitSession::host_supports_vectorization() const noexcept {
     return runtime_supports_vectorization(runtime_);
+}
+
+hir::SpecialOp AsmjitSession::host_supported_vector_special_ops() const noexcept {
+    switch (runtime_.arch()) {
+#if SIMJIT_ASMJIT_BACKEND_X86
+    case asmjit::Arch::kX64: {
+        const auto &x86 = runtime_.cpu_features().x86();
+        hir::SpecialOp result = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+        if (!x86.has_avx512_vbmi2()) { result &= ~hir::SpecialOp::SmallPack; }
+        if (!x86.has_gfni()) { result &= ~(hir::SpecialOp::ArbitraryBitPermute | hir::SpecialOp::I8ConstantShift); }
+        if (!x86.has_avx512_bitalg()) { result &= ~hir::SpecialOp::SmallPopcount; }
+        if (!x86.has_avx512_vpopcntdq()) { result &= ~hir::SpecialOp::LargePopcount; }
+        return result;
+    }
+#endif
+#if SIMJIT_ASMJIT_BACKEND_ARM
+    case asmjit::Arch::kAArch64: return hir::supported_vector_special_ops_for_arch(Arch::Arm64_NEON);
+#endif
+    default: return hir::SpecialOp::None;
+    }
 }
 
 bool AsmjitSession::host_supports_x86_backend() const noexcept {

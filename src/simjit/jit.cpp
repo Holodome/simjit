@@ -167,8 +167,10 @@ public:
                             "Amd64 machine should support BMI2 instruction set (Haswell and newer)");
             }
             host_supports_vectorization_ = session_.host_supports_vectorization();
+            ctx_.host_supported_vector_special_ops = session_.host_supported_vector_special_ops();
         } else if (host_arch == Arch::Arm64_NEON) {
             host_supports_vectorization_ = true;
+            ctx_.host_supported_vector_special_ops = session_.host_supported_vector_special_ops();
         } else {
             jit_failure(ErrorSubKind::UnsupportedHostFeature, "Unknown host architecture %d", (int)host_arch);
         }
@@ -194,7 +196,7 @@ public:
     mir::Function *lower_function(const hir::Function *fn) {
         switch (policy_) {
         case CompilePolicy::BestEffort:
-            if (host_supports_vectorization_) {
+            if (host_supports_vectorization_ && !fn->is_scalar_only()) {
                 auto vectorized = try_lower_vectorized(fn);
                 if (vectorized) { return vectorized.value(); }
                 if (!can_best_effort_fallback(vectorized.error())) {
@@ -202,7 +204,18 @@ public:
                 }
             }
             return lower_scalar(fn);
-        case CompilePolicy::Vectorized: require_host_vectorization(); return lower_vectorized(fn);
+        case CompilePolicy::Vectorized:
+            require_host_vectorization();
+            if (fn->is_scalar_only()) {
+                if (fn->vectorization_hint == hir::VectorizationHint::UnsupportedSpecialOps) {
+                    jit_failure(ErrorSubKind::UnsupportedFeature,
+                                "Failed to compile vectorized: unsupported vector special operations: %s",
+                                hir::show_special_ops(fn->unsupported_vector_special_ops()).c_str());
+                }
+                jit_failure(ErrorSubKind::UnsupportedFeature,
+                            "Failed to compile vectorized: function is marked as only scalar");
+            }
+            return lower_vectorized(fn);
         case CompilePolicy::Scalar: return lower_scalar(fn);
         }
         SIMJIT_UNREACHABLE();
@@ -211,7 +224,7 @@ public:
     void *lower_and_compile_function(const hir::Function *fn) {
         switch (policy_) {
         case CompilePolicy::BestEffort:
-            if (host_supports_vectorization_ && !fn->scalar_only) {
+            if (host_supports_vectorization_ && !fn->is_scalar_only()) {
                 auto vectorized = try_lower_vectorized(fn);
                 if (vectorized) {
                     try {
@@ -233,7 +246,12 @@ public:
             return compile(lower_scalar(fn));
         case CompilePolicy::Vectorized:
             require_host_vectorization();
-            if (fn->scalar_only) {
+            if (fn->is_scalar_only()) {
+                if (fn->vectorization_hint == hir::VectorizationHint::UnsupportedSpecialOps) {
+                    jit_failure(ErrorSubKind::UnsupportedFeature,
+                                "Failed to compile vectorized: unsupported vector special operations: %s",
+                                hir::show_special_ops(fn->unsupported_vector_special_ops()).c_str());
+                }
                 jit_failure(ErrorSubKind::UnsupportedFeature,
                             "Failed to compile vectorized: function is marked as only scalar");
             }
@@ -343,17 +361,17 @@ JitContext::~JitContext() noexcept {
     delete impl_;
 }
 
-void JitContext::set_policy(CompilePolicy policy) {
-    if (policy == CompilePolicy::Vectorized) { impl_->require_host_vectorization(); }
-    impl_->policy_ = policy;
+void JitContext::set_policy(CompilePolicy compile_policy) {
+    if (compile_policy == CompilePolicy::Vectorized) { impl_->require_host_vectorization(); }
+    impl_->policy_ = compile_policy;
 }
 
 CompilePolicy JitContext::policy() const noexcept {
     return impl_->policy_;
 }
 
-void JitContext::set_transformations(CodeTransformations transformations) noexcept {
-    impl_->ctx_.transformations = transformations;
+void JitContext::set_transformations(CodeTransformations transform_flags) noexcept {
+    impl_->ctx_.transformations = transform_flags;
 }
 
 CodeTransformations JitContext::transformations() const noexcept {
@@ -605,18 +623,18 @@ bool JitContext::delete_cached_function(std::string_view identifier) {
 }
 
 void JitContext::clear() {
-    CompilePolicy policy = impl_->policy_;
-    DebugOptions debug_options = impl_->debug_options_;
-    CodeTransformations transformations = impl_->ctx_.transformations;
-    BuildLimits build_limits = impl_->ctx_.build_limits;
-    Arch arch = impl_->ctx_.arch;
+    CompilePolicy saved_policy = impl_->policy_;
+    DebugOptions saved_debug_options = impl_->debug_options_;
+    CodeTransformations saved_transformations = impl_->ctx_.transformations;
+    BuildLimits saved_build_limits = impl_->ctx_.build_limits;
+    Arch saved_arch = impl_->ctx_.arch;
 
     delete impl_;
-    impl_ = new JitContextImpl(arch);
-    impl_->policy_ = policy;
-    impl_->debug_options_ = debug_options;
-    impl_->ctx_.transformations = transformations;
-    impl_->ctx_.build_limits = build_limits;
+    impl_ = new JitContextImpl(saved_arch);
+    impl_->policy_ = saved_policy;
+    impl_->debug_options_ = saved_debug_options;
+    impl_->ctx_.transformations = saved_transformations;
+    impl_->ctx_.build_limits = saved_build_limits;
 }
 
 template <size_t... Idxs> using RawFunctionPtr = void (*)(size_t, decltype((void)Idxs, (void *)nullptr)...);

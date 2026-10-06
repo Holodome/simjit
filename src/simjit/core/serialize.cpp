@@ -574,7 +574,7 @@ static hl::value serialize_headerlisp(const Function *func) {
     if (!func->accs.empty()) { b.add(serialize_accs(func, id_map)); }
     b.add(hl::cons("steps", steps_head));
     b.add(hl::cons("roots", roots_head));
-    if (func->scalar_only) { b.add(hl::list("scalar-only")); }
+    if (func->vectorization_hint == VectorizationHint::ScalarOnly) { b.add(hl::list("scalar-only")); }
     return b.list();
 }
 

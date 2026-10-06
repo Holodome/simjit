@@ -2414,8 +2414,7 @@ struct MirConstructState {
                     if (auto *it = binary_op_fma_peephole(node->dtype.as_vec(), node, ctx)) return it;
                 }
 
-                if (bool(hir->ctx->transformations & CodeTransformations::SmallArith) &&
-                    vdtype.elem == VecElemType::I8 && arch_traits.i8_gfni_shift &&
+                if (vdtype.elem == VecElemType::I8 && arch_traits.i8_gfni_shift &&
                     (data.op == ArithBinaryOp::RotateLeft || data.op == ArithBinaryOp::RotateRight ||
                      data.op == ArithBinaryOp::ShiftRightArith || data.op == ArithBinaryOp::ShiftLeftLogical ||
                      data.op == ArithBinaryOp::ShiftRightLogical)) {
@@ -2436,8 +2435,7 @@ struct MirConstructState {
 #endif
                 if (vdtype.is_int() && (data.op == ArithBinaryOp::Div || data.op == ArithBinaryOp::UDiv ||
                                         data.op == ArithBinaryOp::Mod || data.op == ArithBinaryOp::UMod)) {
-                    // Actually HIR already set scalar_only flag, but caller ignored it for some reason and still called
-                    // vectorizer
+                    // HIR already selected scalar-only policy, but caller ignored it and still called vectorization.
                     simjit_exception(ErrorModule::MIR, ErrorKind::Unsupported, ErrorSubKind::UnsupportedFeature,
                                      "vectorization is not supported for non-constant divisions");
                 }
@@ -2516,7 +2514,7 @@ struct MirConstructState {
                 case ArithUnaryOp::Tzcnt: result = make_tzcnt(arg, node->dtype); break;
                 case ArithUnaryOp::Lzcnt:
                     if ((vdtype.elem == VecElemType::I8 || vdtype.elem == VecElemType::I16) &&
-                        bool(hir->ctx->transformations & CodeTransformations::SmallArith) && !arch_traits.small_lzcnt) {
+                        !arch_traits.small_lzcnt) {
                         return lzcnt_i8_i16(arg);
                     }
                     [[fallthrough]];
@@ -2711,8 +2709,7 @@ struct MirConstructState {
     }
 
     Step *make_vec_arith_bin(Step *l, Step *r, ArithBinaryOp op, VecDataType dtype) {
-        if (dtype.elem == VecElemType::I8 && !arch_traits.i8_ops &&
-            bool(hir->ctx->transformations & CodeTransformations::SmallArith)) {
+        if (dtype.elem == VecElemType::I8 && !arch_traits.i8_ops) {
             if (op == ArithBinaryOp::Mul || op == ArithBinaryOp::ShiftRightArith ||
                 op == ArithBinaryOp::ShiftRightLogical || op == ArithBinaryOp::ShiftLeftLogical) {
                 return arith_binary_i8_i16_widen(l, r, dtype, op);

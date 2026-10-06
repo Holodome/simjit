@@ -417,29 +417,24 @@ enum class CodeTransformations : uint32_t {
     TernarylogicInst = 0x80,
     // Allow use of fma instructions
     FmaInst = 0x100,
-    // Expand i8 vector multiplications and shifts on targets that do not have a native byte multiply instruction.
-    // Rewrite i8 shifts into permutes.
-    // Implement i8 and i16 lzcnt.
-    SmallArith = 0x200,
     // Replace integer division by constant with multiply + shift. Requires libdivide compiled in (SIMJIT_USE_LIBDIVIDE)
-    ConstDiv = 0x400,
+    ConstDiv = 0x200,
     // Collapse chained integer casts that do not have safety checks.
-    CastPeephole = 0x800,
+    CastPeephole = 0x400,
     // Split mixed integer/float casts so coefficient-changing work happens in one domain before same-width
     // cross-domain conversion. Up-casts prefer integer-domain widening; down-casts prefer float-domain narrowing.
     // This enables i8/i16 float casts through i32, and exposes vector-friendly normalization nodes. For float-to-int
     // down-casts, vectorized code can round in the narrower float domain before integer conversion.
-    CastDecomposition = 0x1000,
+    CastDecomposition = 0x800,
     // Increase vector loop width for small expression graphs when the node-count budget allows it.
-    ProactiveUnroll = 0x2000,
+    ProactiveUnroll = 0x1000,
     // Remove simple identity binary operations during HIR construction.
-    BinaryIdentityPeephole = 0x4000,
+    BinaryIdentityPeephole = 0x2000,
     // Remove constant conditions during HIR construction.
-    ConstantConditionPeephole = 0x8000,
+    ConstantConditionPeephole = 0x4000,
 
     All = MuldqInst | MulConstPeephole | LogicalPeephole | BetweenPeephole | Unroll | AccSplit | MaskCombine |
-        TernarylogicInst | FmaInst | SmallArith | CastPeephole | ProactiveUnroll | CastDecomposition |
-        BinaryIdentityPeephole |
+        TernarylogicInst | FmaInst | CastPeephole | ProactiveUnroll | CastDecomposition | BinaryIdentityPeephole |
         ConstantConditionPeephole
 #if SIMJIT_USE_LIBDIVIDE
         // Actually we can just set it always, but I want to make it clear that libdivide is required.

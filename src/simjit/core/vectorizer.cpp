@@ -22,26 +22,6 @@ namespace vect {
 
 using namespace ::simjit::hir;
 
-static SpecialOp supported_vector_special_ops(Arch arch, CodeTransformations transformations) noexcept {
-    if (is_x86_arch(arch)) {
-        SpecialOp result = SpecialOp::I64Mul | SpecialOp::Gather | SpecialOp::Scatter | SpecialOp::CondScatter |
-                           SpecialOp::SmallPack | SpecialOp::ArbitraryBitPermute;
-        if (bool(transformations & CodeTransformations::SmallArith)) {
-            result |= SpecialOp::I8Mul | SpecialOp::I8VariableShift | SpecialOp::SmallLzcnt;
-        }
-        return result;
-    }
-    if (arch == Arch::Arm64_NEON) {
-        return SpecialOp::Gather | SpecialOp::SmallPack | SpecialOp::I8Mul | SpecialOp::I8VariableShift |
-               SpecialOp::SmallLzcnt;
-    }
-    SIMJIT_UNREACHABLE();
-}
-
-static SpecialOp unsupported_vector_special_ops(const hir::Function *func) noexcept {
-    return func->special_ops & ~supported_vector_special_ops(func->ctx->arch, func->ctx->transformations);
-}
-
 struct NodePool {
     static constexpr size_t chunk_size = 64;
     static constexpr size_t chunk_shift = 6;
@@ -376,9 +356,6 @@ static size_t proactive_unroll_special_op_cost(SpecialOp ops) noexcept {
     if (bool(ops & SpecialOp::SmallPack)) { ++cost; }
     if (bool(ops & SpecialOp::ArbitraryBitPermute)) { ++cost; }
     if (bool(ops & SpecialOp::I64Mul)) { ++cost; }
-    if (bool(ops & SpecialOp::I8Mul)) { ++cost; }
-    if (bool(ops & SpecialOp::I8VariableShift)) { ++cost; }
-    if (bool(ops & SpecialOp::SmallLzcnt)) { ++cost; }
     return cost;
 }
 
@@ -1866,7 +1843,7 @@ static Function *make_vectorization_result(AlgebraicVectorizer &state) {
 }
 
 nonstd::expected<Function *, ErrorInfo> try_hir_to_vect(const hir::Function *func) {
-    SpecialOp unsupported_ops = unsupported_vector_special_ops(func);
+    SpecialOp unsupported_ops = func->unsupported_vector_special_ops();
     if (unsupported_ops != SpecialOp::None) {
         return nonstd::unexpected<ErrorInfo>(ErrorInfo{
             ErrorModule::Vectorizer,

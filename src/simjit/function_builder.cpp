@@ -171,10 +171,15 @@ static int rhs_cmp_preference(const Step *step) noexcept {
     return 0;
 }
 
-static bool is_i8_variable_shift(ArithBinaryOp op, const Step *right) noexcept {
-    if (right->is(StepKind::Const)) { return false; }
+static bool is_i8_constant_shift_or_rotate(ArithBinaryOp op, const Step *right) noexcept {
+    if (!right->is(StepKind::Const)) { return false; }
     return op == ArithBinaryOp::ShiftRightArith || op == ArithBinaryOp::ShiftRightLogical ||
-           op == ArithBinaryOp::ShiftLeftLogical;
+           op == ArithBinaryOp::ShiftLeftLogical || op == ArithBinaryOp::RotateLeft || op == ArithBinaryOp::RotateRight;
+}
+
+static SpecialOp popcount_special_op(ScalarDataType dtype) noexcept {
+    return dtype == ScalarDataType::I8 || dtype == ScalarDataType::I16 ? SpecialOp::SmallPopcount
+                                                                       : SpecialOp::LargePopcount;
 }
 
 static SpecialOp arith_binary_special_ops(const Step *step) noexcept {
@@ -183,10 +188,9 @@ static SpecialOp arith_binary_special_ops(const Step *step) noexcept {
     SpecialOp result = SpecialOp::None;
     const auto &data = step->step_data<StepKind::ArithBinary>();
     if (step->dtype == ScalarDataType::I64 && data.op == ArithBinaryOp::Mul) { result |= SpecialOp::I64Mul; }
-    if (step->dtype == ScalarDataType::I8 && data.op == ArithBinaryOp::Mul) { result |= SpecialOp::I8Mul; }
-    // x86 i8 constant shifts are lowered through the target-specific permute peephole in MIR.
-    if (step->dtype == ScalarDataType::I8 && is_i8_variable_shift(data.op, data.right)) {
-        result |= SpecialOp::I8VariableShift;
+    // x86 i8 constant shifts and rotates use the GFNI permute peephole in MIR.
+    if (step->dtype == ScalarDataType::I8 && is_i8_constant_shift_or_rotate(data.op, data.right)) {
+        result |= SpecialOp::I8ConstantShift;
     }
     return result;
 }
@@ -195,8 +199,12 @@ static SpecialOp arith_unary_special_ops(const Step *step) noexcept {
     if (!step->is(StepKind::ArithUnary)) { return SpecialOp::None; }
 
     const auto &data = step->step_data<StepKind::ArithUnary>();
+    if (data.op == ArithUnaryOp::Popcount || data.op == ArithUnaryOp::Tzcnt) {
+        return popcount_special_op(step->dtype);
+    }
     if (data.op == ArithUnaryOp::Lzcnt && (step->dtype == ScalarDataType::I8 || step->dtype == ScalarDataType::I16)) {
-        return SpecialOp::SmallLzcnt;
+        // x86 lowers small lzcnt through vector popcount.
+        return SpecialOp::SmallPopcount;
     }
     return SpecialOp::None;
 }
@@ -305,7 +313,7 @@ struct FunctionBuilderImpl {
     std::unordered_map<Step *, Step *> reverse_cse{};
     SpecialOp special_ops = SpecialOp::None;
     // Disable vectorization early to avoid relying on exceptions further during compilation process.
-    bool scalar_only = false;
+    VectorizationHint vectorization_hint = VectorizationHint::None;
 
     FunctionBuilderImpl() = delete;
     explicit FunctionBuilderImpl(Context *x) noexcept : sm(x->arena), ctx(x) {}
@@ -543,10 +551,10 @@ struct FunctionBuilderImpl {
                                        : const_data.as_unsigned();
                     vector_const_div = rhs != 0;
                 }
-                if (!vector_const_div) { scalar_only = true; }
+                if (!vector_const_div) { vectorization_hint = VectorizationHint::ScalarOnly; }
             }
 #else
-            scalar_only = true;
+            vectorization_hint = VectorizationHint::ScalarOnly;
 #endif
         }
 
@@ -1372,7 +1380,6 @@ void FunctionBuilder::cond_arith_agg(Value value, MaybePredicate cond, ArithBina
 
     if (op == ArithBinaryOp::Mul) {
         if (value.dtype() == ScalarDataType::I64) { impl_->special_ops |= SpecialOp::I64Mul; }
-        if (value.dtype() == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::I8Mul; }
     }
 
     impl_->accs.push_back(Accumulator{dtype, AccIdx{impl_->accs.size()}, dst.idx_, nullptr});
@@ -2102,7 +2109,11 @@ Function *FunctionBuilder::build() {
     func->step_roots = arena->copy_array<Step *>(impl_->step_roots);
     func->safety_check_arg = impl_->safety_check_arg;
     func->special_ops = impl_->special_ops;
-    func->scalar_only = impl_->scalar_only;
+    func->vectorization_hint = impl_->vectorization_hint;
+    if (func->vectorization_hint == VectorizationHint::None &&
+        func->unsupported_vector_special_ops() != SpecialOp::None) {
+        func->vectorization_hint = VectorizationHint::UnsupportedSpecialOps;
+    }
 
     return func;
 }
@@ -2218,7 +2229,7 @@ Value FunctionBuilder::copysign(Value sign_value, Value value) {
 }
 
 void FunctionBuilder::scalar_only() noexcept {
-    impl_->scalar_only = true;
+    impl_->vectorization_hint = VectorizationHint::ScalarOnly;
 }
 
 std::string ErrorInfo::verbose() const {

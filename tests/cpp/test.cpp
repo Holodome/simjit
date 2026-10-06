@@ -1343,7 +1343,7 @@ static RunResult run_test(const RegisteredTest &descriptor, const TestRunConfig 
         auto hir_t2 = std::chrono::high_resolution_clock::now();
         pipeline_timing.hir_us = elapsed_us(hir_t1, hir_t2);
 
-        resolution = resolve_variant(config, *descriptor.test, fn->scalar_only);
+        resolution = resolve_variant(config, *descriptor.test, fn->is_scalar_only());
         if (!resolution.runnable()) {
             result.skipped = true;
             return result;
@@ -1430,7 +1430,8 @@ static RunResult run_test(const RegisteredTest &descriptor, const TestRunConfig 
                 FunctionBuilder other_builder{opts};
                 simjit::deserialize(serialized_str, other_builder);
                 hir::Function *other_fn = other_builder.build();
-                VariantResolution other_resolution = resolve_variant(config, *descriptor.test, other_fn->scalar_only);
+                VariantResolution other_resolution =
+                    resolve_variant(config, *descriptor.test, other_fn->is_scalar_only());
                 if (!other_resolution.runnable()) {
                     throw std::runtime_error("deserialized test variant is unrunnable");
                 }

@@ -952,7 +952,6 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Amd64_AVX512;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x = local.input_arg(I8);
@@ -960,17 +959,13 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         local.store(local.mul(x, y), local.arg(I8));
 
         auto result = vect::try_hir_to_vect(local.build());
-        SIMJIT_ASSERT(!result);
-        SIMJIT_ASSERT(result.error().module == ErrorModule::Vectorizer);
-        SIMJIT_ASSERT(result.error().kind == ErrorKind::VectorizationFailed);
-        SIMJIT_ASSERT(result.error().subkind == ErrorSubKind::UnsupportedSpecialOps);
+        SIMJIT_ASSERT(result);
     });
 
     tests.emplace_back([] {
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Arm64_NEON;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x = local.input_arg(I8);
@@ -985,7 +980,6 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Amd64_AVX512;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x8 = local.input_arg(I8);
@@ -994,17 +988,13 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         local.store(local.lzcnt(x16), local.arg(I16));
 
         auto result = vect::try_hir_to_vect(local.build());
-        SIMJIT_ASSERT(!result);
-        SIMJIT_ASSERT(result.error().module == ErrorModule::Vectorizer);
-        SIMJIT_ASSERT(result.error().kind == ErrorKind::VectorizationFailed);
-        SIMJIT_ASSERT(result.error().subkind == ErrorSubKind::UnsupportedSpecialOps);
+        SIMJIT_ASSERT(result);
     });
 
     tests.emplace_back([] {
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Arm64_NEON;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x8 = local.input_arg(I8);
@@ -1020,7 +1010,6 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Amd64_AVX512;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x = local.input_arg(I8);
@@ -1030,17 +1019,13 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         local.store(local.sra(x, amount), local.arg(I8));
 
         auto result = vect::try_hir_to_vect(local.build());
-        SIMJIT_ASSERT(!result);
-        SIMJIT_ASSERT(result.error().module == ErrorModule::Vectorizer);
-        SIMJIT_ASSERT(result.error().kind == ErrorKind::VectorizationFailed);
-        SIMJIT_ASSERT(result.error().subkind == ErrorSubKind::UnsupportedSpecialOps);
+        SIMJIT_ASSERT(result);
     });
 
     tests.emplace_back([] {
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Arm64_NEON;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x = local.input_arg(I8);
