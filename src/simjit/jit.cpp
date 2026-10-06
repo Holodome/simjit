@@ -5,6 +5,7 @@
 
 #include "simjit/jit.h"
 #include "simjit/asmjit.h"
+#include "simjit/compiler.h"
 #include "simjit/core/vectorizer.h"
 
 #include <array>
@@ -152,13 +153,13 @@ static void typecheck_function(std::string_view identifier, size_t decl_count, c
 class JitContextImpl {
 public:
     JitContextImpl() = delete;
-    explicit JitContextImpl(JitContext *parent) : session_(parent->ctx_.arch), parent_(parent) {
+    explicit JitContextImpl(Arch arch) : ctx_(arena_, "expr", CodeTransformations::All, arch), session_(arch) {
         Arch host_arch = session_.host_arch();
-        if (!can_jit_target_on_host(parent_->ctx_.arch, host_arch)) {
+        if (!can_jit_target_on_host(ctx_.arch, host_arch)) {
             jit_failure(ErrorSubKind::UnsupportedHostFeature,
                         "JIT target %s cannot execute on host %s; use inspection emitters for "
                         "cross-target code generation",
-                        show_arch(parent_->ctx_.arch), show_arch(host_arch));
+                        show_arch(ctx_.arch), show_arch(host_arch));
         }
         if (is_x86_arch(host_arch)) {
             if (!session_.host_supports_x86_backend()) {
@@ -191,7 +192,7 @@ public:
     }
 
     mir::Function *lower_function(const hir::Function *fn) {
-        switch (parent_->policy_) {
+        switch (policy_) {
         case CompilePolicy::BestEffort:
             if (host_supports_vectorization_) {
                 auto vectorized = try_lower_vectorized(fn);
@@ -208,7 +209,7 @@ public:
     }
 
     void *lower_and_compile_function(const hir::Function *fn) {
-        switch (parent_->policy_) {
+        switch (policy_) {
         case CompilePolicy::BestEffort:
             if (host_supports_vectorization_ && !fn->scalar_only) {
                 auto vectorized = try_lower_vectorized(fn);
@@ -217,13 +218,13 @@ public:
                         return compile(vectorized.value());
                     } catch (const SimjitException &e) {
                         if (!can_best_effort_fallback(e.info())) { throw; }
-                        if (parent_->debug_options_.record_vectorization_fail_exception) {
-                            parent_->debug_snapshot_.vectorization_exception = e.info().verbose();
+                        if (debug_options_.record_vectorization_fail_exception) {
+                            debug_snapshot_.vectorization_exception = e.info().verbose();
                         }
                     }
                 } else if (can_best_effort_fallback(vectorized.error())) {
-                    if (parent_->debug_options_.record_vectorization_fail_exception) {
-                        parent_->debug_snapshot_.vectorization_exception = vectorized.error().verbose();
+                    if (debug_options_.record_vectorization_fail_exception) {
+                        debug_snapshot_.vectorization_exception = vectorized.error().verbose();
                     }
                 } else {
                     throw SimjitException(std::move(vectorized.error()));
@@ -258,9 +259,9 @@ public:
 
     void *compile_internal(std::string_view identifier, const hir::Function *hir, const CallerInfo *caller) {
         typecheck_function(identifier, hir->args.size(), hir->args.data(), caller);
-        if (funcs_.size() >= parent_->ctx_.build_limits.max_cached_functions) {
+        if (funcs_.size() >= ctx_.build_limits.max_cached_functions) {
             jit_failure(ErrorSubKind::CacheLimitExceeded, "JIT function cache is full (%zu >= %zu)", funcs_.size(),
-                        parent_->ctx_.build_limits.max_cached_functions);
+                        ctx_.build_limits.max_cached_functions);
         }
         void *result = lower_and_compile_function(hir);
         save_function(hir, identifier, result);
@@ -270,14 +271,14 @@ public:
     Statistics statistics() const {
         Statistics s;
         s.function_count = funcs_.size();
-        s.last_compilation_arena_used_memory = parent_->arena_.total_bytes_used();
-        s.last_compilation_arena_reserved_memory = parent_->arena_.total_bytes_allocated();
-        s.cache_hits = parent_->cache_hits_;
-        s.cache_misses = parent_->cache_misses_;
-        s.compilation_attempts = parent_->compilation_attempts_;
-        s.compilation_failures = parent_->compilation_failures_;
-        s.compilation_successes = parent_->compilation_successes_;
-        s.last_compilation_ns = parent_->last_compilation_ns_;
+        s.last_compilation_arena_used_memory = arena_.total_bytes_used();
+        s.last_compilation_arena_reserved_memory = arena_.total_bytes_allocated();
+        s.cache_hits = cache_hits_;
+        s.cache_misses = cache_misses_;
+        s.compilation_attempts = compilation_attempts_;
+        s.compilation_failures = compilation_failures_;
+        s.compilation_successes = compilation_successes_;
+        s.last_compilation_ns = last_compilation_ns_;
 
         auto inner = session_.allocator_statistics();
         s.jit_memory_allocation_count = inner.allocation_count;
@@ -288,6 +289,14 @@ public:
 
         return s;
     }
+
+    void *find_cached_function(std::string_view identifier, const CallerInfo *caller);
+    void *build_and_compile(std::string_view identifier, const function_ref<void(FunctionBuilder &)> &build_fn,
+                            const CallerInfo *caller);
+    void capture_debug_information(const hir::Function *fn) noexcept;
+    void reset_current_compilation();
+    hir::Function *build_hir(const function_ref<void(FunctionBuilder &)> &build_fn);
+    std::string bug_report() const;
 
     bool release(std::string_view identifier) {
         if (const FunctionRecord *record = funcs_.find(identifier)) {
@@ -300,35 +309,34 @@ public:
 
     std::vector<std::string> function_identifiers() const { return funcs_.identifiers(); }
 
-    void rebind_parent(JitContext *parent) { parent_ = parent; }
-
 private:
+    MemoryArena arena_{};
+    Context ctx_;
     AsmjitSession session_;
-    JitContext *parent_ = nullptr;
     FunctionCache funcs_{};
 
     bool host_supports_vectorization_ = false;
+    CompilePolicy policy_ = CompilePolicy::BestEffort;
+    DebugOptions debug_options_{};
+    DebugSnapshot debug_snapshot_{};
+    size_t cache_hits_ = 0;
+    size_t cache_misses_ = 0;
+    size_t compilation_attempts_ = 0;
+    size_t compilation_successes_ = 0;
+    size_t compilation_failures_ = 0;
+    uint64_t last_compilation_ns_ = 0;
+
+    friend class JitContext;
 };
 
-JitContext::JitContext() : ctx_(arena_) {
-    impl_ = new JitContextImpl(this);
+JitContext::JitContext() : impl_(new JitContextImpl(Arch::Native)) {
 }
 
-JitContext::JitContext(Arch arch) : ctx_(arena_, "expr", CodeTransformations::All, arch) {
-    impl_ = new JitContextImpl(this);
+JitContext::JitContext(Arch arch) : impl_(new JitContextImpl(arch)) {
 }
 
-JitContext::JitContext(JitContext &&other) noexcept
-    : impl_(other.impl_), policy_(other.policy_), debug_options_(other.debug_options_),
-      debug_snapshot_(std::move(other.debug_snapshot_)), cache_hits_(other.cache_hits_),
-      cache_misses_(other.cache_misses_), compilation_attempts_(other.compilation_attempts_),
-      compilation_successes_(other.compilation_successes_), compilation_failures_(other.compilation_failures_),
-      last_compilation_ns_(other.last_compilation_ns_), arena_(std::move(other.arena_)), ctx_(std::move(other.ctx_)) {
-    ctx_.arena = &arena_;
-    if (impl_ != nullptr) { impl_->rebind_parent(this); }
-
+JitContext::JitContext(JitContext &&other) noexcept : impl_(other.impl_) {
     other.impl_ = nullptr;
-    other.ctx_.arena = &other.arena_;
 }
 
 JitContext::~JitContext() noexcept {
@@ -337,30 +345,42 @@ JitContext::~JitContext() noexcept {
 
 void JitContext::set_policy(CompilePolicy policy) {
     if (policy == CompilePolicy::Vectorized) { impl_->require_host_vectorization(); }
-    policy_ = policy;
+    impl_->policy_ = policy;
+}
+
+CompilePolicy JitContext::policy() const noexcept {
+    return impl_->policy_;
+}
+
+void JitContext::set_transformations(CodeTransformations transformations) noexcept {
+    impl_->ctx_.transformations = transformations;
+}
+
+CodeTransformations JitContext::transformations() const noexcept {
+    return impl_->ctx_.transformations;
+}
+
+void JitContext::set_build_limits(const BuildLimits &limits) noexcept {
+    impl_->ctx_.build_limits = limits;
+}
+
+const BuildLimits &JitContext::build_limits() const noexcept {
+    return impl_->ctx_.build_limits;
+}
+
+DebugOptions &JitContext::debug_options() noexcept {
+    return impl_->debug_options_;
+}
+
+const DebugSnapshot &JitContext::debug_snapshot() const noexcept {
+    return impl_->debug_snapshot_;
 }
 
 JitContext &JitContext::operator=(JitContext &&other) noexcept {
     if (this != &other) {
         delete impl_;
-
         impl_ = other.impl_;
-        policy_ = other.policy_;
-        debug_options_ = other.debug_options_;
-        debug_snapshot_ = std::move(other.debug_snapshot_);
-        cache_hits_ = other.cache_hits_;
-        cache_misses_ = other.cache_misses_;
-        compilation_attempts_ = other.compilation_attempts_;
-        compilation_successes_ = other.compilation_successes_;
-        compilation_failures_ = other.compilation_failures_;
-        last_compilation_ns_ = other.last_compilation_ns_;
-        arena_ = std::move(other.arena_);
-        ctx_ = std::move(other.ctx_);
-        ctx_.arena = &arena_;
-        if (impl_ != nullptr) { impl_->rebind_parent(this); }
-
         other.impl_ = nullptr;
-        other.ctx_.arena = &other.arena_;
     }
     return *this;
 }
@@ -371,7 +391,7 @@ static void capture_asmjit(const mir::Function *func, bool emit_machine_code, bo
     compile_asmjit(func, opts, result);
 }
 
-void JitContext::capture_debug_information(const hir::Function *fn) noexcept {
+void JitContextImpl::capture_debug_information(const hir::Function *fn) noexcept {
     // HIR is captured independently. If it failed, nothing to do.
     if (fn == nullptr) { return; }
 
@@ -395,13 +415,13 @@ void JitContext::capture_debug_information(const hir::Function *fn) noexcept {
     }
     if (bool(debug_options_.stages & DebugStage::MIR)) {
         try {
-            const auto *mir = impl_->lower_function(fn);
+            const auto *mir = lower_function(fn);
             debug_snapshot_.mir = mir::print_function(mir);
         } catch (...) {}
     }
     if (bool(debug_options_.stages & DebugStage::ASM) || bool(debug_options_.stages & DebugStage::MachineCode)) {
         try {
-            const auto *mir = impl_->lower_function(fn);
+            const auto *mir = lower_function(fn);
             AsmjitCompileResult result{};
             capture_asmjit(mir, bool(debug_options_.stages & DebugStage::MachineCode),
                            bool(debug_options_.stages & DebugStage::ASM), result);
@@ -411,12 +431,12 @@ void JitContext::capture_debug_information(const hir::Function *fn) noexcept {
     }
 }
 
-void JitContext::reset_current_compilation() {
+void JitContextImpl::reset_current_compilation() {
     arena_.clear();
     debug_snapshot_ = {};
 }
 
-hir::Function *JitContext::build_hir(const function_ref<void(FunctionBuilder &)> &build_fn) {
+hir::Function *JitContextImpl::build_hir(const function_ref<void(FunctionBuilder &)> &build_fn) {
     bool capture_hir = debug_options_.enabled() && bool(debug_options_.stages & DebugStage::HIR);
 #if SIMJIT_ENABLE_SERIALIZATION
     bool capture_serialized = debug_options_.enabled() && bool(debug_options_.stages & DebugStage::Serialized);
@@ -436,11 +456,7 @@ hir::Function *JitContext::build_hir(const function_ref<void(FunctionBuilder &)>
     return fn;
 }
 
-void *JitContext::find_and_typecheck_function(std::string_view identifier, const CallerInfo *caller) {
-    return impl_->find_and_typecheck_function(identifier, caller);
-}
-
-void *JitContext::find_cached_function(std::string_view identifier, const CallerInfo *caller) {
+void *JitContextImpl::find_cached_function(std::string_view identifier, const CallerInfo *caller) {
     if (void *result = find_and_typecheck_function(identifier, caller)) {
         ++cache_hits_;
         return result;
@@ -449,8 +465,9 @@ void *JitContext::find_cached_function(std::string_view identifier, const Caller
     return nullptr;
 }
 
-void *JitContext::build_and_compile(std::string_view identifier, const function_ref<void(FunctionBuilder &)> &build_fn,
-                                    const CallerInfo *caller) {
+void *JitContextImpl::build_and_compile(std::string_view identifier,
+                                        const function_ref<void(FunctionBuilder &)> &build_fn,
+                                        const CallerInfo *caller) {
     if (auto result = find_and_typecheck_function(identifier, caller)) {
         ++cache_hits_;
         return result;
@@ -465,7 +482,7 @@ void *JitContext::build_and_compile(std::string_view identifier, const function_
     try {
         reset_current_compilation();
         hir = build_hir(build_fn);
-        result = compile(identifier, hir, caller);
+        result = compile_internal(identifier, hir, caller);
     } catch (...) {
         last_compilation_ns_ = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compilation_start)
@@ -480,18 +497,6 @@ void *JitContext::build_and_compile(std::string_view identifier, const function_
     if (debug_options_.capture_on_success) { capture_debug_information(hir); }
     ++compilation_successes_;
     return result;
-}
-
-void *JitContext::compile(std::string_view identifier, const hir::Function *hir, const CallerInfo *caller) {
-    return impl_->compile_internal(identifier, hir, caller);
-}
-
-Statistics JitContext::statistics() const noexcept {
-    return impl_->statistics();
-}
-
-std::vector<std::string> JitContext::function_identifiers() const {
-    return impl_->function_identifiers();
 }
 
 static void append_section(std::string &out, const char *name, std::string_view content) {
@@ -519,7 +524,7 @@ static std::string hex_bytes(const std::vector<uint8_t> &bytes) {
     return out;
 }
 
-std::string JitContext::bug_report() const {
+std::string JitContextImpl::bug_report() const {
     std::string out;
     out.reserve(4096);
     const Statistics s = statistics();
@@ -574,35 +579,44 @@ std::string JitContext::bug_report() const {
     return out;
 }
 
+void *JitContext::find_cached_function(std::string_view identifier, const CallerInfo *caller) {
+    return impl_->find_cached_function(identifier, caller);
+}
+
+void *JitContext::build_and_compile(std::string_view identifier, const function_ref<void(FunctionBuilder &)> &build_fn,
+                                    const CallerInfo *caller) {
+    return impl_->build_and_compile(identifier, build_fn, caller);
+}
+
+Statistics JitContext::statistics() const noexcept {
+    return impl_->statistics();
+}
+
+std::vector<std::string> JitContext::function_identifiers() const {
+    return impl_->function_identifiers();
+}
+
+std::string JitContext::bug_report() const {
+    return impl_->bug_report();
+}
+
 bool JitContext::delete_cached_function(std::string_view identifier) {
     return impl_->release(identifier);
 }
 
 void JitContext::clear() {
-    CompilePolicy p = policy_;
-    DebugOptions d = debug_options_;
-    CodeTransformations t = ctx_.transformations;
-    BuildLimits l = ctx_.build_limits;
-    Arch a = ctx_.arch;
-    std::string n = ctx_.symbol_name;
+    CompilePolicy policy = impl_->policy_;
+    DebugOptions debug_options = impl_->debug_options_;
+    CodeTransformations transformations = impl_->ctx_.transformations;
+    BuildLimits build_limits = impl_->ctx_.build_limits;
+    Arch arch = impl_->ctx_.arch;
 
     delete impl_;
-    impl_ = nullptr;
-
-    arena_.clear();
-    ctx_ = Context(arena_, n, t, a);
-    ctx_.build_limits = l;
-    debug_snapshot_ = {};
-    cache_hits_ = 0;
-    cache_misses_ = 0;
-    compilation_attempts_ = 0;
-    compilation_successes_ = 0;
-    compilation_failures_ = 0;
-    last_compilation_ns_ = 0;
-
-    policy_ = p;
-    debug_options_ = d;
-    impl_ = new JitContextImpl(this);
+    impl_ = new JitContextImpl(arch);
+    impl_->policy_ = policy;
+    impl_->debug_options_ = debug_options;
+    impl_->ctx_.transformations = transformations;
+    impl_->ctx_.build_limits = build_limits;
 }
 
 template <size_t... Idxs> using RawFunctionPtr = void (*)(size_t, decltype((void)Idxs, (void *)nullptr)...);

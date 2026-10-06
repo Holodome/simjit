@@ -5,14 +5,22 @@
 
 #pragma once
 
-#include "simjit/compiler.h"
 #include "simjit/detail/expected.h"
 #include "simjit/detail/function_ref.h"
+#include "simjit/detail/span.h"
+#include "simjit/simjit.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace simjit {
+struct BuildLimits;
+
 namespace jit {
 
 // How JIT compiler will approach compilation
@@ -101,8 +109,6 @@ class JitContextImpl;
 // while the owning JitContext keeps the matching identifier alive. Use the matching argument types, keep the context
 // alive, and do not call a function after its identifier has been released or the context has been cleared.
 class JitContext {
-    friend class JitContextImpl;
-
 public:
     JitContext();
     explicit JitContext(Arch arch);
@@ -115,15 +121,15 @@ public:
 
     // Selecting Vectorized requires host vectorization support and throws otherwise.
     void set_policy(CompilePolicy x);
-    CompilePolicy policy() const noexcept { return policy_; }
-    void set_transformations(CodeTransformations x) noexcept { ctx_.transformations = x; }
-    CodeTransformations transformations() const noexcept { return ctx_.transformations; }
-    void set_build_limits(const BuildLimits &x) noexcept { ctx_.build_limits = x; }
-    const BuildLimits &build_limits() const noexcept { return ctx_.build_limits; }
+    CompilePolicy policy() const noexcept;
+    void set_transformations(CodeTransformations x) noexcept;
+    CodeTransformations transformations() const noexcept;
+    void set_build_limits(const BuildLimits &x) noexcept;
+    const BuildLimits &build_limits() const noexcept;
 
-    DebugOptions &debug_options() noexcept { return debug_options_; }
+    DebugOptions &debug_options() noexcept;
     // DebugSnapshot always contains the result of the most recent compilation attempt on this JitContext.
-    const DebugSnapshot &debug_snapshot() const noexcept { return debug_snapshot_; }
+    const DebugSnapshot &debug_snapshot() const noexcept;
 
     Statistics statistics() const noexcept;
     std::vector<std::string> function_identifiers() const;
@@ -143,37 +149,7 @@ public:
                             const CallerInfo *caller = nullptr);
 
 private:
-    // identifier is used as unique key that can be used to save and look up compiled functions. This function looks up
-    // already compiled function. If not found, it returns nullptr. Additionally does type checking.
-    void *find_and_typecheck_function(std::string_view identifier, const CallerInfo *caller);
-
-    // JitContext stores data that is local to last compilation, for example memory arena and debug state. This is
-    // called in beginning of each new compilation.
-    void reset_current_compilation();
-
-    hir::Function *build_hir(const function_ref<void(FunctionBuilder &)> &build_fn);
-
-    void *compile(std::string_view identifier, const hir::Function *hir, const CallerInfo *caller);
-
-    // Fills debug_snapshot_ according to debug_options_. This function is guaranteed not to throw,
-    // since it can be called in catch {} block.
-    void capture_debug_information(const hir::Function *fn) noexcept;
-
     JitContextImpl *impl_ = nullptr;
-
-    CompilePolicy policy_ = CompilePolicy::BestEffort;
-    DebugOptions debug_options_{};
-    DebugSnapshot debug_snapshot_{};
-
-    size_t cache_hits_ = 0;
-    size_t cache_misses_ = 0;
-    size_t compilation_attempts_ = 0;
-    size_t compilation_successes_ = 0;
-    size_t compilation_failures_ = 0;
-    uint64_t last_compilation_ns_ = 0;
-
-    MemoryArena arena_{};
-    Context ctx_;
 };
 
 // Create special type to indicate bit array. This is made so that library user has to cast his array to (Bitmask *)
