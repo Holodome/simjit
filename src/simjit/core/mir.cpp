@@ -3406,6 +3406,7 @@ struct MirConstructState {
 
         Function *func = arena->create<Function>();
         func->ctx = hir->ctx;
+        func->source_hir = hir;
         func->args = hir->args;
         std::vector<size_t> acc_group_offsets(acc_groups.size() + 1, 0);
         for (size_t i = 0; i < acc_groups.size(); ++i) {

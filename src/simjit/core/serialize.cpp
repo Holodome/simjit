@@ -326,48 +326,6 @@ template <> struct hl::from_list<simjit::ArithBinaryOpFlags> {
     }
 };
 
-template <> struct hl::to_list<simjit::ArgumentKind> {
-    hl::value operator()(simjit::ArgumentKind x) {
-        hl::list_builder b{};
-        if (bool(x & simjit::ArgumentKind::SrcArr)) b.add("src-arr");
-        if (bool(x & simjit::ArgumentKind::SrcIdxArr)) b.add("src-idx-arr");
-        if (bool(x & simjit::ArgumentKind::SrcConst)) b.add("src-const");
-        if (bool(x & simjit::ArgumentKind::Dst)) b.add("dst-arr");
-        if (bool(x & simjit::ArgumentKind::DstAgg)) b.add("dst-scalar");
-        if (bool(x & simjit::ArgumentKind::SrcGatherArr)) b.add("src-gather-arr");
-        if (bool(x & simjit::ArgumentKind::DstSafetyCheck)) b.add("dst-overflow");
-        if (b.size() == 1) { return hl::car(b.list()); }
-        return b.list();
-    }
-};
-
-template <> struct hl::from_list<simjit::ArgumentKind> {
-    simjit::ArgumentKind operator()(hl::value x) {
-        simjit::ArgumentKind result{};
-        if (hl::is_string(x)) { x = hl::list(x); }
-
-        for (std::string_view it : x.iter().as<std::string_view>()) {
-            if (it == "src-arr")
-                result |= simjit::ArgumentKind::SrcArr;
-            else if (it == "src-idx-arr")
-                result |= simjit::ArgumentKind::SrcIdxArr;
-            else if (it == "src-const")
-                result |= simjit::ArgumentKind::SrcConst;
-            else if (it == "dst-arr")
-                result |= simjit::ArgumentKind::Dst;
-            else if (it == "dst-scalar")
-                result |= simjit::ArgumentKind::DstAgg;
-            else if (it == "src-gather-arr")
-                result |= simjit::ArgumentKind::SrcGatherArr;
-            else if (it == "dst-overflow")
-                result |= simjit::ArgumentKind::DstSafetyCheck;
-            else
-                serialization_error("Invalid ArgumentKind entry %.*s", SV(it));
-        }
-        return result;
-    }
-};
-
 namespace simjit {
 
 using namespace hir;
@@ -413,10 +371,12 @@ static std::string debug_context_str() {
 
 static hl::value serialize_args(const Function *func) {
     hl::list_builder b{};
+    const auto &usages = func->argument_usage;
     size_t i = 0;
     for (const auto &arg : func->args) {
         SIMJIT_ASSERT(arg.idx == i);
-        hl::value it = hl::list("arg", arg.idx, arg.dtype, arg.kind);
+        hl::value it = bool(usages[i] & ArgumentUsage::SafetyCheck) ? hl::list("safety-check-arg", arg.idx)
+                                                                    : hl::list("arg", arg.idx, arg.dtype);
         b.add(it);
         ++i;
     }
@@ -590,13 +550,14 @@ static void process_deserialized_args(hl::value args, FunctionBuilder &builder) 
     for (auto arg : args.iter()) {
         DebugContextGuard guard{arg};
 
-        auto [idx, dtype, kind] = hl::require_match("invalid arg", arg, "arg", hl::cap_as<int>,
-                                                    hl::cap_as<ScalarDataType>, hl::cap_as<ArgumentKind>);
-        if (kind == ArgumentKind::DstSafetyCheck) {
+        if (auto match = hl::match(arg, "safety-check-arg", hl::cap_as<int>)) {
+            auto [idx] = *match;
             Argument arg_id = builder.arg_safety_check();
             GUARD_DESERIALIZE((int)arg_id.idx_ == idx);
         } else {
-            Argument arg_id = builder.arg(dtype, kind);
+            auto [idx, dtype] =
+                hl::require_match("invalid arg", arg, "arg", hl::cap_as<int>, hl::cap_as<ScalarDataType>);
+            Argument arg_id = builder.arg(dtype);
             GUARD_DESERIALIZE((int)arg_id.idx_ == idx);
         }
     }

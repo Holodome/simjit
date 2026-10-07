@@ -312,10 +312,10 @@ static void api_smoke_cache_error_paths() {
         ErrorKind::JitFailure, ErrorSubKind::ArgumentMismatch, "cached argument count mismatch");
     require_api_smoke_contains(count_mismatch.message, "Argument count mismatch", "count mismatch message");
 
-    ErrorInfo kind_mismatch = expect_api_smoke_simjit_error(
+    ErrorInfo role_mismatch = expect_api_smoke_simjit_error(
         [&]() { (void)find_vectorized_function<InputConst<I32>, OutputScalar<I32>>(ctx, "api-smoke-cache-errors"); },
-        ErrorModule::JIT, ErrorKind::JitFailure, ErrorSubKind::ArgumentMismatch, "cached argument kind mismatch");
-    require_api_smoke_contains(kind_mismatch.message, "kind mismatch", "kind mismatch message");
+        ErrorModule::JIT, ErrorKind::JitFailure, ErrorSubKind::ArgumentMismatch, "cached argument role mismatch");
+    require_api_smoke_contains(role_mismatch.message, "role mismatch", "role mismatch message");
 
     ErrorInfo type_mismatch = expect_api_smoke_simjit_error(
         [&]() { (void)find_vectorized_function<InputArr<I32>, OutputScalar<I64>>(ctx, "api-smoke-cache-errors"); },

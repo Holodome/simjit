@@ -298,7 +298,6 @@ struct DataType {
 struct ArgumentDecl {
     ScalarDataType dtype;
     ArgumentIdx idx;
-    ArgumentKind kind;
 };
 
 ConstData scalar_dtype_max(ScalarDataType dt);
@@ -319,7 +318,6 @@ const char *show_arith_agg_kind(ArithBinaryOp op) noexcept;
 const char *show_predicate_agg_kind(PredicateBinaryOp op) noexcept;
 const char *show_int_cast_kind(IntCastKind kind) noexcept;
 const char *show_load_store_kind(LoadStoreKind kind) noexcept;
-std::string show_argument_kind(ArgumentKind kind);
 std::string show_fpclass(FpClass flags);
 std::string show_arith_binary_flags(ArithBinaryOpFlags flags);
 

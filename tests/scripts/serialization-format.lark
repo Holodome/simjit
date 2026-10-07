@@ -14,7 +14,7 @@ document: function
 function: "(" "func" args_section accs_section? steps_section roots_section? scalar_only_section? ")"
 
 args_section: "(" "args" arg_decl* ")"
-arg_decl: "(" "arg" arg_id scalar_dtype arg_kind ")"
+arg_decl: "(" "arg" arg_id scalar_dtype ")" | "(" "safety-check-arg" arg_id ")"
 
 accs_section: "(" "accs" acc_decl* ")"
 acc_decl: "(" "acc" acc_id scalar_dtype arg_ref step_ref ")"
@@ -82,15 +82,6 @@ arg_ref: "(" "arg" arg_id ")"
 acc_ref: "(" "acc" acc_id ")"
 
 scalar_dtype: "i1" | "i8" | "i16" | "i32" | "i64" | "i128" | "f32" | "f64"
-
-arg_kind: arg_kind_atom | "(" arg_kind_atom+ ")"
-arg_kind_atom: "src-arr"
-             | "src-idx-arr"
-             | "src-const"
-             | "dst-arr"
-             | "dst-scalar"
-             | "src-gather-arr"
-             | "dst-overflow"
 
 load_store_kind: "aligned" | "unaligned"
 

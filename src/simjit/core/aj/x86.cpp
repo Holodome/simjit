@@ -6,6 +6,7 @@
 #include "simjit/core/x86.h"
 #include "simjit/asmjit.h"
 #include "simjit/core/expr.h"
+#include "simjit/core/hir.h"
 #include "simjit/core/mir.h"
 #include "simjit/simjit.h"
 
@@ -57,6 +58,7 @@ struct ArgInfo {
     const ArgumentDecl *arg = nullptr;
     GpR gp;
     ax86::Mem spilled{};
+    bool is_spilled = false;
 };
 
 struct MaskPushdownInfo {
@@ -3982,7 +3984,8 @@ struct CompileState {
         spill_epilogue_args = !func->main_loop_roots.empty();
     }
 
-    void init_args(nonstd::span<ArgumentDecl const> func_args, aj::FuncNode *func_node) {
+    void init_args(nonstd::span<ArgumentDecl const> func_args, nonstd::span<const hir::ArgumentUsage> usages,
+                   aj::FuncNode *func_node) {
         func_node->set_arg(0, row_count);
 
         for (const ArgumentDecl &arg : func_args) {
@@ -3998,10 +4001,12 @@ struct CompileState {
             // these arguments came from stack, where we load them from stack just to put back again. But this should
             // not matter in performance sense, mostly because we do this stuff only once, and have no dependencies on
             // these values.
-            if (spill_epilogue_args && (arg.kind == ArgumentKind::DstSafetyCheck || arg.kind == ArgumentKind::DstAgg)) {
+            if (spill_epilogue_args && (bool(usages[arg.idx] & hir::ArgumentUsage::SafetyCheck) ||
+                                        bool(usages[arg.idx] & hir::ArgumentUsage::AggregateWrite))) {
                 ax86::Mem mem = cc.new_stack(8, 8);
                 cc.mov(mem, gp);
                 args[arg.idx].spilled = mem;
+                args[arg.idx].is_spilled = true;
             }
         }
     }
@@ -4036,7 +4041,7 @@ struct CompileState {
 
         for (auto it = func_args.rbegin(); it < func_args.rend(); ++it) {
             const ArgumentDecl &arg = *it;
-            if (arg.kind != ArgumentKind::DstSafetyCheck && arg.kind != ArgumentKind::DstAgg) { continue; }
+            if (!args[arg.idx].is_spilled) { continue; }
 
             // Allocate new virtual register instead of using old one.
             // Asmjit register allocator is very happy about this approach.
@@ -4070,8 +4075,9 @@ static void compile_asmjit(const mir::Function *func, ax86::Compiler &cc) {
     func_node->frame().set_avx_cleanup();
 
     CompileState state{func->ctx->arena, cc};
+    const auto &usages = func->source_hir->argument_usage;
     state.init(func);
-    state.init_args(func->args, func_node);
+    state.init_args(func->args, usages, func_node);
     state.init_accs(func->prologue_roots);
     bool has_delayed_prologue = state.has_delayed_prologue_steps(func->prologue_roots);
     aj::Label delayed_prologue_label{};

@@ -1101,117 +1101,20 @@ FunctionBuilder::~FunctionBuilder() noexcept {
     delete impl_;
 }
 
-Argument FunctionBuilder::arg(ScalarDataType dtype, ArgumentKind kind) {
+Argument FunctionBuilder::arg(ScalarDataType dtype) {
     size_t max_args = impl_->ctx->build_limits.max_argument_count;
     if (max_args > MaxFunctionArgumentCount) { max_args = MaxFunctionArgumentCount; }
     if (impl_->args.size() >= max_args) {
         unsupported_limit("HIR has too many arguments (%zu > %zu)", impl_->args.size() + 1, max_args);
     }
-    impl_->args.push_back(ArgumentDecl{dtype, impl_->args.size(), kind});
+    impl_->args.push_back(ArgumentDecl{dtype, impl_->args.size()});
     return {impl_->args.back().idx};
-}
-
-static void update_argument_kind(ArgumentDecl &decl, ArgumentKind kind) {
-    decl.kind |= kind;
 }
 
 static void check_store_dst(const ArgumentDecl &decl, const Step *arg, StepKind kind) {
     if (decl.dtype != arg->dtype) {
         invalid_type("Step %s argument and destination have different types %s %s", show_step_kind(kind),
                      show_scalar_dtype(arg->dtype), show_scalar_dtype(decl.dtype));
-    }
-}
-
-enum class ArgumentAccess : uint8_t {
-    None = 0x0,
-    SequentialRead = 0x1,
-    SequentialWrite = 0x2,
-    RandomRead = 0x4,
-    RandomWrite = 0x8,
-    AppendWrite = 0x10,
-    AggregateWrite = 0x20,
-};
-SIMJIT_DEFINE_ENUM_FLAGS(ArgumentAccess)
-
-static const char *show_argument_access(ArgumentAccess access) {
-    switch (access) {
-    case ArgumentAccess::SequentialRead: return "sequential read";
-    case ArgumentAccess::SequentialWrite: return "sequential write";
-    case ArgumentAccess::RandomRead: return "random read";
-    case ArgumentAccess::RandomWrite: return "random write";
-    case ArgumentAccess::AppendWrite: return "append write";
-    case ArgumentAccess::AggregateWrite: return "aggregate write";
-    case ArgumentAccess::None: break;
-    }
-    SIMJIT_UNREACHABLE();
-}
-
-static constexpr ArgumentAccess compatible_argument_access_flags(ArgumentAccess access) {
-    switch (access) {
-    case ArgumentAccess::SequentialRead:
-        return ArgumentAccess::SequentialRead | ArgumentAccess::SequentialWrite | ArgumentAccess::RandomRead;
-    case ArgumentAccess::SequentialWrite: return ArgumentAccess::SequentialRead;
-    case ArgumentAccess::RandomRead:
-        return ArgumentAccess::SequentialRead | ArgumentAccess::RandomRead | ArgumentAccess::RandomWrite;
-    case ArgumentAccess::RandomWrite: return ArgumentAccess::RandomRead | ArgumentAccess::RandomWrite;
-    case ArgumentAccess::AppendWrite:
-    case ArgumentAccess::AggregateWrite:
-    case ArgumentAccess::None: return ArgumentAccess::None;
-    }
-    SIMJIT_UNREACHABLE();
-}
-
-static ArgumentAccess first_argument_access(ArgumentAccess flags) {
-    SIMJIT_ASSERT(flags != ArgumentAccess::None);
-    if (bool(flags & ArgumentAccess::SequentialRead)) { return ArgumentAccess::SequentialRead; }
-    if (bool(flags & ArgumentAccess::SequentialWrite)) { return ArgumentAccess::SequentialWrite; }
-    if (bool(flags & ArgumentAccess::RandomRead)) { return ArgumentAccess::RandomRead; }
-    if (bool(flags & ArgumentAccess::RandomWrite)) { return ArgumentAccess::RandomWrite; }
-    if (bool(flags & ArgumentAccess::AppendWrite)) { return ArgumentAccess::AppendWrite; }
-    if (bool(flags & ArgumentAccess::AggregateWrite)) { return ArgumentAccess::AggregateWrite; }
-    SIMJIT_UNREACHABLE();
-}
-
-static void add_argument_access(std::vector<ArgumentAccess> &accesses, ArgumentIdx idx, ArgumentAccess access) {
-    SIMJIT_ASSERT(idx < accesses.size());
-    ArgumentAccess &old_flags = accesses[idx];
-    ArgumentAccess incompatible_flags = old_flags & ~compatible_argument_access_flags(access);
-    if (incompatible_flags != ArgumentAccess::None) {
-        ArgumentAccess old_access = first_argument_access(incompatible_flags);
-        invalid_access("Argument %zu has incompatible accesses: %s and %s", idx, show_argument_access(old_access),
-                       show_argument_access(access));
-    }
-    old_flags |= access;
-}
-
-static void add_step_argument_accesses(std::vector<ArgumentAccess> &accesses, const Step *step) {
-    switch (step->kind) {
-    case StepKind::Load: {
-        add_argument_access(accesses, step->step_data<StepKind::Load>().idx, ArgumentAccess::SequentialRead);
-        return;
-    }
-    case StepKind::LoadSplat: {
-        add_argument_access(accesses, step->step_data<StepKind::LoadSplat>().idx, ArgumentAccess::SequentialRead);
-        return;
-    }
-    case StepKind::Gather: {
-        add_argument_access(accesses, step->step_data<StepKind::Gather>().data, ArgumentAccess::RandomRead);
-        return;
-    }
-    case StepKind::Store: {
-        add_argument_access(accesses, step->step_data<StepKind::Store>().addr, ArgumentAccess::SequentialWrite);
-        return;
-    }
-    case StepKind::Scatter: {
-        add_argument_access(accesses, step->step_data<StepKind::Scatter>().dst, ArgumentAccess::RandomWrite);
-        return;
-    }
-    case StepKind::Pack: {
-        const auto &data = step->step_data<StepKind::Pack>();
-        add_argument_access(accesses, data.dst, ArgumentAccess::AppendWrite);
-        return;
-    }
-    default: return;
     }
 }
 
@@ -1226,26 +1129,18 @@ static void check_hir_root_limit(FunctionBuilderImpl *impl) {
     if (root_count > max_roots) { unsupported_limit("HIR has too many roots (%zu > %zu)", root_count, max_roots); }
 }
 
-static HirComplexityStats check_argument_accesses_and_count_stats(FunctionBuilderImpl *impl) {
-    std::vector<ArgumentAccess> accesses(impl->args.size(), ArgumentAccess::None);
+static HirComplexityStats check_hir_complexity(FunctionBuilderImpl *impl) {
     std::vector<uint8_t> state(impl->sm.max_id(), 0);
     HirComplexityStats stats{impl->step_roots.size(), 0};
     size_t max_live_steps = impl->ctx->build_limits.max_hir_live_steps;
 
     for (Step *root : impl->step_roots) {
-        traverse_steps_postorder_unique(root, state, [&](Step *step) {
+        traverse_steps_postorder_unique(root, state, [&](Step *) {
             ++stats.live_steps;
             if (stats.live_steps > max_live_steps) {
                 unsupported_limit("HIR has too many live steps (%zu > %zu)", stats.live_steps, max_live_steps);
             }
-            add_step_argument_accesses(accesses, step);
         });
-    }
-    for (const Accumulator &acc : impl->accs) {
-        add_argument_access(accesses, acc.dst_arg, ArgumentAccess::AggregateWrite);
-    }
-    if (impl->safety_check_arg) {
-        add_argument_access(accesses, *impl->safety_check_arg, ArgumentAccess::AggregateWrite);
     }
     return stats;
 }
@@ -1268,7 +1163,6 @@ static void check_predicate_agg_op(PredicateBinaryOp op) {
 Argument FunctionBuilder::arg_safety_check() {
     if (impl_->safety_check_arg) { invalid_input("Already have safety check argument %zu", *impl_->safety_check_arg); }
     Argument x = arg(ScalarDataType::I8);
-    impl_->args[x.idx_].kind = ArgumentKind::DstSafetyCheck;
     impl_->safety_check_arg = x.idx_;
     return x;
 }
@@ -1284,9 +1178,8 @@ void FunctionBuilder::store(Predicate value, Argument dst) {
 void FunctionBuilder::cond_store(Value value, MaybePredicate cond, Argument dst, LoadStoreKind kind) {
     check_value(value);
 
-    ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
+    const ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
     check_store_dst(func_arg, value.step_, StepKind::Store);
-    update_argument_kind(func_arg, ArgumentKind::Dst);
 
     auto *step = impl_->store(value.step_, cond.step_, func_arg, kind);
     impl_->step_roots.push_back(step);
@@ -1295,9 +1188,8 @@ void FunctionBuilder::cond_store(Value value, MaybePredicate cond, Argument dst,
 void FunctionBuilder::cond_store(Predicate value, MaybePredicate cond, Argument dst) {
     check_predicate(value);
 
-    ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
+    const ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
     check_store_dst(func_arg, value.step_, StepKind::Store);
-    update_argument_kind(func_arg, ArgumentKind::Dst);
 
     if (cond.is_valid()) {
         Predicate old = load_predicate(dst);
@@ -1311,13 +1203,11 @@ void FunctionBuilder::cond_store(Predicate value, MaybePredicate cond, Argument 
 void FunctionBuilder::pack(Value value, Predicate cond, Argument dst, Argument dst_size) {
     check_value(value);
     check_predicate(cond);
-    ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
+    const ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
     check_store_dst(func_arg, value.step_, StepKind::Pack);
-    update_argument_kind(func_arg, ArgumentKind::Dst);
 
-    ArgumentDecl &size_arg = impl_->get_arg(dst_size.idx_);
+    const ArgumentDecl &size_arg = impl_->get_arg(dst_size.idx_);
     if (size_arg.dtype != ScalarDataType::I64) { invalid_type("Pack result size must be i64"); }
-    update_argument_kind(size_arg, ArgumentKind::DstAgg);
     if (value.dtype() == ScalarDataType::I8 || value.dtype() == ScalarDataType::I16) {
         impl_->special_ops |= SpecialOp::SmallPack;
     }
@@ -1339,7 +1229,7 @@ void FunctionBuilder::cond_scatter(Value value, Value idx, MaybePredicate cond, 
         invalid_type("Only i8, i16, i32 and i64 indices are supported in scatter. Got %s",
                      show_scalar_dtype(idx.dtype()));
     }
-    ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
+    const ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
     if (func_arg.dtype == ScalarDataType::I8 || func_arg.dtype == ScalarDataType::I16) {
         // no SIMD ISA supports scatter for i8/i16.
         scalar_only();
@@ -1347,10 +1237,6 @@ void FunctionBuilder::cond_scatter(Value value, Value idx, MaybePredicate cond, 
     Step *cond_step = simplify_optional_cond(impl_->ctx, cond.step_);
     impl_->special_ops |= cond_step != nullptr ? SpecialOp::CondScatter : SpecialOp::Scatter;
     check_store_dst(func_arg, value.step_, StepKind::Scatter);
-    update_argument_kind(func_arg, ArgumentKind::Dst);
-    if (idx.step_->is(StepKind::Load)) {
-        impl_->args[idx.step_->step_data<StepKind::Load>().idx].kind = ArgumentKind::SrcIdxArr;
-    }
     if (idx.dtype() == ScalarDataType::I8 || idx.dtype() == ScalarDataType::I16) {
         idx = zext(idx, ScalarDataType::I32);
     }
@@ -1366,7 +1252,7 @@ void FunctionBuilder::arith_agg(Value value, ArithBinaryOp op, Argument dst) {
 void FunctionBuilder::cond_arith_agg(Value value, MaybePredicate cond, ArithBinaryOp op, Argument dst) {
     check_value(value);
     check_arith_agg_op(op);
-    ArgumentDecl &dst_info = impl_->get_arg(dst.idx_);
+    const ArgumentDecl &dst_info = impl_->get_arg(dst.idx_);
     ScalarDataType dtype = dst_info.dtype;
     if (dst_info.dtype == ScalarDataType::I128) {
         if (value.dtype() != ScalarDataType::I64) {
@@ -1376,7 +1262,6 @@ void FunctionBuilder::cond_arith_agg(Value value, MaybePredicate cond, ArithBina
     } else {
         check_store_dst(dst_info, value.step_, StepKind::AccArithBinary);
     }
-    update_argument_kind(dst_info, ArgumentKind::DstAgg);
 
     if (op == ArithBinaryOp::Mul) {
         if (value.dtype() == ScalarDataType::I64) { impl_->special_ops |= SpecialOp::I64Mul; }
@@ -1416,9 +1301,8 @@ void FunctionBuilder::predicate_agg(Predicate value, PredicateBinaryOp op, Argum
     check_predicate(value);
     check_predicate_agg_op(op);
 
-    ArgumentDecl &dst_info = impl_->get_arg(dst.idx_);
+    const ArgumentDecl &dst_info = impl_->get_arg(dst.idx_);
     check_store_dst(dst_info, value.step_, StepKind::AccPredicateBinary);
-    update_argument_kind(dst_info, ArgumentKind::DstAgg);
 
     ScalarDataType dtype = value.dtype();
     impl_->accs.push_back(Accumulator{dtype, AccIdx{impl_->accs.size()}, dst.idx_, nullptr});
@@ -1460,7 +1344,7 @@ template <typename... Args> static uint64_t make_hash(StepKind kind, Args... arg
 }
 
 Value FunctionBuilder::load(Argument argument, LoadStoreKind kind) {
-    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
+    const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype == ScalarDataType::I1) { invalid_type("load should not be used with i1 type"); }
 
     uint64_t hash = make_hash(StepKind::Load, argument, kind);
@@ -1468,21 +1352,19 @@ Value FunctionBuilder::load(Argument argument, LoadStoreKind kind) {
             hash, [argument, kind](const auto &x) { return x.idx == argument.idx_ && x.kind == kind; })) {
         return result;
     }
-    update_argument_kind(func_arg, ArgumentKind::SrcArr);
 
     Step *s = impl_->load(func_arg, kind);
     return impl_->remember_expr(hash, s);
 }
 
 Predicate FunctionBuilder::load_predicate(Argument argument) {
-    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
+    const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype != ScalarDataType::I1) { invalid_type("load_predicate should use I1 dtype"); }
 
     uint64_t hash = make_hash(StepKind::Load, argument);
     if (auto *result = impl_->cse<StepKind::Load>(hash, [argument](const auto &x) { return x.idx == argument.idx_; })) {
         return result;
     }
-    update_argument_kind(func_arg, ArgumentKind::SrcArr);
 
     Step *s = impl_->load(func_arg, LoadStoreKind::Unaligned);
     return impl_->remember_expr(hash, s);
@@ -1495,9 +1377,6 @@ Value FunctionBuilder::gather(Value idx, Argument argument) {
         invalid_type("Only i8, i16, i32 and i64 indices are supported in gather. Got %s",
                      show_scalar_dtype(idx.dtype()));
     }
-    if (idx.step_->is(StepKind::Load)) {
-        impl_->args[idx.step_->step_data<StepKind::Load>().idx].kind = ArgumentKind::SrcIdxArr;
-    }
     if (idx.dtype() == ScalarDataType::I8 || idx.dtype() == ScalarDataType::I16) {
         idx = zext(idx, ScalarDataType::I32);
     }
@@ -1506,18 +1385,17 @@ Value FunctionBuilder::gather(Value idx, Argument argument) {
             hash, [idx, argument](const auto &x) { return x.idx == idx.step_ && x.data == argument.idx_; })) {
         return result;
     }
-    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
+    const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype == ScalarDataType::I8 || func_arg.dtype == ScalarDataType::I16) {
         impl_->special_ops |= SpecialOp::SmallGather;
     }
     impl_->special_ops |= SpecialOp::Gather;
-    update_argument_kind(func_arg, ArgumentKind::SrcGatherArr);
     Step *s = impl_->gather(idx.step_, func_arg);
     return impl_->remember_expr(hash, s);
 }
 
 Value FunctionBuilder::load_splat(Argument argument) {
-    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
+    const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype == ScalarDataType::I1) { invalid_type("load should not be used with i1 type"); }
 
     uint64_t hash = make_hash(StepKind::LoadSplat, argument);
@@ -1525,13 +1403,12 @@ Value FunctionBuilder::load_splat(Argument argument) {
             impl_->cse<StepKind::LoadSplat>(hash, [argument](const auto &x) { return x.idx == argument.idx_; })) {
         return result;
     }
-    update_argument_kind(func_arg, ArgumentKind::SrcConst);
     Step *s = impl_->load_splat(func_arg);
     return impl_->remember_expr(hash, s);
 }
 
 Predicate FunctionBuilder::load_predicate_splat(Argument argument) {
-    ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
+    const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
     if (func_arg.dtype != ScalarDataType::I1) { invalid_type("load_predicate_splat should use I1 dtype"); }
 
     uint64_t hash = make_hash(StepKind::LoadSplat, argument);
@@ -1539,7 +1416,6 @@ Predicate FunctionBuilder::load_predicate_splat(Argument argument) {
             impl_->cse<StepKind::LoadSplat>(hash, [argument](const auto &x) { return x.idx == argument.idx_; })) {
         return result;
     }
-    update_argument_kind(func_arg, ArgumentKind::SrcConst);
     Step *s = impl_->load_splat(func_arg);
     return impl_->remember_expr(hash, s);
 }
@@ -1760,7 +1636,6 @@ void FunctionBuilder::countif(Predicate value, Argument dst) {
     if (dtype != ScalarDataType::I64) {
         invalid_type("Only support calculating 64-bit countif, got %s", show_scalar_dtype(dtype));
     }
-    update_argument_kind(dst_info, ArgumentKind::DstAgg);
 
     impl_->accs.push_back(Accumulator{dtype, AccIdx{impl_->accs.size()}, dst.idx_, nullptr});
     Accumulator &acc = impl_->accs.back();
@@ -2095,11 +1970,7 @@ Function *FunctionBuilder::build() {
 
     if (impl_->step_roots.empty()) { invalid_input("Malformed function with no expressions"); }
     check_hir_root_limit(impl_);
-    (void)check_argument_accesses_and_count_stats(impl_);
-
-    for (const auto &x : impl_->args) {
-        if (x.kind == ArgumentKind::Undefined) { invalid_input("Unused argument %zu", x.idx); }
-    }
+    (void)check_hir_complexity(impl_);
 
     Function *func = arena->create<Function>();
     func->ctx = impl_->ctx;
@@ -2109,6 +1980,7 @@ Function *FunctionBuilder::build() {
     func->step_roots = arena->copy_array<Step *>(impl_->step_roots);
     func->safety_check_arg = impl_->safety_check_arg;
     func->special_ops = impl_->special_ops;
+    analyze_argument_usage(func);
     func->vectorization_hint = impl_->vectorization_hint;
     if (func->vectorization_hint == VectorizationHint::None &&
         func->unsupported_vector_special_ops() != SpecialOp::None) {

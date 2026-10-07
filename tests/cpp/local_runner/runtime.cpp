@@ -153,7 +153,7 @@ template <typename T> void write_float_values(Buffer &buffer, size_t rows, Rando
 }
 
 void generate_input(Buffer &buffer, const ArgumentInfo &arg, size_t rows, Random &random) {
-    if (arg.kind == ArgumentKind::Sequence) {
+    if (arg.kind == BundleArgumentKind::Sequence) {
         switch (arg.dtype) {
         case ScalarDataType::I1:
         case ScalarDataType::I8:
@@ -187,7 +187,7 @@ void generate_input(Buffer &buffer, const ArgumentInfo &arg, size_t rows, Random
         }
         return;
     }
-    if (arg.kind != ArgumentKind::Input) return;
+    if (arg.kind != BundleArgumentKind::Input) return;
     switch (arg.dtype) {
     case ScalarDataType::I1:
     case ScalarDataType::I8: write_integer_values<int8_t>(buffer, rows, random); break;
@@ -355,8 +355,9 @@ size_t run_registered_benchmarks(const std::vector<BenchmarkInvocationPtr> &invo
     return count;
 }
 
-bool is_output(ArgumentKind kind) {
-    return kind == ArgumentKind::Output || kind == ArgumentKind::OutputScalar || kind == ArgumentKind::SafetyCheck;
+bool is_output(BundleArgumentKind kind) {
+    return kind == BundleArgumentKind::Output || kind == BundleArgumentKind::OutputScalar ||
+           kind == BundleArgumentKind::SafetyCheck;
 }
 
 std::string_view lowering_kind(const BundleCase &item, const Implementation &implementation) {

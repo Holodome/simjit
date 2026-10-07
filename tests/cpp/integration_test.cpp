@@ -36,6 +36,37 @@ static hir::Step *single_stored_step(hir::Function *fn) {
     return root->step_data<hir::StepKind::Store>().what;
 }
 
+static void add_argument_usage_tests(std::vector<IntegrationTest> &tests) {
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "argument_usage", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument index_input = builder.arg(I32);
+        Argument table = builder.arg(I32);
+        Argument output = builder.arg(I32);
+        Value index = builder.add(builder.load(index_input), builder.i32(1));
+        builder.store(builder.gather(index, table), output);
+
+        const auto &usages = builder.build()->argument_usage;
+        SIMJIT_ASSERT(bool(usages[index_input.idx_] & hir::ArgumentUsage::BoundedIndex));
+        SIMJIT_ASSERT(bool(usages[table.idx_] & hir::ArgumentUsage::RandomRead));
+        SIMJIT_ASSERT(bool(usages[output.idx_] & hir::ArgumentUsage::SequentialWrite));
+    });
+
+#if SIMJIT_ENABLE_SERIALIZATION
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        FunctionBuilder builder{ctx};
+        bool rejected = false;
+        try {
+            deserialize("(func (args (arg 0 i32 src-arr)) (steps) (roots))", builder);
+        } catch (const SimjitException &) { rejected = true; }
+        SIMJIT_ASSERT(rejected);
+    });
+#endif
+}
+
 static void add_pack_tests(std::vector<IntegrationTest> &tests) {
     tests.emplace_back([] {
         MemoryArena arena;
@@ -1206,8 +1237,8 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         deserialize(R"SIMJIT(
 (func
   (args
-    (arg 0 i1 dst-scalar)
-    (arg 1 i64 dst-scalar))
+    (arg 0 i1)
+    (arg 1 i64))
   (accs
     (acc 0 i1 (arg 0) (step 3))
     (acc 1 i64 (arg 1) (step 5)))
@@ -1474,7 +1505,7 @@ static void add_small_gather_scatter_index_tests(std::vector<IntegrationTest> &t
         SIMJIT_ASSERT(cast_data.arg->dtype == I8);
         SIMJIT_ASSERT(cast_data.arg->is(hir::StepKind::Load));
         ArgumentIdx idx_arg = cast_data.arg->step_data<hir::StepKind::Load>().idx;
-        SIMJIT_ASSERT(fn->args[idx_arg].kind == ArgumentKind::SrcIdxArr);
+        SIMJIT_ASSERT(bool(fn->argument_usage[idx_arg] & hir::ArgumentUsage::BoundedIndex));
     });
 
     tests.emplace_back([] {
@@ -1496,7 +1527,7 @@ static void add_small_gather_scatter_index_tests(std::vector<IntegrationTest> &t
         SIMJIT_ASSERT(cast_data.arg->dtype == I16);
         SIMJIT_ASSERT(cast_data.arg->is(hir::StepKind::Load));
         ArgumentIdx idx_arg = cast_data.arg->step_data<hir::StepKind::Load>().idx;
-        SIMJIT_ASSERT(fn->args[idx_arg].kind == ArgumentKind::SrcIdxArr);
+        SIMJIT_ASSERT(bool(fn->argument_usage[idx_arg] & hir::ArgumentUsage::BoundedIndex));
     });
 }
 
@@ -2276,10 +2307,10 @@ static void add_asmjit_x86_peephole_tests(std::vector<IntegrationTest> &tests) {
         deserialize(R"SIMJIT(
 (func
   (args
-    (arg 0 i1 dst-scalar)
-    (arg 1 f64 src-const)
-    (arg 2 i1 dst-scalar)
-    (arg 3 i32 dst-arr))
+    (arg 0 i1)
+    (arg 1 f64)
+    (arg 2 i1)
+    (arg 3 i32))
   (accs
     (acc 0 i1 (arg 0) (step 6))
     (acc 1 i1 (arg 2) (step 11)))
@@ -2407,6 +2438,7 @@ static void add_asmjit_x86_peephole_tests(std::vector<IntegrationTest> &tests) {
 
 static std::vector<IntegrationTest> make_integration_tests() {
     std::vector<IntegrationTest> tests;
+    add_argument_usage_tests(tests);
     add_pack_tests(tests);
     add_checked_op_shape_tests(tests);
     add_commutative_cse_tests(tests);

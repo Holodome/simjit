@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Zlib
 
 #include "simjit/core/cpp/emitter_internal.h"
+#include "simjit/core/hir.h"
 
 #include <cmath>
 #include <type_traits>
@@ -728,12 +729,12 @@ bool CppEmitterBase::can_inline_store_arg(const Step *step) const {
 }
 std::string CppEmitterBase::scalar_output_arg_expr(const Step *step, bool allow_select) {
     if (can_inline_agg_result_arg(step)) {
-        auto &data = step->step_data<StepKind::ArithBinary>();
+        const auto &data = step->step_data<StepKind::ArithBinary>();
         return scalar_arith_binary_expr(step->dtype.as_scalar(), data, show_scalar_operand(data.left),
                                         show_scalar_operand(data.right));
     }
     if (allow_select && can_inline_store_value_arg(step) && step->is(StepKind::Select)) {
-        auto &data = step->step_data<StepKind::Select>();
+        const auto &data = step->step_data<StepKind::Select>();
         if (auto expr = scalar_select_bool_expr(data)) { return *expr; }
         return format("%s ? %s : %s", show_scalar_operand(data.cond), show_scalar_operand(data.truthy),
                       show_scalar_operand(data.falsy));
@@ -1165,10 +1166,12 @@ std::string CppEmitterBase::emit_source() {
     bool has_delayed_prologue = has_delayed_prologue_steps(func->prologue_roots);
 
     std::string decl = format("void %s(size_t nelems", func->ctx->symbol_name.c_str());
+    const auto &usages = func->source_hir->argument_usage;
     for (const ArgumentDecl &arg : func->args) {
         decl += ", ";
-        bool writable = bool(arg.kind & ArgumentKind::Dst) || bool(arg.kind & ArgumentKind::DstAgg) ||
-                        bool(arg.kind & ArgumentKind::DstSafetyCheck);
+        hir::ArgumentUsage usage = usages[arg.idx];
+        bool writable = bool(usage & (hir::ArgumentUsage::SequentialWrite | hir::ArgumentUsage::RandomWrite |
+                                      hir::ArgumentUsage::AppendWrite | hir::ArgumentUsage::AggregateWrite));
         if (!writable) { decl += "const "; }
         if (arg.dtype == ScalarDataType::I1) {
             decl += "uint8_t *";

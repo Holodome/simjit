@@ -307,10 +307,27 @@ enum class VectorizationHint : uint8_t {
     UnsupportedSpecialOps,
 };
 
+enum class ArgumentUsage : uint16_t {
+    None = 0x0,
+    SequentialRead = 0x1,
+    SequentialWrite = 0x2,
+    RandomRead = 0x4,
+    RandomWrite = 0x8,
+    AppendWrite = 0x10,
+    AggregateWrite = 0x20,
+    AccessMask = 0x3f,
+    BoundedIndex = 0x40,
+    ArrayRead = 0x80,
+    SplatRead = 0x100,
+    SafetyCheck = 0x200,
+};
+SIMJIT_DEFINE_ENUM_FLAGS(ArgumentUsage)
+
 struct Function {
     Context *ctx = nullptr;
     size_t step_id_count = 0;
     ArenaArray<ArgumentDecl> args{};
+    ArenaArray<ArgumentUsage> argument_usage{};
     ArenaArray<Accumulator> accs{};
     ArenaArray<Step *> step_roots;
     std::optional<ArgumentIdx> safety_check_arg{};
@@ -322,6 +339,7 @@ struct Function {
 };
 
 SpecialOp supported_vector_special_ops_for_arch(Arch arch) noexcept;
+void analyze_argument_usage(Function *func);
 const char *show_step_kind(StepKind kind) noexcept;
 std::string show_special_ops(SpecialOp ops);
 

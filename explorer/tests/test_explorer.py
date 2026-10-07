@@ -79,7 +79,7 @@ def test_serialization_lark_validator_cases():
             '(step 1 permute i32 (step 0) "0x01" ())) (roots (step 1)))'
         ),
         (
-            '(func (args (arg 0 f64 src-arr)) '
+            '(func (args (arg 0 f64)) '
             '(steps (step 0 load f64 (arg 0) unaligned) '
             '(step 1 fpclass i1 (step 0) ("inf" "nan" sub zer))) '
             '(roots (step 1)))'
@@ -310,12 +310,12 @@ def test_compile_query_reports_outputs():
 
 def test_lisp_formatter_keeps_serialized_atoms_readable():
     formatted = format_lisp(
-        "(func (args (arg 0 i32 src-arr) (arg 1 i32 dst-arr)) "
+        "(func (args (arg 0 i32) (arg 1 i32)) "
         '(steps (step 0 const i32 "0x1") (step 1 store i32 (step 0) (arg 1) unaligned)) '
         "(roots (step 1)))"
     )
     assert formatted.startswith("(func\n")
-    assert "(arg 0 i32 src-arr)" in formatted
+    assert "(arg 0 i32)" in formatted
     assert '(step 0 const i32 "0x1")' in formatted
 
 
@@ -335,8 +335,8 @@ def test_benchmark_helpers_use_us_and_cpp_signature():
     cpp = "void expr(size_t nelems, const int32_t * __restrict arg0, uint8_t * __restrict arg1) {}"
     assert parse_cpp_pointer_types(cpp) == ["int32_t", "uint8_t"]
     hir = """\
-@0 arg dtype=i32 kind=src-arr
-@1 arg dtype=i1 kind=dst-arr
+@0 arg dtype=i32
+@1 arg dtype=i1
 """
     assert parse_hir_pointer_types(hir) == ["int32_t", "uint8_t"]
     assert gbench_pointer_types([], hir) == ["int32_t", "uint8_t"]

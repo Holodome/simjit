@@ -24,7 +24,7 @@ namespace simjit::local_runner {
 
 // model.cpp
 
-enum class ArgumentKind : uint8_t {
+enum class BundleArgumentKind : uint8_t {
     Input,
     Output,
     OutputScalar,
@@ -39,7 +39,7 @@ enum class Backend : uint8_t {
 
 struct ArgumentInfo {
     ScalarDataType dtype{};
-    ArgumentKind kind{};
+    BundleArgumentKind kind{};
 };
 
 struct FunctionHandle {

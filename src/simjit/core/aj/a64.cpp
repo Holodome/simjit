@@ -5,6 +5,7 @@
 
 #include "simjit/asmjit.h"
 #include "simjit/core/expr.h"
+#include "simjit/core/hir.h"
 #include "simjit/core/mir.h"
 #include "simjit/detail/base.h"
 #include "simjit/simjit.h"
@@ -3601,6 +3602,7 @@ struct CompileState {
     void plan_mask_shift_writers(const mir::Function *func) {
         mask_shift_writers.assign(func->args.size(), {});
         std::vector<MSSCandidate> candidates(func->args.size());
+        const auto &usages = func->source_hir->argument_usage;
 
         for (Step *root : func->main_loop_roots) {
             if (!is_vector_mask_shift_writer_store(root)) { continue; }
@@ -3655,6 +3657,7 @@ struct CompileState {
 
         for (size_t i = 0; i < candidates.size(); ++i) {
             MSSCandidate candidate = candidates[i];
+            if (bool(usages[i] & (hir::ArgumentUsage::SequentialRead | hir::ArgumentUsage::RandomRead))) { continue; }
             // Rejected includes partially managed outputs. A common valid shape is an m8/m16 main-loop mask store
             // followed by scalar i1 tail stores for the same argument. The shift writer must not handle only
             // the tail, because its destination pointer would not be advanced by the normal main-loop stores.
@@ -4078,7 +4081,8 @@ struct CompileState {
         }
     }
 
-    void init_args(nonstd::span<ArgumentDecl const> func_args, aj::FuncNode *func_node) {
+    void init_args(nonstd::span<ArgumentDecl const> func_args, nonstd::span<const hir::ArgumentUsage> usages,
+                   aj::FuncNode *func_node) {
         func_node->set_arg(0, row_count);
 
         for (const ArgumentDecl &arg : func_args) {
@@ -4086,8 +4090,8 @@ struct CompileState {
             ArgInfo info{&arg, gp};
             func_node->set_arg(arg.idx + 1, gp);
             this->args[arg.idx] = std::move(info);
-            if (SIMJIT_A64_ASMJIT_INDEX_REGS && (arg.kind == ArgumentKind::SrcArr || arg.kind == ArgumentKind::Dst ||
-                                                 arg.kind == ArgumentKind::SrcIdxArr)) {
+            if (SIMJIT_A64_ASMJIT_INDEX_REGS &&
+                bool(usages[arg.idx] & (hir::ArgumentUsage::SequentialRead | hir::ArgumentUsage::SequentialWrite))) {
                 index_regs[arg.idx] = {cc.new_gp64()};
             }
         }
@@ -4147,10 +4151,11 @@ static void compile_asmjit(const mir::Function *func, aja64::Compiler &cc) {
     aj::FuncNode *func_node = create_func_node(func->args.size(), cc);
 
     CompileState state{func->ctx->arena, cc};
+    const auto &usages = func->source_hir->argument_usage;
     // Note that we only pass func as argument, but don't save it inside CompileState. This makes it easier to see where
     // we interact with it.
     state.init(func);
-    state.init_args(func->args, func_node);
+    state.init_args(func->args, usages, func_node);
     state.init_accs(func->prologue_roots);
     state.plan_mask_shift_writers(func);
 

@@ -84,6 +84,118 @@ SpecialOp Function::unsupported_vector_special_ops() const noexcept {
     return special_ops & ~(supported_vector_special_ops_for_arch(ctx->arch) & ctx->host_supported_vector_special_ops);
 }
 
+namespace {
+
+const char *show_argument_access(ArgumentUsage access) {
+    switch (access) {
+    case ArgumentUsage::SequentialRead: return "sequential read";
+    case ArgumentUsage::SequentialWrite: return "sequential write";
+    case ArgumentUsage::RandomRead: return "random read";
+    case ArgumentUsage::RandomWrite: return "random write";
+    case ArgumentUsage::AppendWrite: return "append write";
+    case ArgumentUsage::AggregateWrite: return "aggregate write";
+    default: break;
+    }
+    SIMJIT_UNREACHABLE();
+}
+
+constexpr ArgumentUsage compatible_argument_access_flags(ArgumentUsage access) {
+    switch (access) {
+    case ArgumentUsage::SequentialRead:
+        return ArgumentUsage::SequentialRead | ArgumentUsage::SequentialWrite | ArgumentUsage::RandomRead;
+    case ArgumentUsage::SequentialWrite: return ArgumentUsage::SequentialRead;
+    case ArgumentUsage::RandomRead:
+        return ArgumentUsage::SequentialRead | ArgumentUsage::RandomRead | ArgumentUsage::RandomWrite;
+    case ArgumentUsage::RandomWrite: return ArgumentUsage::RandomRead | ArgumentUsage::RandomWrite;
+    default: return ArgumentUsage::None;
+    }
+    SIMJIT_UNREACHABLE();
+}
+
+ArgumentUsage first_argument_access(ArgumentUsage flags) {
+    if (bool(flags & ArgumentUsage::SequentialRead)) { return ArgumentUsage::SequentialRead; }
+    if (bool(flags & ArgumentUsage::SequentialWrite)) { return ArgumentUsage::SequentialWrite; }
+    if (bool(flags & ArgumentUsage::RandomRead)) { return ArgumentUsage::RandomRead; }
+    if (bool(flags & ArgumentUsage::RandomWrite)) { return ArgumentUsage::RandomWrite; }
+    if (bool(flags & ArgumentUsage::AppendWrite)) { return ArgumentUsage::AppendWrite; }
+    if (bool(flags & ArgumentUsage::AggregateWrite)) { return ArgumentUsage::AggregateWrite; }
+    SIMJIT_UNREACHABLE();
+}
+
+void add_argument_access(std::vector<ArgumentUsage> &usages, ArgumentIdx idx, ArgumentUsage access) {
+    SIMJIT_ASSERT(idx < usages.size());
+    ArgumentUsage &old_flags = usages[idx];
+    ArgumentUsage incompatible_flags =
+        (old_flags & ArgumentUsage::AccessMask) & ~compatible_argument_access_flags(access);
+    if (incompatible_flags != ArgumentUsage::None) {
+        ArgumentUsage old_access = first_argument_access(incompatible_flags);
+        simjit_exception(ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidArgumentAccess,
+                         "Argument %zu has incompatible accesses: %s and %s", idx, show_argument_access(old_access),
+                         show_argument_access(access));
+    }
+    old_flags |= access;
+}
+
+void add_step_argument_accesses(std::vector<ArgumentUsage> &usages, const Step *step) {
+    switch (step->kind) {
+    case StepKind::Load:
+        add_argument_access(usages, step->step_data<StepKind::Load>().idx, ArgumentUsage::SequentialRead);
+        usages[step->step_data<StepKind::Load>().idx] |= ArgumentUsage::ArrayRead;
+        return;
+    case StepKind::LoadSplat:
+        add_argument_access(usages, step->step_data<StepKind::LoadSplat>().idx, ArgumentUsage::SequentialRead);
+        usages[step->step_data<StepKind::LoadSplat>().idx] |= ArgumentUsage::SplatRead;
+        return;
+    case StepKind::Gather:
+        add_argument_access(usages, step->step_data<StepKind::Gather>().data, ArgumentUsage::RandomRead);
+        return;
+    case StepKind::Store:
+        add_argument_access(usages, step->step_data<StepKind::Store>().addr, ArgumentUsage::SequentialWrite);
+        return;
+    case StepKind::Scatter:
+        add_argument_access(usages, step->step_data<StepKind::Scatter>().dst, ArgumentUsage::RandomWrite);
+        return;
+    case StepKind::Pack:
+        add_argument_access(usages, step->step_data<StepKind::Pack>().dst, ArgumentUsage::AppendWrite);
+        return;
+    default: return;
+    }
+}
+
+void mark_bounded_index_inputs(std::vector<ArgumentUsage> &usages, Step *idx, size_t step_count) {
+    std::vector<uint8_t> state(step_count, 0);
+    traverse_steps_postorder_unique(idx, state, [&](Step *step) {
+        if (step->is(StepKind::Load) || step->is(StepKind::LoadSplat)) {
+            usages[step->step_data<StepKind::Load>().idx] |= ArgumentUsage::BoundedIndex;
+        }
+    });
+}
+
+} // namespace
+
+void analyze_argument_usage(Function *func) {
+    std::vector<ArgumentUsage> usages(func->args.size());
+    std::vector<uint8_t> state(func->step_id_count, 0);
+    for (Step *root : func->step_roots) {
+        traverse_steps_postorder_unique(root, state, [&](Step *step) {
+            add_step_argument_accesses(usages, step);
+            if (step->is(StepKind::Gather)) {
+                mark_bounded_index_inputs(usages, step->step_data<StepKind::Gather>().idx, func->step_id_count);
+            } else if (step->is(StepKind::Scatter)) {
+                mark_bounded_index_inputs(usages, step->step_data<StepKind::Scatter>().idx, func->step_id_count);
+            }
+        });
+    }
+    for (const Accumulator &acc : func->accs) {
+        add_argument_access(usages, acc.dst_arg, ArgumentUsage::AggregateWrite);
+    }
+    if (func->safety_check_arg) {
+        add_argument_access(usages, *func->safety_check_arg, ArgumentUsage::AggregateWrite);
+        usages[*func->safety_check_arg] |= ArgumentUsage::SafetyCheck;
+    }
+    func->argument_usage = func->ctx->arena->copy_array<ArgumentUsage>(usages);
+}
+
 static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache, std::string &buf) {
 #define wr_(...) simjit::format_to(buf, __VA_ARGS__)
 #define wr(...)           \
@@ -158,8 +270,7 @@ std::string print_function(const Function *func) {
     buf.reserve(1024);
     if (!func->args.empty()) {
         for (const ArgumentDecl &arg : func->args) {
-            simjit::format_to(buf, "@%zu arg dtype=%s kind=%s\n", arg.idx, show_scalar_dtype(arg.dtype),
-                              show_argument_kind(arg.kind).c_str());
+            simjit::format_to(buf, "@%zu arg dtype=%s\n", arg.idx, show_scalar_dtype(arg.dtype));
         }
     }
     if (!func->accs.empty()) {

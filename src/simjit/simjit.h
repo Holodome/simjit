@@ -461,21 +461,6 @@ constexpr bool is_x86_arch(Arch arch) noexcept {
     return arch == Arch::Amd64_AVX512 || arch == Arch::Amd64_AVX512_YMM;
 }
 
-// Automatic classification for arguments.
-enum class ArgumentKind : uint8_t {
-    // Value that has not been used
-    Undefined = 0x0,
-    SrcArr = 0x1,
-    SrcGatherArr = 0x2,
-    SrcIdxArr = 0x4,
-    SrcConst = 0x8,
-    Dst = 0x10,
-    DstAgg = 0x20,
-    DstSafetyCheck = 0x40,
-    Table = SrcGatherArr | Dst
-};
-SIMJIT_DEFINE_ENUM_FLAGS(ArgumentKind)
-
 using ArgumentIdx = size_t;
 
 // Public expression objects are lightweight handles.
@@ -567,7 +552,7 @@ public:
     void scalar_only() noexcept;
     hir::Function *build();
 
-    Argument arg(ScalarDataType dtype, ArgumentKind kind = ArgumentKind::Undefined);
+    Argument arg(ScalarDataType dtype);
     Argument arg_safety_check();
 
     // Stores

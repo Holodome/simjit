@@ -68,12 +68,12 @@ static ScalarDataType parse_dtype(llvm::StringRef text, size_t line) {
     throw std::runtime_error(std::format("bundle line {} has unknown dtype '{}'", line, text.str()));
 }
 
-static ArgumentKind parse_kind(llvm::StringRef text, size_t line) {
-    if (text == "in") return ArgumentKind::Input;
-    if (text == "out") return ArgumentKind::Output;
-    if (text == "outs") return ArgumentKind::OutputScalar;
-    if (text == "safety") return ArgumentKind::SafetyCheck;
-    if (text == "sv") return ArgumentKind::Sequence;
+static BundleArgumentKind parse_kind(llvm::StringRef text, size_t line) {
+    if (text == "in") return BundleArgumentKind::Input;
+    if (text == "out") return BundleArgumentKind::Output;
+    if (text == "outs") return BundleArgumentKind::OutputScalar;
+    if (text == "safety") return BundleArgumentKind::SafetyCheck;
+    if (text == "sv") return BundleArgumentKind::Sequence;
     throw std::runtime_error(std::format("bundle line {} has unknown argument kind '{}'", line, text.str()));
 }
 

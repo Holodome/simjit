@@ -45,6 +45,14 @@ enum class DebugStage : uint32_t {
 };
 SIMJIT_DEFINE_ENUM_FLAGS(DebugStage)
 
+enum class JitArgumentRole : uint8_t {
+    InputArray,
+    InputConstant,
+    OutputArray,
+    OutputScalar,
+    OutputSafetyCheck,
+};
+
 struct DebugOptions {
     bool capture_on_error = false;
     bool capture_on_success = false;
@@ -66,7 +74,7 @@ struct DebugSnapshot {
 
 struct CallerInfo {
     const ScalarDataType *expected_types = nullptr;
-    const ArgumentKind *expected_kinds = nullptr;
+    const JitArgumentRole *expected_roles = nullptr;
     size_t expected_arg_count = SIZE_MAX;
 };
 
@@ -137,14 +145,14 @@ public:
 
     // Look up a compiled function by identifier without invoking a builder.
     // Returns nullptr on cache miss. If caller is provided and the identifier exists, declared argument
-    // count/kinds/types are checked before returning the cached function pointer.
+    // count, roles, and types are checked before returning the cached function pointer.
     void *find_cached_function(std::string_view identifier, const CallerInfo *caller = nullptr);
     bool delete_cached_function(std::string_view identifier);
     void clear();
 
     // identifier is the cache key. On cache hit, the stored function is reused without rebuilding the expression or
-    // comparing it with build_fn. If caller is provided, only the declared argument count/kinds/types are checked.
-    // Use stable, unique identifiers for distinct expressions.
+    // comparing it with build_fn. If caller is provided, only the declared argument count, roles, and types are
+    // checked. Use stable, unique identifiers for distinct expressions.
     void *build_and_compile(std::string_view identifier, const function_ref<void(FunctionBuilder &)> &build_fn,
                             const CallerInfo *caller = nullptr);
 
@@ -164,21 +172,22 @@ template <> struct ArrayTypeMap<ScalarDataType::I1> {
     using type = Bitmask;
 };
 
-template <ArgumentKind k, typename T, ScalarDataType s> struct JitTypeWrapper {
-    constexpr static ArgumentKind kind = k;
+template <JitArgumentRole r, typename T, ScalarDataType s> struct JitTypeWrapper {
+    constexpr static JitArgumentRole role = r;
     constexpr static ScalarDataType scalar = s;
     using type = T;
 };
 
 template <ScalarDataType s>
-using InputArr = JitTypeWrapper<ArgumentKind::SrcArr, const typename ArrayTypeMap<s>::type *, s>;
+using InputArr = JitTypeWrapper<JitArgumentRole::InputArray, const typename ArrayTypeMap<s>::type *, s>;
 template <ScalarDataType s>
-using InputConst = JitTypeWrapper<ArgumentKind::SrcConst, const typename ScalarDataTypeMap<s>::type *, s>;
-template <ScalarDataType s> using OutputArr = JitTypeWrapper<ArgumentKind::Dst, typename ArrayTypeMap<s>::type *, s>;
+using InputConst = JitTypeWrapper<JitArgumentRole::InputConstant, const typename ScalarDataTypeMap<s>::type *, s>;
 template <ScalarDataType s>
-using OutputScalar = JitTypeWrapper<ArgumentKind::DstAgg, typename ScalarDataTypeMap<s>::type *, s>;
+using OutputArr = JitTypeWrapper<JitArgumentRole::OutputArray, typename ArrayTypeMap<s>::type *, s>;
 template <ScalarDataType s>
-using OutputSafetyCheck = JitTypeWrapper<ArgumentKind::DstSafetyCheck, typename ScalarDataTypeMap<s>::type *, s>;
+using OutputScalar = JitTypeWrapper<JitArgumentRole::OutputScalar, typename ScalarDataTypeMap<s>::type *, s>;
+template <ScalarDataType s>
+using OutputSafetyCheck = JitTypeWrapper<JitArgumentRole::OutputSafetyCheck, typename ScalarDataTypeMap<s>::type *, s>;
 
 void call_fn_ptr(void *fn, size_t n, nonstd::span<void *> args);
 
@@ -201,8 +210,8 @@ template <typename... Args, typename BuildFn>
 inline FunctionHolder<typename Args::type...> vectorized_function(JitContext &ctx, std::string_view identifier,
                                                                   BuildFn build_fn) {
     constexpr ScalarDataType mapped_types[] = {Args::scalar...};
-    constexpr ArgumentKind kinds[] = {Args::kind...};
-    CallerInfo caller{mapped_types, kinds, sizeof...(Args)};
+    constexpr JitArgumentRole roles[] = {Args::role...};
+    CallerInfo caller{mapped_types, roles, sizeof...(Args)};
     void *fn = ctx.build_and_compile(identifier, build_fn, &caller);
     using Holder = FunctionHolder<typename Args::type...>;
     return Holder{(typename Holder::FnPtr)fn};
@@ -212,8 +221,8 @@ template <typename... Args>
 inline std::optional<FunctionHolder<typename Args::type...>> find_vectorized_function(JitContext &ctx,
                                                                                       std::string_view identifier) {
     constexpr ScalarDataType mapped_types[] = {Args::scalar...};
-    constexpr ArgumentKind kinds[] = {Args::kind...};
-    CallerInfo caller{mapped_types, kinds, sizeof...(Args)};
+    constexpr JitArgumentRole roles[] = {Args::role...};
+    CallerInfo caller{mapped_types, roles, sizeof...(Args)};
     void *fn = ctx.find_cached_function(identifier, &caller);
     if (fn == nullptr) return {};
     using Holder = FunctionHolder<typename Args::type...>;

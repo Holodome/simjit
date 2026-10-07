@@ -36,6 +36,7 @@ static bool can_jit_target_on_host(Arch target, Arch host) {
 struct FunctionRecord {
     void *fn_ptr{};
     std::vector<ArgumentDecl> args;
+    std::vector<hir::ArgumentUsage> usages;
     std::string identifier;
 };
 
@@ -109,11 +110,28 @@ static const char *policy_name(CompilePolicy policy) {
     SIMJIT_UNREACHABLE();
 }
 
-static ArgumentKind inner_kind(ArgumentKind kind) {
-    // We have additional types that are meaningless to user, since for them these are all just read-only arrays.
-    if (kind == ArgumentKind::SrcGatherArr) { return ArgumentKind::SrcArr; }
-    if (kind == ArgumentKind::SrcIdxArr) { return ArgumentKind::SrcArr; }
-    return kind;
+static const char *show_jit_argument_role(JitArgumentRole role) {
+    switch (role) {
+    case JitArgumentRole::InputArray: return "input array";
+    case JitArgumentRole::InputConstant: return "input constant";
+    case JitArgumentRole::OutputArray: return "output array";
+    case JitArgumentRole::OutputScalar: return "output scalar";
+    case JitArgumentRole::OutputSafetyCheck: return "output safety check";
+    }
+    SIMJIT_UNREACHABLE();
+}
+
+static JitArgumentRole derived_jit_argument_role(const hir::ArgumentUsage &usage) {
+    if (bool(usage & hir::ArgumentUsage::SafetyCheck)) { return JitArgumentRole::OutputSafetyCheck; }
+    if (bool(usage & hir::ArgumentUsage::AggregateWrite)) { return JitArgumentRole::OutputScalar; }
+    if (bool(usage & (hir::ArgumentUsage::SequentialWrite | hir::ArgumentUsage::RandomWrite |
+                      hir::ArgumentUsage::AppendWrite))) {
+        return JitArgumentRole::OutputArray;
+    }
+    if (bool(usage & hir::ArgumentUsage::SplatRead) && !bool(usage & hir::ArgumentUsage::ArrayRead)) {
+        return JitArgumentRole::InputConstant;
+    }
+    return JitArgumentRole::InputArray;
 }
 
 static bool can_best_effort_fallback(const ErrorInfo &error) {
@@ -127,7 +145,7 @@ static bool can_best_effort_fallback(const ErrorInfo &error) {
 }
 
 static void typecheck_function(std::string_view identifier, size_t decl_count, const ArgumentDecl *decls,
-                               const CallerInfo *caller) {
+                               const hir::ArgumentUsage *usages, const CallerInfo *caller) {
     if (caller == nullptr) { return; }
 
     if (decl_count != caller->expected_arg_count) {
@@ -136,11 +154,11 @@ static void typecheck_function(std::string_view identifier, size_t decl_count, c
     }
     for (size_t i = 0; i < decl_count; ++i) {
         const ArgumentDecl &arg = decls[i];
-        auto actual_kind = inner_kind(arg.kind);
-        if (caller->expected_kinds[i] != actual_kind) {
-            jit_failure(ErrorSubKind::ArgumentMismatch, "[%.*s] Argument [%zu] kind mismatch: expected %s, got %s",
+        JitArgumentRole actual_role = derived_jit_argument_role(usages[i]);
+        if (caller->expected_roles[i] != actual_role) {
+            jit_failure(ErrorSubKind::ArgumentMismatch, "[%.*s] Argument [%zu] role mismatch: expected %s, got %s",
                         (int)identifier.length(), identifier.data(), i,
-                        show_argument_kind(caller->expected_kinds[i]).c_str(), show_argument_kind(actual_kind).c_str());
+                        show_jit_argument_role(caller->expected_roles[i]), show_jit_argument_role(actual_role));
         }
         if (caller->expected_types[i] != arg.dtype) {
             jit_failure(ErrorSubKind::ArgumentMismatch, "[%.*s] Argument [%zu] type mismatch: expected %s, got %s",
@@ -263,20 +281,21 @@ public:
 
     void *find_and_typecheck_function(std::string_view identifier, const CallerInfo *caller) {
         if (const FunctionRecord *record = funcs_.find(identifier)) {
-            typecheck_function(identifier, record->args.size(), record->args.data(), caller);
+            typecheck_function(identifier, record->args.size(), record->args.data(), record->usages.data(), caller);
             return record->fn_ptr;
         }
         return nullptr;
     }
 
     void save_function(const hir::Function *fn, std::string_view identifier, void *fn_ptr) {
-        FunctionRecord record{fn_ptr, {}, {}};
+        FunctionRecord record{fn_ptr, {}, {}, {}};
         record.args.insert(record.args.end(), fn->args.begin(), fn->args.end());
+        record.usages.assign(fn->argument_usage.begin(), fn->argument_usage.end());
         funcs_.insert_or_assign(identifier, std::move(record));
     }
 
     void *compile_internal(std::string_view identifier, const hir::Function *hir, const CallerInfo *caller) {
-        typecheck_function(identifier, hir->args.size(), hir->args.data(), caller);
+        typecheck_function(identifier, hir->args.size(), hir->args.data(), hir->argument_usage.data(), caller);
         if (funcs_.size() >= ctx_.build_limits.max_cached_functions) {
             jit_failure(ErrorSubKind::CacheLimitExceeded, "JIT function cache is full (%zu >= %zu)", funcs_.size(),
                         ctx_.build_limits.max_cached_functions);

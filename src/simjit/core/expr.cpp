@@ -215,27 +215,6 @@ ConstData scalar_dtype_min(ScalarDataType dt) {
     SIMJIT_UNREACHABLE();
 }
 
-std::string show_argument_kind(ArgumentKind kind) {
-    if (kind == ArgumentKind::Undefined) { return "undefined"; }
-    if (kind == ArgumentKind::Table) { return "table"; }
-
-    std::string result{};
-    auto append = [&](std::string_view v) {
-        if (!result.empty()) { result += '|'; }
-        result += v;
-    };
-
-    if (bool(kind & ArgumentKind::SrcArr)) append("src-arr");
-    if (bool(kind & ArgumentKind::SrcGatherArr)) append("src-gather-arr");
-    if (bool(kind & ArgumentKind::SrcIdxArr)) append("src-idx-arr");
-    if (bool(kind & ArgumentKind::SrcConst)) append("src-const");
-    if (bool(kind & ArgumentKind::Dst)) append("dst-arr");
-    if (bool(kind & ArgumentKind::DstAgg)) append("dst-scalar");
-    if (bool(kind & ArgumentKind::DstSafetyCheck)) append("dst-safety-check");
-
-    return result.empty() ? "unknown" : result;
-}
-
 std::string show_fpclass(FpClass flags) {
     std::string result{};
     auto append = [&](std::string_view v) {

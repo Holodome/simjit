@@ -115,7 +115,7 @@ static void add_lifecycle_tests(std::vector<Test> &tests) {
         b.arg_safety_check();
     });
     add_invalid(tests, [](FunctionBuilder &b) { (void)b.arg(I32); });
-    add_invalid(tests, [](FunctionBuilder &b) {
+    add_valid(tests, [](FunctionBuilder &b) {
         (void)b.arg(I32);
         b.store(b.i32(1), b.arg(I32));
     });

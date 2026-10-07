@@ -322,7 +322,9 @@ static std::string make_base64(std::span<uint8_t const> memory) {
     return base64_encode(memory.data(), memory.size());
 }
 
-static std::string schema_json(nonstd::span<ArgumentDecl> args) {
+static std::string schema_json(const hir::Function *func) {
+    const auto &args = func->args;
+    const auto &usages = func->argument_usage;
     std::string result = "{ \"args\": [";
     for (auto &arg : args) {
         std::string dtype;
@@ -337,19 +339,17 @@ static std::string schema_json(nonstd::span<ArgumentDecl> args) {
         case ScalarDataType::I128: dtype = "i128"; break;
         }
         std::string kind;
-        if ((arg.kind & simjit::ArgumentKind::SrcIdxArr) != simjit::ArgumentKind::Undefined) {
+        if (bool(usages[arg.idx] & hir::ArgumentUsage::BoundedIndex)) {
             kind = "sv";
-        } else if ((arg.kind & (simjit::ArgumentKind::SrcGatherArr | simjit::ArgumentKind::SrcArr |
-                                ArgumentKind::SrcConst)) != simjit::ArgumentKind::Undefined) {
-            kind = "in";
-        } else if ((arg.kind & simjit::ArgumentKind::DstSafetyCheck) != simjit::ArgumentKind::Undefined) {
+        } else if (bool(usages[arg.idx] & hir::ArgumentUsage::SafetyCheck)) {
             kind = "safety";
-        } else if ((arg.kind & simjit::ArgumentKind::DstAgg) != simjit::ArgumentKind::Undefined) {
+        } else if (bool(usages[arg.idx] & hir::ArgumentUsage::AggregateWrite)) {
             kind = "outs";
-        } else if ((arg.kind & simjit::ArgumentKind::Dst) != simjit::ArgumentKind::Undefined) {
+        } else if (bool(usages[arg.idx] & (hir::ArgumentUsage::SequentialWrite | hir::ArgumentUsage::RandomWrite |
+                                           hir::ArgumentUsage::AppendWrite))) {
             kind = "out";
         } else {
-            throw std::runtime_error("invalid arg kind");
+            kind = "in";
         }
         result += std::format("{{ \"dtype\": \"{}\", \"kind\": \"{}\"}}", dtype, kind);
         if (&arg != &args[args.size() - 1]) { result += ","; }
@@ -1229,7 +1229,7 @@ static void append_codes_json(const mir::Function *func, std::vector<std::string
 #endif
 }
 
-static std::string build_test_json(const RegisteredTest &descriptor, const mir::Function *mir, std::string_view hir_str,
+static std::string build_test_json(const RegisteredTest &descriptor, const hir::Function *hir, std::string_view hir_str,
                                    std::string_view mir_str, std::string_view serialized_str, TestVariant variant,
                                    ExpectedOutcome expected, const PipelineTiming &pipeline_timing, double asmjit_time,
                                    double llvm_time, std::vector<std::string> &codes, int iteration,
@@ -1257,7 +1257,7 @@ static std::string build_test_json(const RegisteredTest &descriptor, const mir::
     obj += ",";
     obj += std::format("\"line\": {}", descriptor.test->line);
     obj += ",";
-    obj += std::format("\"schema\": {}", schema_json(mir->args));
+    obj += std::format("\"schema\": {}", schema_json(hir));
     obj += ",";
     obj += std::format("\"src\": \"{}\"", escape_json(hir_str));
     obj += ",";
@@ -1485,7 +1485,7 @@ static RunResult run_test(const RegisteredTest &descriptor, const TestRunConfig 
             }
 
             result.json =
-                build_test_json(descriptor, mir, hir_str, mir_str, serialized_str, resolution.variant, expected,
+                build_test_json(descriptor, fn, hir_str, mir_str, serialized_str, resolution.variant, expected,
                                 pipeline_timing, asmjit_time, llvm_time, codes, iteration, config.iterations);
         }
     } catch (const SimjitException &e) {

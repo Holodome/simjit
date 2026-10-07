@@ -9,6 +9,9 @@
 #include "simjit/core/expr.h"
 
 namespace simjit {
+namespace hir {
+struct Function;
+}
 namespace mir {
 
 struct Step;
@@ -673,6 +676,7 @@ struct AccumulatorInfo {
 
 struct Function {
     Context *ctx;
+    const hir::Function *source_hir = nullptr;
     ArenaArray<ArgumentDecl> args;
     AccumulatorInfo accs;
     ArenaArray<Step *> prologue_roots;

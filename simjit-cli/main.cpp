@@ -195,19 +195,20 @@ static const char *bundle_variant_name() {
     return cli_opts.is_scalar ? "arm-scalar" : "arm-vector";
 }
 
-static const char *bundle_arg_kind(simjit::ArgumentKind kind) {
-    if ((kind & simjit::ArgumentKind::SrcIdxArr) != simjit::ArgumentKind::Undefined) { return "sv"; }
-    if ((kind & (simjit::ArgumentKind::SrcGatherArr | simjit::ArgumentKind::SrcArr | simjit::ArgumentKind::SrcConst)) !=
-        simjit::ArgumentKind::Undefined) {
-        return "in";
+static const char *bundle_arg_kind(simjit::hir::ArgumentUsage usage) {
+    if (bool(usage & simjit::hir::ArgumentUsage::BoundedIndex)) { return "sv"; }
+    if (bool(usage & simjit::hir::ArgumentUsage::SafetyCheck)) { return "checked"; }
+    if (bool(usage & simjit::hir::ArgumentUsage::AggregateWrite)) { return "outs"; }
+    if (bool(usage & (simjit::hir::ArgumentUsage::SequentialWrite | simjit::hir::ArgumentUsage::RandomWrite |
+                      simjit::hir::ArgumentUsage::AppendWrite))) {
+        return "out";
     }
-    if ((kind & simjit::ArgumentKind::DstSafetyCheck) != simjit::ArgumentKind::Undefined) { return "checked"; }
-    if ((kind & simjit::ArgumentKind::DstAgg) != simjit::ArgumentKind::Undefined) { return "outs"; }
-    if ((kind & simjit::ArgumentKind::Dst) != simjit::ArgumentKind::Undefined) { return "out"; }
-    throw std::runtime_error("invalid argument kind for JSON dump");
+    return "in";
 }
 
-static std::string schema_json(const simjit::ArenaArray<simjit::ArgumentDecl> &args) {
+static std::string schema_json(const simjit::hir::Function *func) {
+    const auto &args = func->args;
+    const auto &usages = func->argument_usage;
     std::string result = "{\"args\":[";
     for (size_t i = 0; i < args.size(); ++i) {
         const auto &arg = args[i];
@@ -215,7 +216,7 @@ static std::string schema_json(const simjit::ArenaArray<simjit::ArgumentDecl> &a
         result += "{\"dtype\":\"";
         result += simjit::show_scalar_dtype(arg.dtype);
         result += "\",\"kind\":\"";
-        result += bundle_arg_kind(arg.kind);
+        result += bundle_arg_kind(usages[i]);
         result += "\"}";
     }
     result += "]}";
@@ -297,7 +298,7 @@ static std::string build_json_record(const simjit::hir::Function *hir, const sim
     obj += ",\"file\":\"simjit-cli\"";
     obj += ",\"line\":0";
     obj += ",\"schema\":";
-    obj += schema_json(hir->args);
+    obj += schema_json(hir);
     obj += ",\"src\":\"";
     obj += escape_json(hir_str);
     obj += "\"";

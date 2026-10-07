@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Zlib
 
 #include "simjit/core/cpp/emitter_internal.h"
+#include "simjit/core/hir.h"
 
 #include <math.h>
 #include <type_traits>
@@ -483,6 +484,7 @@ struct ArmNeonCppEmitter : CppEmitterBase {
         arm_special_constants = 0;
         arm_helpers = 0;
         std::vector<MaskShiftWriterCandidate> candidates(func->args.size());
+        const auto &usages = func->source_hir->argument_usage;
 
         for (Step *root : func->main_loop_roots) {
             if (!is_vector_mask_shift_writer_store(root)) { continue; }
@@ -538,6 +540,7 @@ struct ArmNeonCppEmitter : CppEmitterBase {
 
         for (size_t arg = 0; arg < candidates.size(); ++arg) {
             MaskShiftWriterCandidate candidate = candidates[arg];
+            if (bool(usages[arg] & (hir::ArgumentUsage::SequentialRead | hir::ArgumentUsage::RandomRead))) { continue; }
             if (candidate.state != MaskShiftWriterCandidateState::ScalarOnly &&
                 candidate.state != MaskShiftWriterCandidateState::VectorAndScalar) {
                 continue;
