@@ -968,6 +968,130 @@ struct CompileState {
         return emit_vector_gather_indirect(data, vdtype, idx_dtype);
     }
 
+    void emit_vector_scatter_direct(const ScatterData &data, const VecR &value, VecDataType vdtype,
+                                    VecDataType idx_dtype) {
+        SIMJIT_ASSERT(data.idx->is(StepKind::Load));
+        SIMJIT_ASSERT(idx_dtype.nelems() == 2 || idx_dtype.nelems() == 4);
+
+        auto idx_data = data.idx->step_data<StepKind::Load>();
+        GpR indices[4];
+        for (uint32_t lane = 0; lane != idx_dtype.nelems(); ++lane) {
+            indices[lane] = cc.new_gp64();
+        }
+
+        if (SIMJIT_A64_ASMJIT_INDEX_REGS && index_regs[idx_data.addr.arg].gp.is_valid() &&
+            index_regs[idx_data.addr.arg].offset == idx_data.addr.offset) {
+            IndexRegState &state = index_regs[idx_data.addr.arg];
+            state.offset += idx_dtype.nelems();
+            int pair_size = (int)(idx_dtype.element_size_bytes() * 2);
+            for (uint32_t lane = 0; lane != idx_dtype.nelems(); lane += 2) {
+                aja64::Mem mem = aja64::ptr_post(state.gp, pair_size);
+                if (idx_dtype.elem == VecElemType::I32) {
+                    cc.ldpsw(indices[lane], indices[lane + 1], mem);
+                } else {
+                    cc.ldp(indices[lane], indices[lane + 1], mem);
+                }
+            }
+        } else {
+            const ArgInfo &idx_arg = args[idx_data.addr.arg];
+            GpR base = cc.new_gp64();
+            cc.add(base, idx_arg.gp, counter, aja64::lsl(idx_dtype.element_size_bytes_log2()));
+            if (idx_data.addr.offset != 0) {
+                cc.add(base, base, (int64_t)(idx_data.addr.offset << idx_dtype.element_size_bytes_log2()));
+            }
+            for (uint32_t lane = 0; lane != idx_dtype.nelems(); lane += 2) {
+                aja64::Mem mem = aja64::ptr(base, (int32_t)(lane * idx_dtype.element_size_bytes()));
+                if (idx_dtype.elem == VecElemType::I32) {
+                    cc.ldpsw(indices[lane], indices[lane + 1], mem);
+                } else {
+                    cc.ldp(indices[lane], indices[lane + 1], mem);
+                }
+            }
+        }
+
+        const ArgInfo &arg = args[data.dst];
+        for (uint32_t lane = 0; lane != vdtype.nelems(); ++lane) {
+            GpR idx = indices[lane];
+            if (lane == 0) {
+                aja64::Mem mem = mem_offset(arg.gp, idx, vdtype.to_scalar());
+                switch (vdtype.elem) {
+                case VecElemType::I8: cc.str(value.b(), mem); break;
+                case VecElemType::I16: cc.str(value.h(), mem); break;
+                case VecElemType::I32:
+                case VecElemType::F32: cc.str(value.s(), mem); break;
+                case VecElemType::I64:
+                case VecElemType::F64: cc.str(value.d(), mem); break;
+                }
+                continue;
+            }
+
+            GpR addr = cc.new_gp64();
+            cc.add(addr, arg.gp, idx.x(), aja64::lsl(vdtype.element_size_bytes_log2()));
+            switch (vdtype.elem) {
+            case VecElemType::I8: cc.st1(value.b(lane), aja64::ptr(addr)); break;
+            case VecElemType::I16: cc.st1(value.h(lane), aja64::ptr(addr)); break;
+            case VecElemType::I32:
+            case VecElemType::F32: cc.st1(value.s(lane), aja64::ptr(addr)); break;
+            case VecElemType::I64:
+            case VecElemType::F64: cc.st1(value.d(lane), aja64::ptr(addr)); break;
+            }
+        }
+    }
+
+    void emit_vector_scatter_indirect(const ScatterData &data, const VecR &value, VecDataType vdtype,
+                                      VecDataType idx_dtype) {
+        const ArgInfo &arg = args[data.dst];
+        VecR idx_vec = vec_subexpr(data.idx);
+
+        for (uint32_t lane = 0; lane != vdtype.nelems(); ++lane) {
+            GpR idx = idx_dtype.elem == VecElemType::I32 ? cc.new_gp32() : cc.new_gp64();
+            if (idx_dtype.elem == VecElemType::I32) {
+                cc.umov(idx.w(), idx_vec.s(lane));
+            } else {
+                cc.umov(idx.x(), idx_vec.d(lane));
+            }
+
+            if (lane == 0) {
+                aja64::Mem mem = mem_offset(arg.gp, idx, vdtype.to_scalar());
+                switch (vdtype.elem) {
+                case VecElemType::I8: cc.str(value.b(), mem); break;
+                case VecElemType::I16: cc.str(value.h(), mem); break;
+                case VecElemType::I32:
+                case VecElemType::F32: cc.str(value.s(), mem); break;
+                case VecElemType::I64:
+                case VecElemType::F64: cc.str(value.d(), mem); break;
+                }
+                continue;
+            }
+
+            GpR addr = cc.new_gp64();
+            cc.add(addr, arg.gp, idx.x(), aja64::lsl(vdtype.element_size_bytes_log2()));
+            switch (vdtype.elem) {
+            case VecElemType::I8: cc.st1(value.b(lane), aja64::ptr(addr)); break;
+            case VecElemType::I16: cc.st1(value.h(lane), aja64::ptr(addr)); break;
+            case VecElemType::I32:
+            case VecElemType::F32: cc.st1(value.s(lane), aja64::ptr(addr)); break;
+            case VecElemType::I64:
+            case VecElemType::F64: cc.st1(value.d(lane), aja64::ptr(addr)); break;
+            }
+        }
+    }
+
+    void emit_vector_scatter(const ScatterData &data, VecDataType vdtype) {
+        VecDataType idx_dtype = data.idx->dtype.as_vec();
+        if (idx_dtype.elem != VecElemType::I32 && idx_dtype.elem != VecElemType::I64) {
+            unsupported("Do not support %s gather index", show_vec_dtype(idx_dtype));
+        }
+        if (idx_dtype.nelems() != vdtype.nelems()) {
+            messed_up("Gather value/index lane count mismatch: value=%s index=%s", show_vec_dtype(vdtype),
+                      show_vec_dtype(idx_dtype));
+        }
+
+        VecR value = vec_subexpr(data.arg);
+        if (data.idx->is(StepKind::Load)) { return emit_vector_scatter_direct(data, value, vdtype, idx_dtype); }
+        return emit_vector_scatter_indirect(data, value, vdtype, idx_dtype);
+    }
+
     VecR emit_vec_narrow_combine(VecDataType vdtype, const VecR &low, const VecR &high) {
         VecR result = create_vec_reg(vdtype);
         switch (vdtype.elem) {
@@ -2066,10 +2190,15 @@ struct CompileState {
             SIMJIT_ASSERT(0);
             messed_up("Unexpected instruction %s", show_step_kind(step->kind));
 
-            SIMJIT_MATCH (StepKind::Gather) return emit_vector_gather(data, step->dtype.as_vec());
-            SIMJIT_MATCH (StepKind::Scatter) unsupported("Do not support scatter");
             SIMJIT_MATCH (StepKind::CondScatter) unsupported("Do not support cond scatter");
             SIMJIT_MATCH (StepKind::Ternarylogic) unsupported("Do not support ternarylogic");
+
+            // XXX: Both gather and scatter depend on accesses to parts of same register to NOT be serialized
+            // (i.e. ldr s1 and ld1.s { v1 }[1] execute in parallel).
+            // This is the case on Apple M CPUs, but I don't know about others.
+            SIMJIT_MATCH (StepKind::Gather) return emit_vector_gather(data, step->dtype.as_vec());
+            SIMJIT_MATCH (StepKind::Scatter) emit_vector_scatter(data, step->dtype.as_vec());
+            return {};
 
             SIMJIT_MATCH (StepKind::Pack) {
                 VecDataType vdtype = step->dtype.as_vec();

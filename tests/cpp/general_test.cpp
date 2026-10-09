@@ -2058,18 +2058,17 @@ std::vector<Test> general_tests{
         b.store(gathered, dst);
     }},
     {[](FunctionBuilder &b) {
-         // Scatter with index arithmetic
-         Value x = b.input_arg(I32);
-         Value idx = b.input_arg(I32);
-         Argument dst = b.arg(I32);
+        // Scatter with index arithmetic
+        Value x = b.input_arg(I32);
+        Value idx = b.input_arg(I32);
+        Argument dst = b.arg(I32);
 
-         // Compute index as (idx + 10) % 256
-         Value offset_idx = b.add(idx, b.i32(10));
-         Value safe_idx = b.and_(offset_idx, b.i32(0xFF)); // Keep in range 0-255
+        // Compute index as (idx + 10) % 256
+        Value offset_idx = b.add(idx, b.i32(10));
+        Value safe_idx = b.and_(offset_idx, b.i32(0xFF)); // Keep in range 0-255
 
-         b.scatter(x, safe_idx, dst);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        b.scatter(x, safe_idx, dst);
+    }},
     {[](FunctionBuilder &b) {
         // Use index value in arithmetic expression
         Value index_val = b.index(I32);
@@ -2091,33 +2090,31 @@ std::vector<Test> general_tests{
         b.store(gathered, dst);
     }},
     {[](FunctionBuilder &b) {
-         // Use index as index for scatter
-         Value value = b.input_arg(I32);
-         Value index_idx = b.index(I32);
+        // Use index as index for scatter
+        Value value = b.input_arg(I32);
+        Value index_idx = b.index(I32);
 
-         // Ensure index is within bounds
-         Value safe_idx = b.and_(index_idx, b.i32(0x1FF)); // 0-511
+        // Ensure index is within bounds
+        Value safe_idx = b.and_(index_idx, b.i32(0x1FF)); // 0-511
 
-         Argument dst = b.arg(I32);
-         b.scatter(value, safe_idx, dst);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        Argument dst = b.arg(I32);
+        b.scatter(value, safe_idx, dst);
+    }},
     {[](FunctionBuilder &b) {
-         // Gather from one array, process, scatter to another
-         Argument src_array = b.arg(I32);
-         Argument dst_array = b.arg(I32);
-         Value idx = b.input_arg(I32);
+        // Gather from one array, process, scatter to another
+        Argument src_array = b.arg(I32);
+        Argument dst_array = b.arg(I32);
+        Value idx = b.input_arg(I32);
 
-         // Gather value
-         Value gathered = b.gather(idx, src_array);
+        // Gather value
+        Value gathered = b.gather(idx, src_array);
 
-         // Process: multiply by 2
-         Value processed = b.mul(gathered, b.i32(2));
+        // Process: multiply by 2
+        Value processed = b.mul(gathered, b.i32(2));
 
-         // Scatter to destination
-         b.scatter(processed, idx, dst_array);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        // Scatter to destination
+        b.scatter(processed, idx, dst_array);
+    }},
     {[](FunctionBuilder &b) {
         // Multiple gathers from same array at different indices
         Argument array = b.arg(I32);
@@ -2135,17 +2132,16 @@ std::vector<Test> general_tests{
         b.store(sum, dst);
     }},
     {[](FunctionBuilder &b) {
-         // Scatter a computed value
-         Value idx = b.input_arg(I32);
-         Argument dst = b.arg(I32);
+        // Scatter a computed value
+        Value idx = b.input_arg(I32);
+        Argument dst = b.arg(I32);
 
-         // Compute value based on index
-         Value value = b.mul(idx, b.i32(10));
+        // Compute value based on index
+        Value value = b.mul(idx, b.i32(10));
 
-         // Scatter computed value
-         b.scatter(value, idx, dst);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        // Scatter computed value
+        b.scatter(value, idx, dst);
+    }},
     {[](FunctionBuilder &b) {
          // Gather using permuted index
          Argument array = b.arg(I32);
@@ -2169,57 +2165,54 @@ std::vector<Test> general_tests{
         b.store(shifted, dst);
     }},
     {[](FunctionBuilder &b) {
-         // Complex pattern: gather, process, scatter to different location
-         Argument src = b.arg(I32);
-         Argument dst = b.arg(I32);
-         Value idx = b.input_arg(I32);
+        // Complex pattern: gather, process, scatter to different location
+        Argument src = b.arg(I32);
+        Argument dst = b.arg(I32);
+        Value idx = b.input_arg(I32);
 
-         // Gather value
-         Value val = b.gather(idx, src);
+        // Gather value
+        Value val = b.gather(idx, src);
 
-         // Complex processing: (val * 3 + 7) & 0xFF
-         Value processed = b.mul(val, b.i32(3));
-         processed = b.add(processed, b.i32(7));
-         processed = b.and_(processed, b.i32(0xFF));
+        // Complex processing: (val * 3 + 7) & 0xFF
+        Value processed = b.mul(val, b.i32(3));
+        processed = b.add(processed, b.i32(7));
+        processed = b.and_(processed, b.i32(0xFF));
 
-         // Scatter to index + 100 (with bounds check)
-         Value dst_idx = b.add(idx, b.i32(100));
-         Value safe_dst_idx = b.and_(dst_idx, b.i32(0x3FF)); // 0-1023
+        // Scatter to index + 100 (with bounds check)
+        Value dst_idx = b.add(idx, b.i32(100));
+        Value safe_dst_idx = b.and_(dst_idx, b.i32(0x3FF)); // 0-1023
 
-         b.scatter(processed, safe_dst_idx, dst);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        b.scatter(processed, safe_dst_idx, dst);
+    }},
     {[](FunctionBuilder &b) {
-         // I64 gather and scatter
-         Value idx_i64 = b.input_arg(I64);
-         Argument array_i64 = b.arg(I64);
-         Argument dst_i64 = b.arg(I64);
+        // I64 gather and scatter
+        Value idx_i64 = b.input_arg(I64);
+        Argument array_i64 = b.arg(I64);
+        Argument dst_i64 = b.arg(I64);
 
-         // Gather I64 value
-         Value gathered_i64 = b.gather(idx_i64, array_i64);
+        // Gather I64 value
+        Value gathered_i64 = b.gather(idx_i64, array_i64);
 
-         // Scatter to different location (index + 1)
-         Value dst_idx = b.add(idx_i64, b.i64(1));
-         Value safe_dst_idx = b.and_(dst_idx, b.i64(0x3FF)); // Bound check
+        // Scatter to different location (index + 1)
+        Value dst_idx = b.add(idx_i64, b.i64(1));
+        Value safe_dst_idx = b.and_(dst_idx, b.i64(0x3FF)); // Bound check
 
-         b.scatter(gathered_i64, safe_dst_idx, dst_i64);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        b.scatter(gathered_i64, safe_dst_idx, dst_i64);
+    }},
     {[](FunctionBuilder &b) {
-         // Use index as both index and value
-         Argument dst = b.arg(I32);
-         Value index_val = b.index(I32);
+        // Use index as both index and value
+        Argument dst = b.arg(I32);
+        Value index_val = b.index(I32);
 
-         // Use index as index (with modulo)
-         Value idx = b.and_(index_val, b.i32(0xFF)); // 0-255
+        // Use index as index (with modulo)
+        Value idx = b.and_(index_val, b.i32(0xFF)); // 0-255
 
-         // Use index as value
-         Value value = b.add(index_val, b.i32(100));
+        // Use index as value
+        Value value = b.add(index_val, b.i32(100));
 
-         // Scatter
-         b.scatter(value, idx, dst);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        // Scatter
+        b.scatter(value, idx, dst);
+    }},
     {[](FunctionBuilder &b) {
         // Gather from array with offset
         Argument base_array = b.arg(I32);
@@ -2235,56 +2228,53 @@ std::vector<Test> general_tests{
         b.store(gathered, dst);
     }},
     {[](FunctionBuilder &b) {
-         // Scatter same value to multiple indices
-         Value value = b.input_arg(I32);
-         Value idx1 = b.input_arg(I32);
-         Value idx2 = b.input_arg(I32);
-         Argument dst = b.arg(I32);
-         Argument dst2 = b.arg(I32);
+        // Scatter same value to multiple indices
+        Value value = b.input_arg(I32);
+        Value idx1 = b.input_arg(I32);
+        Value idx2 = b.input_arg(I32);
+        Argument dst = b.arg(I32);
+        Argument dst2 = b.arg(I32);
 
-         // Scatter to first index
-         b.scatter(value, idx1, dst);
+        // Scatter to first index
+        b.scatter(value, idx1, dst);
 
-         // Scatter to second index
-         b.scatter(value, idx2, dst2);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        // Scatter to second index
+        b.scatter(value, idx2, dst2);
+    }},
     {[](FunctionBuilder &b) {
-         // Gather I32, convert to I64, scatter as I64
-         Argument src_i32 = b.arg(I32);
-         Argument dst_i64 = b.arg(I64);
-         Value idx = b.input_arg(I32);
+        // Gather I32, convert to I64, scatter as I64
+        Argument src_i32 = b.arg(I32);
+        Argument dst_i64 = b.arg(I64);
+        Value idx = b.input_arg(I32);
 
-         // Gather I32 value
-         Value gathered_i32 = b.gather(idx, src_i32);
+        // Gather I32 value
+        Value gathered_i32 = b.gather(idx, src_i32);
 
-         // Convert to I64
-         Value gathered_i64 = b.sext(gathered_i32, I64);
+        // Convert to I64
+        Value gathered_i64 = b.sext(gathered_i32, I64);
 
-         // Scale I64 value
-         Value scaled_i64 = b.mul(gathered_i64, b.i64(100));
+        // Scale I64 value
+        Value scaled_i64 = b.mul(gathered_i64, b.i64(100));
 
-         // Scatter to I64 array (need to convert index to I64)
-         Value idx_i64 = b.sext(idx, I64);
-         Value safe_idx = b.and_(idx_i64, b.i64(0x1FF)); // 0-511
+        // Scatter to I64 array (need to convert index to I64)
+        Value idx_i64 = b.sext(idx, I64);
+        Value safe_idx = b.and_(idx_i64, b.i64(0x1FF)); // 0-511
 
-         b.scatter(scaled_i64, safe_idx, dst_i64);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        b.scatter(scaled_i64, safe_idx, dst_i64);
+    }},
     {[](FunctionBuilder &b) {
-         // Use index to generate complex pattern
-         Argument dst = b.arg(I32);
-         Value index_val = b.index(I32);
+        // Use index to generate complex pattern
+        Argument dst = b.arg(I32);
+        Value index_val = b.index(I32);
 
-         // Generate pattern: (index * 3) % 256
-         Value pattern = b.mul(index_val, b.i32(3));
-         pattern = b.and_(pattern, b.i32(0xFF));
+        // Generate pattern: (index * 3) % 256
+        Value pattern = b.mul(index_val, b.i32(3));
+        pattern = b.and_(pattern, b.i32(0xFF));
 
-         // Scatter pattern at index index
-         Value idx = b.and_(index_val, b.i32(0xFF));
-         b.scatter(pattern, idx, dst);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        // Scatter pattern at index index
+        Value idx = b.and_(index_val, b.i32(0xFF));
+        b.scatter(pattern, idx, dst);
+    }},
     {[](FunctionBuilder &b) {
         // Basic integer comparisons producing I1 results
         Value a = b.input_arg(I32);
@@ -3285,37 +3275,36 @@ std::vector<Test> general_tests{
          .limitation(TestVariant::ArmVector)
          .vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
     {[](FunctionBuilder &b) {
-         // Complex expression involving gather/scatter with arithmetic
-         Value idx = b.input_arg(I32);
-         Value value = b.input_arg(I32);
-         Argument src_array = b.arg(I32);
-         Argument dst_array = b.arg(I32);
+        // Complex expression involving gather/scatter with arithmetic
+        Value idx = b.input_arg(I32);
+        Value value = b.input_arg(I32);
+        Argument src_array = b.arg(I32);
+        Argument dst_array = b.arg(I32);
 
-         // Ensure index is safe
-         Value safe_idx = b.and_(idx, b.i32(0x3FF)); // 0-1023
+        // Ensure index is safe
+        Value safe_idx = b.and_(idx, b.i32(0x3FF)); // 0-1023
 
-         // Gather value from source array
-         Value gathered = b.gather(safe_idx, src_array);
+        // Gather value from source array
+        Value gathered = b.gather(safe_idx, src_array);
 
-         // Complex arithmetic processing
-         Value processed = b.add(gathered, value);
-         processed = b.mul(processed, b.i32(3));
-         processed = b.sra(processed, b.i32(2));
+        // Complex arithmetic processing
+        Value processed = b.add(gathered, value);
+        processed = b.mul(processed, b.i32(3));
+        processed = b.sra(processed, b.i32(2));
 
-         // Condition based on bit test
-         Predicate cond = b.bit_test(processed, b.i32(0x01)); // Test LSB
+        // Condition based on bit test
+        Predicate cond = b.bit_test(processed, b.i32(0x01)); // Test LSB
 
-         // Conditional further processing
-         processed = b.select(cond, b.add(processed, b.i32(100)), // if LSB set
-                              b.sub(processed, b.i32(50))         // if LSB not set
-         );
+        // Conditional further processing
+        processed = b.select(cond, b.add(processed, b.i32(100)), // if LSB set
+                             b.sub(processed, b.i32(50))         // if LSB not set
+        );
 
-         // Scatter processed value
-         Value dst_idx = b.add(safe_idx, b.i32(100));
-         Value safe_dst_idx = b.and_(dst_idx, b.i32(0x3FF));
-         b.scatter(processed, safe_dst_idx, dst_array);
-     },
-     LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+        // Scatter processed value
+        Value dst_idx = b.add(safe_idx, b.i32(100));
+        Value safe_dst_idx = b.and_(dst_idx, b.i32(0x3FF));
+        b.scatter(processed, safe_dst_idx, dst_array);
+    }},
     {[](FunctionBuilder &b) {
         // Deep tree of logical operations with arithmetic leaves
         Value a = b.input_arg(I32);

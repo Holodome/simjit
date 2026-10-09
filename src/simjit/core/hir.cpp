@@ -75,7 +75,7 @@ SpecialOp supported_vector_special_ops_for_arch(Arch arch) noexcept {
                SpecialOp::LargePopcount | SpecialOp::I8ConstantShift;
     case Arch::Arm64_NEON:
         return SpecialOp::Gather | SpecialOp::SmallPack | SpecialOp::SmallPopcount | SpecialOp::LargePopcount |
-               SpecialOp::I8ConstantShift;
+               SpecialOp::I8ConstantShift | SpecialOp::Scatter;
     }
     SIMJIT_UNREACHABLE();
 }

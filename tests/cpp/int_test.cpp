@@ -4037,7 +4037,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I32);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, x, idx, dst):
     for i in range(n):
@@ -4049,7 +4049,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I32);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, x, idx, dst):
     for i in range(n):
@@ -4061,7 +4061,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I8);
              b.scatter(x, idx, dst);
          },
-         ONLY_SCALAR,
+         {},
          R"FOO(
 def func(n, x, idx, dst): 
     for i in range(n):
@@ -4085,7 +4085,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I32);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, x, idx, dst): 
     for i in range(n):
@@ -4097,7 +4097,8 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I64);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector,
+                                                simjit::ErrorSubKind::CoefficientRangeNeedsNormalization),
          R"FOO(
 def func(n, x, idx, dst): 
     for i in range(n):
@@ -4134,7 +4135,8 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I32);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector,
+                                                simjit::ErrorSubKind::CoefficientRangeNeedsNormalization),
          R"FOO(
 def func(n, x, idx, dst): 
     for i in range(n):
@@ -4146,7 +4148,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I64);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, x, idx, dst):
     for i in range(n):
@@ -4646,7 +4648,7 @@ def func(n, dst, chosen, dead_cond_input):
              Predicate cond = b.cmp_eq(dead_cond_input, dead_cond_input);
              b.cond_scatter(chosen, b.index(I32), cond, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, dst, chosen, dead_cond_input):
     for i in range(n):

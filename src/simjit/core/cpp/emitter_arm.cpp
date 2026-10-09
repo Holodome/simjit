@@ -1113,6 +1113,27 @@ struct ArmNeonCppEmitter : CppEmitterBase {
         return values;
     }
 
+    std::string vector_scatter_to_cpp(const Step *step, const ScatterData &data) {
+        if (!step->dtype.is_vec() || !data.idx->dtype.is_vec()) {
+            return unexpected_step_dtype(step, "vector gather with vector index");
+        }
+
+        VecDataType dtype = step->dtype.as_vec();
+        VecDataType idx_dtype = data.idx->dtype.as_vec();
+        if ((idx_dtype.elem != VecElemType::I32 && idx_dtype.elem != VecElemType::I64) ||
+            idx_dtype.nelems() != dtype.nelems()) {
+            return unexpected_step_dtype(step, "vector gather with matching i32 or i64 index");
+        }
+
+        std::string values{};
+        for (size_t lane = 0; lane < dtype.nelems(); ++lane) {
+            format_to(values, "arg%zu[%s] = %s;", data.dst, lane_expr(data.idx, lane).c_str(),
+                      lane_expr(data.arg, lane).c_str());
+        }
+
+        return values;
+    }
+
     static std::string lane_get_intrin(VecDataType dtype, bool is_unsigned = false) {
         const char *q = dtype.size_bytes() == 16 ? "q" : "";
         const char *suffix = is_unsigned ? arm_unsigned_vec_suffix(dtype.elem) : arm_vec_suffix(dtype.elem);
@@ -2175,7 +2196,7 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
         case StepKind::IntCast: return int_cast_to_cpp(step, step->step_data<StepKind::IntCast>());
         case StepKind::FloatCast: return float_cast_to_cpp(step, step->step_data<StepKind::FloatCast>());
         case StepKind::Gather: return vector_gather_to_cpp(step, step->step_data<StepKind::Gather>());
-        case StepKind::Scatter: unsupported("Do not support scatter");
+        case StepKind::Scatter: return vector_scatter_to_cpp(step, step->step_data<StepKind::Scatter>());
         case StepKind::CondScatter: unsupported("Do not support cond scatter");
         case StepKind::Pack: return pack_to_cpp(step->step_data<StepKind::Pack>(), step);
         case StepKind::Ternarylogic: return ternarylogic_to_cpp(step, step->step_data<StepKind::Ternarylogic>());
