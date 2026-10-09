@@ -2593,28 +2593,24 @@ struct CompileState {
                     if (vdtype.elem == VecElemType::I64) { unsupported("Do not support i64 mul"); }
                     cc.mul(result, left, right);
                     break;
-                case ArithBinaryOp::Mul64SE:
-                    if (vdtype.elem == VecElemType::I64) {
-                        VecR left32 = cc.new_vec128().s2();
-                        VecR right32 = cc.new_vec128().s2();
-                        cc.xtn(left32, left.d2());
-                        cc.xtn(right32, right.d2());
-                        cc.smull(result.d2(), left32, right32);
-                        break;
-                    }
-                    cc.smull(result, left, right);
+                case ArithBinaryOp::Mul64SE: {
+                    SIMJIT_ASSERT(vdtype.elem == VecElemType::I64);
+                    VecR left32 = cc.new_vec128().s2();
+                    VecR right32 = cc.new_vec128().s2();
+                    cc.xtn(left32, left.d2());
+                    cc.xtn(right32, right.d2());
+                    cc.smull(result.d2(), left32, right32);
                     break;
-                case ArithBinaryOp::Mul64ZE:
-                    if (vdtype.elem == VecElemType::I64) {
-                        VecR left32 = cc.new_vec128().s2();
-                        VecR right32 = cc.new_vec128().s2();
-                        cc.xtn(left32, left.d2());
-                        cc.xtn(right32, right.d2());
-                        cc.umull(result.d2(), left32, right32);
-                        break;
-                    }
-                    cc.umull(result, left, right);
+                }
+                case ArithBinaryOp::Mul64ZE: {
+                    SIMJIT_ASSERT(vdtype.elem == VecElemType::I64);
+                    VecR left32 = cc.new_vec128().s2();
+                    VecR right32 = cc.new_vec128().s2();
+                    cc.xtn(left32, left.d2());
+                    cc.xtn(right32, right.d2());
+                    cc.umull(result.d2(), left32, right32);
                     break;
+                }
                 case ArithBinaryOp::Min:
                     if (vdtype.elem == VecElemType::I64) {
                         // There is no direct encoding but this case is easy enough to write by hand

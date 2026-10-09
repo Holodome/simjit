@@ -1461,6 +1461,11 @@ Value FunctionBuilder::arith_binary(Value left, Value right, ArithBinaryOp op, A
                      show_arith_binary_op(op), show_scalar_dtype(left.dtype()), show_scalar_dtype(right.dtype()));
     }
 
+    if ((op == ArithBinaryOp::Mul64SE || op == ArithBinaryOp::Mul64ZE) && left.dtype() != ScalarDataType::I64) {
+        invalid_type("Binary operation %s requires i64 operands, got %s", show_arith_binary_op(op),
+                     show_scalar_dtype(left.dtype()));
+    }
+
     bool safety_check = bool(flags & ArithBinaryOpFlags::SafetyCheck);
     if (bool(flags & ArithBinaryOpFlags::SafeDivision)) {
         if (!is_division_op) {

@@ -196,6 +196,16 @@ static void add_low_level_api_tests(std::vector<Test> &tests) {
     add_invalid(tests, [](FunctionBuilder &b) {
         Value x = b.input_arg(I32);
         Value y = b.input_arg(I32);
+        b.output_arg(b.arith_binary(x, y, ArithBinaryOp::Mul64SE));
+    });
+    add_invalid(tests, [](FunctionBuilder &b) {
+        Value x = b.input_arg(I32);
+        Value y = b.input_arg(I32);
+        b.output_arg(b.arith_binary(x, y, ArithBinaryOp::Mul64ZE));
+    });
+    add_invalid(tests, [](FunctionBuilder &b) {
+        Value x = b.input_arg(I32);
+        Value y = b.input_arg(I32);
         b.output_arg(b.arith_binary(x, y, ArithBinaryOp::Add, ArithBinaryOpFlags::SafeDivision));
     });
     add_invalid(tests, [](FunctionBuilder &b) {
