@@ -516,70 +516,39 @@ struct CompileState {
         return {left, shrink_mask(right, right_size, left_size)};
     }
 
-    aja64::Mem vec_mem(const ArgumentAddress &addr, VecDataType dtype, bool change_post_idx = true) {
+    aja64::Mem row_address(const ArgumentAddress &addr, size_t elem_log2, size_t elems_per_row_log2,
+                           size_t stride_elems, bool change_post_idx = true) {
         if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
             if (auto &state = index_regs[addr.arg]; state.gp.is_valid()) {
-                if (!change_post_idx && state.offset == addr.offset) { return aja64::ptr(state.gp); }
                 if (state.offset == addr.offset) {
-                    state.offset += dtype.nelems();
-                    return aja64::ptr_post(state.gp, (int)dtype.size_bytes());
+                    if (!change_post_idx) { return aja64::ptr(state.gp); }
+                    state.offset += stride_elems;
+                    return aja64::ptr_post(state.gp, (int)(stride_elems << elem_log2));
                 }
             }
         }
         GpR base = args[addr.arg].gp;
         GpR tmp = cc.new_gp64();
-        cc.add(tmp, base, counter, aja64::lsl(dtype.element_size_bytes_log2()));
-        if (addr.offset != 0) { cc.add(tmp, tmp, addr.offset << dtype.element_size_bytes_log2()); }
+        cc.add(tmp, base, counter, aja64::lsl(elem_log2 + elems_per_row_log2));
+        if (addr.offset != 0) { cc.add(tmp, tmp, addr.offset << elem_log2); }
         return aja64::ptr(tmp);
     }
 
+    aja64::Mem vec_mem(const ArgumentAddress &addr, VecDataType dtype, bool change_post_idx = true) {
+        return row_address(addr, dtype.element_size_bytes_log2(), 0, dtype.nelems(), change_post_idx);
+    }
+
     aja64::Mem vec_pair_mem(const ArgumentAddress &addr, VecDataType dtype) {
-        if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
-            if (auto &state = index_regs[addr.arg]; state.gp.is_valid()) {
-                if (state.offset == addr.offset) {
-                    state.offset += dtype.nelems() * 2;
-                    return aja64::ptr_post(state.gp, (int)dtype.size_bytes() * 2);
-                }
-            }
-        }
-        GpR base = args[addr.arg].gp;
-        GpR tmp = cc.new_gp64();
-        cc.add(tmp, base, counter, aja64::lsl(dtype.element_size_bytes_log2()));
-        if (addr.offset != 0) { cc.add(tmp, tmp, addr.offset << dtype.element_size_bytes_log2()); }
-        return aja64::ptr(tmp);
+        return row_address(addr, dtype.element_size_bytes_log2(), 0, dtype.nelems() * 2);
     }
 
     // Address of an interleaved pair. `addr` must be the pair base (lane 0 offset).
     aja64::Mem vec_deinterleave_mem(const ArgumentAddress &pair_base, VecDataType dtype) {
-        if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
-            if (auto &state = index_regs[pair_base.arg]; state.gp.is_valid()) {
-                if (state.offset == pair_base.offset) {
-                    state.offset += dtype.nelems() * 2;
-                    return aja64::ptr_post(state.gp, (int)dtype.size_bytes() * 2);
-                }
-            }
-        }
-        GpR base = args[pair_base.arg].gp;
-        GpR tmp = cc.new_gp64();
-        cc.add(tmp, base, counter, aja64::lsl(dtype.element_size_bytes_log2() + 1));
-        if (pair_base.offset != 0) { cc.add(tmp, tmp, pair_base.offset << dtype.element_size_bytes_log2()); }
-        return aja64::ptr(tmp);
+        return row_address(pair_base, dtype.element_size_bytes_log2(), 1, dtype.nelems() * 2);
     }
 
     aja64::Mem scalar_mem(const ArgumentAddress &addr, ScalarDataType sdtype) {
-        if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
-            if (auto &state = index_regs[addr.arg]; state.gp.is_valid()) {
-                if (state.offset == addr.offset) {
-                    state.offset += 1;
-                    return aja64::ptr_post(state.gp, (int)scalar_dtype_size(sdtype));
-                }
-            }
-        }
-        GpR base = args[addr.arg].gp;
-        GpR tmp = cc.new_gp64();
-        cc.add(tmp, base, counter, aja64::lsl(scalar_dtype_size_log2(sdtype)));
-        if (addr.offset != 0) { cc.add(tmp, tmp, addr.offset << scalar_dtype_size_log2(sdtype)); }
-        return aja64::ptr(tmp);
+        return row_address(addr, scalar_dtype_size_log2(sdtype), 0, 1);
     }
 
     aja64::Mem mask_mem(const ArgumentAddress &addr, MaskDataType mdtype) {
