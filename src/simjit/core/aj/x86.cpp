@@ -1916,6 +1916,28 @@ struct CompileState {
                 scalar_mov(cc, result, mem, sdtype);
                 return result;
             }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (data.lane_count != 2 || data.lane >= data.lane_count || sdtype == ScalarDataType::I1) {
+                    unsupported("Unsupported scalar load-deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                size_t elem_log2 = scalar_dtype_size_log2(sdtype);
+                int32_t disp = int32_t(uint32_t(data.lane) << elem_log2);
+                GpR base = args[data.addr.arg].gp;
+                ax86::Mem mem{};
+                switch (sdtype) {
+                case ScalarDataType::I1: messed_up("can't have i1 deinterleave");
+                case ScalarDataType::I8: mem = ax86::byte_ptr(base, counter, 1, disp); break;
+                case ScalarDataType::I16: mem = ax86::word_ptr(base, counter, 2, disp); break;
+                case ScalarDataType::I32:
+                case ScalarDataType::F32: mem = ax86::dword_ptr(base, counter, 3, disp); break;
+                case ScalarDataType::I64:
+                case ScalarDataType::F64: mem = ax86::qword_ptr(base, counter, 4, disp); break;
+                case ScalarDataType::I128: messed_up("can't have i128 deinterleave");
+                }
+                AnyR result = create_scalar_reg(sdtype);
+                scalar_mov(cc, result, mem, sdtype);
+                return result;
+            }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 const ArgInfo &arg = args[data.addr.arg];
                 AnyR result = create_scalar_reg(sdtype);
@@ -3885,6 +3907,9 @@ struct CompileState {
                 }
                 return result;
             }
+            // Unreachable today: deinterleave is not in the x86 vector special-op set, so vectorized MIR can
+            // not contain this step. Kept as last-resort protection per backend conventions.
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) unsupported("Do not support vectorized load-deinterleave");
         }
         SIMJIT_UNREACHABLE();
     }

@@ -205,8 +205,11 @@ BundleCasePtr parse_bundle_line(std::string_view line, size_t line_number, size_
     for (const auto &arg_value : *args) {
         auto *arg = arg_value.getAsObject();
         if (!arg) { throw std::runtime_error(std::format("bundle line {} has a non-object argument", line_number)); }
+        size_t row_width = 1;
+        if (auto value = arg->getInteger("row_width")) { row_width = size_t(*value); }
         item->args.push_back(ArgumentInfo{parse_dtype(required_string(*arg, "dtype", line_number), line_number),
-                                          parse_kind(required_string(*arg, "kind", line_number), line_number)});
+                                          parse_kind(required_string(*arg, "kind", line_number), line_number),
+                                          row_width});
     }
 
     for (const auto &code_value : *codes) {

@@ -2131,6 +2131,22 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             return cpp_var_decl(step) +
                    format("%s(arg%zu + i%s)", arm_intrin_name("ld1", dtype).c_str(), data.addr.arg, offset.c_str());
         }
+        case StepKind::LoadDeinterleave: {
+            const auto &data = step->step_data<StepKind::LoadDeinterleave>();
+            if (step->dtype.is_mask() || !step->dtype.is_vec()) { return unexpected_step_dtype(step, "vector"); }
+            if (data.lane_count != 2 || data.lane >= data.lane_count) {
+                unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
+            }
+            VecDataType dtype = step->dtype.as_vec();
+            std::string vec_type = arm_vec_dtype_cpp(dtype);
+            std::string pair_type = vec_type.substr(0, vec_type.size() - 2) + "x2_t";
+            std::string tmp = format("ld2%u", step->id);
+            size_t pair_base = data.addr.offset * data.lane_count;
+            std::string offset = format("2 * i%s", offset_suffix(pair_base).c_str());
+            return format("%s %s = %s(arg%zu + %s);\n", pair_type.c_str(), tmp.c_str(),
+                          arm_intrin_name("ld2", dtype).c_str(), data.addr.arg, offset.c_str()) +
+                   cpp_var_decl(step) + format("%s.val[%u]", tmp.c_str(), data.lane);
+        }
         case StepKind::Store: {
             const auto &data = step->step_data<StepKind::Store>();
             if (step->dtype.is_mask()) { return mask_store_to_cpp(data, step); }

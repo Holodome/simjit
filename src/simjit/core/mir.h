@@ -179,6 +179,13 @@ struct LoadData {
     LoadStoreKind kind;
 };
 
+struct LoadDeinterleaveData {
+    ArgumentAddress addr{};
+    LoadStoreKind kind{};
+    uint8_t lane_count = 2;
+    uint8_t lane = 0;
+};
+
 struct StoreSum128Data {
     ArenaArray<Step *> low_steps;
     Step *hi_combined;
@@ -234,6 +241,7 @@ struct ConstDivData {
 enum class StepKind : uint8_t {
     Const,
     Load,
+    LoadDeinterleave,
     LoadSplat,
     Gather,
     Store,
@@ -304,6 +312,7 @@ private:
         ConstData con;
         AccId acc_move;
         LoadData load;
+        LoadDeinterleaveData load_deinterleave;
         AccStoreData acc_store;
         AggResultData agg_result;
         ArithReduceData ab_reduce;
@@ -343,6 +352,7 @@ enum class AllowedDataTypes : uint8_t {
 #define MIR_STEP_DATA_LIST(X)                                                     \
     X(con, Const, con, Any)                                                       \
     X(load, Load, load, Any)                                                      \
+    X(load_deinterleave, LoadDeinterleave, load_deinterleave, Any)                \
     X(load_splat, LoadSplat, load, Any)                                           \
     X(gather, Gather, gather, ScalarOrVec)                                        \
     X(store, Store, store, Any)                                                   \
@@ -426,6 +436,7 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
     case StepKind::Const:
     case StepKind::VecConst:
     case StepKind::Load:
+    case StepKind::LoadDeinterleave:
     case StepKind::AccLoad:
     case StepKind::LoadSplat:
     case StepKind::ScalarIndex:
@@ -674,11 +685,37 @@ struct AccumulatorInfo {
     }
 };
 
+// A pair of deinterleave lanes of one argument: even elements (lane 0) and odd elements (lane 1).
+struct InterleavePair {
+    Step *even = nullptr;
+    Step *odd = nullptr;
+};
+
+// Per-argument list of interleaved pairs in construction order; filled during MIR construction.
+struct ArgumentInterleave {
+    ArenaArray<InterleavePair> pairs;
+
+    // Returns the sibling lane of `step` or nullptr when the sibling lane is unused or absent.
+    Step *find_partner(const Step *step) const noexcept {
+        for (const InterleavePair &pair : pairs) {
+            if (pair.even == step) { return pair.odd; }
+            if (pair.odd == step) { return pair.even; }
+        }
+        return nullptr;
+    }
+};
+
+// Pairing information for vectorized LoadDeinterleave steps.
+struct InterleaveInfo {
+    ArenaArray<ArgumentInterleave> by_argument; // one per argument
+};
+
 struct Function {
     Context *ctx;
     const hir::Function *source_hir = nullptr;
     ArenaArray<ArgumentDecl> args;
     AccumulatorInfo accs;
+    InterleaveInfo interleave;
     ArenaArray<Step *> prologue_roots;
     ArenaArray<Step *> main_loop_roots;
     ArenaArray<Step *> remainder_roots;
@@ -696,6 +733,7 @@ constexpr bool is_scalar_step(StepKind kind) noexcept {
     switch (kind) {
     case StepKind::Const:
     case StepKind::Load:
+    case StepKind::LoadDeinterleave:
     case StepKind::LoadSplat:
     case StepKind::Gather:
     case StepKind::Store:

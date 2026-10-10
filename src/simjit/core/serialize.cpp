@@ -236,6 +236,7 @@ template <> struct hl::from_list<simjit::hir::StepKind> {
         if (s == "load-splat") return simjit::hir::StepKind::LoadSplat;
         if (s == "const") return simjit::hir::StepKind::Const;
         if (s == "load") return simjit::hir::StepKind::Load;
+        if (s == "load-deinterleave") return simjit::hir::StepKind::LoadDeinterleave;
         if (s == "gather") return simjit::hir::StepKind::Gather;
         if (s == "binary") return simjit::hir::StepKind::ArithBinary;
         if (s == "checked-op") return simjit::hir::StepKind::CheckedOp;
@@ -419,6 +420,10 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
         }
         SIMJIT_MATCH (StepKind::Load) {
             payload = hl::list(serialize_arg_ref(data.idx), data.kind);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+            payload = hl::list(serialize_arg_ref(data.idx), data.kind, data.lane_count, data.lane);
             break;
         }
         SIMJIT_MATCH (StepKind::LoadSplat) {
@@ -681,6 +686,14 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         auto [func_arg, load_kind] = bind_step(hl::cap, hl::cap_as<LoadStoreKind>);
         if (dtype == ScalarDataType::I1) { return builder.load_predicate(parse_arg_ref(func_arg)); }
         return builder.load(parse_arg_ref(func_arg), load_kind);
+    }
+    case StepKind::LoadDeinterleave: {
+        auto [func_arg, load_kind, lane_count, lane] =
+            bind_step(hl::cap, hl::cap_as<LoadStoreKind>, hl::cap_as<int>, hl::cap_as<int>);
+        if (lane_count < 2 || lane >= lane_count) {
+            serialization_error("Invalid deinterleave lane metadata %d/%d", lane, lane_count);
+        }
+        return builder.load_deinterleave(parse_arg_ref(func_arg), lane_count, lane, load_kind);
     }
     case StepKind::Gather: {
         auto [idx, func_arg] = bind_step(hl::cap, hl::cap);

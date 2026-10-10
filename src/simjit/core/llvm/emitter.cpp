@@ -505,6 +505,16 @@ struct LLVMBuilder {
                 if (data.addr.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.addr.offset)); }
                 return b->CreateLoad(info.element_type, index_arg(info, off));
             }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (data.lane_count != 2 || data.lane >= data.lane_count || step->dtype == ScalarDataType::I1) {
+                    messed_up("Unsupported scalar load-deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                ArgInfo &info = func_args[data.addr.arg];
+                V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
+                off = b->CreateNUWMul(off, b->getInt64(data.lane_count));
+                if (data.lane) { off = b->CreateNUWAdd(off, b->getInt64(data.lane)); }
+                return b->CreateLoad(info.element_type, index_arg(info, off));
+            }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 ArgInfo &info = func_args[data.addr.arg];
                 if (step->dtype == ScalarDataType::I1) {
@@ -898,6 +908,34 @@ struct LLVMBuilder {
                     inst = b->CreateAlignedLoad(llvm_type, idx, {});
                 }
                 return inst;
+            }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask load-deinterleave"); }
+                if (data.lane_count != 2 || data.lane >= data.lane_count) {
+                    unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                VecDataType vdtype = step->dtype.as_vec();
+                size_t width = vdtype.nelems();
+                ArgInfo &info = func_args[data.addr.arg];
+                V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
+                off = b->CreateNUWMul(off, b->getInt64(data.lane_count));
+                size_t base_offset = data.addr.offset * data.lane_count;
+                if (base_offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(base_offset)); }
+                llvm::VectorType *pair_type =
+                    llvm::VectorType::get(info.element_type, llvm::ElementCount::getFixed(width * data.lane_count));
+                V *idx = index_arg(info, off);
+                llvm::LoadInst *wide = nullptr;
+                if (data.kind == LoadStoreKind::Unaligned) {
+                    wide = b->CreateLoad(pair_type, idx);
+                    wide->setAlignment(llvm::Align{1});
+                } else {
+                    wide = b->CreateAlignedLoad(pair_type, idx, {});
+                }
+                llvm::SmallVector<int, 64> lane_indices;
+                for (size_t i = 0; i < width; ++i) {
+                    lane_indices.push_back(int(i * data.lane_count + data.lane));
+                }
+                return b->CreateShuffleVector(wide, wide, lane_indices);
             }
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 V *left = step_to_llvm(data.left);

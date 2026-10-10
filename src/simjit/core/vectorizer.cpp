@@ -1437,6 +1437,7 @@ struct AlgebraicVectorizer {
         case StepKind::IntCast:
         case StepKind::FloatCast:
         case StepKind::Load:
+        case StepKind::LoadDeinterleave:
         case StepKind::Gather:
         case StepKind::Fpclass:
         case StepKind::LoadSplat:

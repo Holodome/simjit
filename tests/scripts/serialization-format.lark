@@ -25,6 +25,7 @@ scalar_only_section: "(" "scalar-only" ")"
 
 step: const_step
     | load_step
+    | load_deinterleave_step
     | load_splat_step
     | index_step
     | gather_step
@@ -50,6 +51,7 @@ step: const_step
 
 const_step: "(" "step" step_id "const" scalar_dtype HEX_STRING ")"
 load_step: "(" "step" step_id "load" scalar_dtype arg_ref load_store_kind ")"
+load_deinterleave_step: "(" "step" step_id "load-deinterleave" scalar_dtype arg_ref load_store_kind lane_count lane ")"
 load_splat_step: "(" "step" step_id "load-splat" scalar_dtype arg_ref ")"
 index_step: "(" "step" step_id "index" scalar_dtype ")"
 gather_step: "(" "step" step_id "gather" scalar_dtype step_ref arg_ref ")"
@@ -84,6 +86,9 @@ acc_ref: "(" "acc" acc_id ")"
 scalar_dtype: "i1" | "i8" | "i16" | "i32" | "i64" | "i128" | "f32" | "f64"
 
 load_store_kind: "aligned" | "unaligned"
+
+lane_count: INT
+lane: INT
 
 arith_binary_op: "add"
                | "sub"

@@ -23,6 +23,7 @@
 #define SIMJIT_A64_ASMJIT_INDEX_REGS 1
 #define SIMJIT_A64_ASMJIT_LDP 1
 #define SIMJIT_A64_ASMJIT_STP 1
+#define SIMJIT_A64_ASMJIT_LD2 1
 #define SIMJIT_A64_ASMJIT_INLINE_SCALAR_COND 1
 #define SIMJIT_A64_ASMJIT_BLEND_SUB 1
 
@@ -545,6 +546,23 @@ struct CompileState {
         GpR tmp = cc.new_gp64();
         cc.add(tmp, base, counter, aja64::lsl(dtype.element_size_bytes_log2()));
         if (addr.offset != 0) { cc.add(tmp, tmp, addr.offset << dtype.element_size_bytes_log2()); }
+        return aja64::ptr(tmp);
+    }
+
+    // Address of an interleaved pair. `addr` must be the pair base (lane 0 offset).
+    aja64::Mem vec_deinterleave_mem(const ArgumentAddress &pair_base, VecDataType dtype) {
+        if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
+            if (auto &state = index_regs[pair_base.arg]; state.gp.is_valid()) {
+                if (state.offset == pair_base.offset) {
+                    state.offset += dtype.nelems() * 2;
+                    return aja64::ptr_post(state.gp, (int)dtype.size_bytes() * 2);
+                }
+            }
+        }
+        GpR base = args[pair_base.arg].gp;
+        GpR tmp = cc.new_gp64();
+        cc.add(tmp, base, counter, aja64::lsl(dtype.element_size_bytes_log2() + 1));
+        if (pair_base.offset != 0) { cc.add(tmp, tmp, pair_base.offset << dtype.element_size_bytes_log2()); }
         return aja64::ptr(tmp);
     }
 
@@ -1149,6 +1167,18 @@ struct CompileState {
                 AnyR result = create_scalar_reg(sdtype);
                 aja64::Mem mem = scalar_mem(data.addr, sdtype);
                 load(cc, result, mem, sdtype);
+                return result;
+            }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (data.lane_count != 2 || data.lane >= data.lane_count || sdtype == ScalarDataType::I1) {
+                    unsupported("Unsupported scalar load-deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                // Explicit addressing only: the index-register cursor assumes one advance per row.
+                AnyR result = create_scalar_reg(sdtype);
+                GpR addr = cc.new_gp64();
+                cc.add(addr, args[data.addr.arg].gp, counter, aja64::lsl(scalar_dtype_size_log2(sdtype) + 1));
+                if (data.lane != 0) { cc.add(addr, addr, size_t{data.lane} << scalar_dtype_size_log2(sdtype)); }
+                load(cc, result, aja64::ptr(addr), sdtype);
                 return result;
             }
             SIMJIT_MATCH (StepKind::LoadSplat) {
@@ -2369,6 +2399,58 @@ struct CompileState {
                 aja64::Mem mem = cc.new_const(aj::ConstPoolScope::kLocal, data.mem, vdtype.size_bytes());
                 cc.ldr(reg, mem);
                 return reg;
+            }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask load-deinterleave"); }
+                VecDataType vdtype = step->dtype.as_vec();
+                if (data.lane_count != 2 || data.lane >= data.lane_count) {
+                    unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                // subexpr() returns a cached register when the partner already emitted the pair, so reaching
+                // this point means this lane emits the pair now and fills the partner's slot. Pairing comes
+                // from the MIR interleave lane lists.
+                Step *partner = mir_func->interleave.by_argument[data.addr.arg].find_partner(step);
+                // The interleaved pair is one 32-byte load split into two lane registers with a pair of unzips.
+                // Not ld2: AsmJit ld2 bug - the consecutive-output allocator picks registers holding live values
+                // and asserts under pressure (miscompiles in release builds). ldp is not affected.
+                // Remove this workaround once https://github.com/asmjit/asmjit/pull/528 is merged and the
+                // asmjit submodule is updated.
+                if (vdtype.size_bytes() != 16) messed_up("Invalid deinterleave of dtype %s", show_vec_dtype(vdtype));
+                VecR pair_lo = create_vec_reg(vdtype);
+                VecR pair_hi = create_vec_reg(vdtype);
+                // The MIR offset counts logical rows; the pair occupies lane_count rows worth of elements.
+                ArgumentAddress pair_base{data.addr.arg, data.addr.offset * data.lane_count};
+                aja64::Mem mem = vec_deinterleave_mem(pair_base, vdtype);
+                cc.ldp(pair_lo.q(), pair_hi.q(), mem);
+                auto emit_unzip = [&](const VecR &dst, uint8_t lane) {
+                    switch (vdtype.element_size_bytes_log2()) {
+                    case 0:
+                        lane == 0 ? cc.uzp1(dst.b16(), pair_lo.b16(), pair_hi.b16())
+                                  : cc.uzp2(dst.b16(), pair_lo.b16(), pair_hi.b16());
+                        break;
+                    case 1:
+                        lane == 0 ? cc.uzp1(dst.h8(), pair_lo.h8(), pair_hi.h8())
+                                  : cc.uzp2(dst.h8(), pair_lo.h8(), pair_hi.h8());
+                        break;
+                    case 2:
+                        lane == 0 ? cc.uzp1(dst.s4(), pair_lo.s4(), pair_hi.s4())
+                                  : cc.uzp2(dst.s4(), pair_lo.s4(), pair_hi.s4());
+                        break;
+                    case 3:
+                        lane == 0 ? cc.uzp1(dst.d2(), pair_lo.d2(), pair_hi.d2())
+                                  : cc.uzp2(dst.d2(), pair_lo.d2(), pair_hi.d2());
+                        break;
+                    default: messed_up("Invalid deinterleave element size %s", show_vec_dtype(vdtype));
+                    }
+                };
+                VecR mine = create_vec_reg(vdtype);
+                emit_unzip(mine, data.lane);
+                if (partner != nullptr) {
+                    VecR other = create_vec_reg(vdtype);
+                    emit_unzip(other, data.lane ^ 1);
+                    step_map[partner->id] = other;
+                }
+                return mine;
             }
             SIMJIT_MATCH (StepKind::Load) {
                 if (step->dtype.is_mask()) {
@@ -3600,7 +3682,6 @@ struct CompileState {
                 loads[data.addr.arg].push_back(s);
             }
         });
-
         for (ArgumentIdx idx = 0; idx < loads.size(); ++idx) {
             const std::vector<Step *> &arg_loads = loads[idx];
             // SIMJIT_ASSERT(arg_loads.empty() || has_single_bit(arg_loads.size()));
@@ -3669,6 +3750,16 @@ struct CompileState {
 
     std::optional<std::pair<ArgumentAddress, size_t>> post_index_access(const Step *step) const {
         if (is_second_paired_load(step)) { return {}; }
+
+        if (step->is(StepKind::LoadDeinterleave)) {
+            if (!step->dtype.is_vec()) { return {}; }
+            // The pair load advances the pointer once, so only lane 0 participates in the cursor model.
+            // The cursor is physical: scale the logical offset by the lane count.
+            auto data = step->step_data<StepKind::LoadDeinterleave>();
+            if (data.lane != 0) { return {}; }
+            return std::pair{ArgumentAddress{data.addr.arg, data.addr.offset * data.lane_count},
+                             size_t{data.lane_count} * step->dtype.as_vec().nelems()};
+        }
 
         if (step->is(StepKind::Load)) {
             auto data = step->step_data<StepKind::Load>();

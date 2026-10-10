@@ -531,6 +531,11 @@ template <typename T> struct MaybeValueT {
 using MaybeValue = MaybeValueT<struct ValueTag>;
 using MaybePredicate = MaybeValueT<struct PredicateTag>;
 
+struct DeinterleavedPair {
+    Value even;
+    Value odd;
+};
+
 // compiler.h
 struct Context;
 
@@ -577,6 +582,15 @@ public:
 
     Value load(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
     Predicate load_predicate(Argument a);
+
+    DeinterleavedPair load2(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
+
+    Value load2_0(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
+    Value load2_1(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
+
+    // Only lane_count == 2 is currently supported; prefer load2/load2_0/load2_1.
+    Value load_deinterleave(Argument a, uint8_t lane_count, uint8_t lane,
+                            LoadStoreKind kind = LoadStoreKind::Unaligned);
 
     Value gather(Value idx, Argument a);
     Value load_splat(Argument a);

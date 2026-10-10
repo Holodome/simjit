@@ -151,7 +151,7 @@ The main test runner is:
 Test runner options:
 
 - `--suite <csv>` supports
-  `int,float,nullable,tpcds,general,libdivide,agg,invalid_type,invalid_builder,misc,ternarylogic,all`.
+  `int,float,nullable,tpcds,general,libdivide,agg,invalid_type,invalid_builder,misc,ternarylogic,interleaved,all`.
 - `--arch <native|x86|x86-ymm|arm|all>`
 - `--mode <auto|scalar|novect|all>`
 - `--emit <csv>` supports `cpp,llvm,asmjit,all`.

@@ -390,6 +390,10 @@ struct FunctionBuilderImpl {
 
     Step *load(const ArgumentDecl &arg, LoadStoreKind kind) { return sm.load({arg.idx, kind}, arg.dtype); }
 
+    Step *load_deinterleave(const ArgumentDecl &arg, LoadStoreKind kind, uint8_t lane_count, uint8_t lane) {
+        return sm.load_deinterleave({arg.idx, kind, lane_count, lane}, arg.dtype);
+    }
+
     Step *gather(Step *idx, const ArgumentDecl &dst) { return sm.gather({idx, dst.idx}, dst.dtype); }
 
     Step *con(ConstData data, ScalarDataType dtype) { return sm.con(data, dtype); }
@@ -1355,6 +1359,39 @@ Value FunctionBuilder::load(Argument argument, LoadStoreKind kind) {
 
     Step *s = impl_->load(func_arg, kind);
     return impl_->remember_expr(hash, s);
+}
+
+DeinterleavedPair FunctionBuilder::load2(Argument argument, LoadStoreKind kind) {
+    return {load2_0(argument, kind), load2_1(argument, kind)};
+}
+
+Value FunctionBuilder::load2_0(Argument argument, LoadStoreKind kind) {
+    return load_deinterleave(argument, 2, 0, kind);
+}
+
+Value FunctionBuilder::load2_1(Argument argument, LoadStoreKind kind) {
+    return load_deinterleave(argument, 2, 1, kind);
+}
+
+Value FunctionBuilder::load_deinterleave(Argument argument, uint8_t lane_count, uint8_t lane, LoadStoreKind kind) {
+    const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
+    if (func_arg.dtype == ScalarDataType::I1) { invalid_type("load_deinterleave should not be used with i1 type"); }
+    if (func_arg.dtype == ScalarDataType::I128) {
+        invalid_type("load_deinterleave does not support %s type", show_scalar_dtype(func_arg.dtype));
+    }
+    if (lane_count != 2) {
+        invalid_input("load_deinterleave supports only 2-way interleaved loads, got %u lanes", lane_count);
+    }
+    if (lane >= lane_count) { invalid_input("load_deinterleave lane %u out of %u lanes", lane, lane_count); }
+    impl_->special_ops |= SpecialOp::Deinterleave;
+
+    uint64_t hash = make_hash(StepKind::LoadDeinterleave, argument, kind, lane_count, lane);
+    if (auto *result = impl_->cse<StepKind::LoadDeinterleave>(hash, [argument, kind, lane_count, lane](const auto &x) {
+            return x.idx == argument.idx_ && x.kind == kind && x.lane_count == lane_count && x.lane == lane;
+        })) {
+        return result;
+    }
+    return impl_->remember_expr(hash, impl_->load_deinterleave(func_arg, kind, lane_count, lane));
 }
 
 Predicate FunctionBuilder::load_predicate(Argument argument) {

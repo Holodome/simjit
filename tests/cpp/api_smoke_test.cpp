@@ -633,10 +633,140 @@ static void api_smoke_transform_and_aggregate() {
 }
 #endif
 
+static void api_smoke_load_deinterleave() {
+    using hir::SpecialOp;
+    require_api_smoke(bool(hir::supported_vector_special_ops_for_arch(Arch::Arm64_NEON) & SpecialOp::Deinterleave),
+                      "Arm deinterleave vector capability");
+    require_api_smoke(!bool(hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512) & SpecialOp::Deinterleave),
+                      "x86 deinterleave is staged off");
+
+    // Repeated calls share lane steps (CSE), lanes carry self-sufficient metadata, and the argument is
+    // flagged as interleaved.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I32);
+        DeinterleavedPair first = builder.load2(src);
+        DeinterleavedPair second = builder.load2(src);
+        require_api_smoke(first.even.step_ == second.even.step_, "deinterleave even lane CSE");
+        require_api_smoke(first.odd.step_ == second.odd.step_, "deinterleave odd lane CSE");
+        require_api_smoke(first.even.step_ != first.odd.step_, "deinterleave lanes are distinct steps");
+        builder.store(builder.add(first.even, builder.i32(1)), builder.arg(I32));
+        builder.store(second.odd, builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->special_ops & SpecialOp::Deinterleave), "deinterleave special op recorded");
+        require_api_smoke(bool(fn->argument_usage[src.idx_] & hir::ArgumentUsage::Interleaved2x),
+                          "deinterleave argument usage flag");
+        size_t lane_count = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                if (!step->is(hir::StepKind::LoadDeinterleave)) { return; }
+                auto &data = step->step_data<hir::StepKind::LoadDeinterleave>();
+                require_api_smoke(data.lane_count == 2, "deinterleave lane count is 2");
+                require_api_smoke(data.lane < data.lane_count, "deinterleave lane index in range");
+                ++lane_count;
+            });
+        }
+        require_api_smoke(lane_count == 2, "CSE collapses repeated deinterleave to two lane steps");
+    }
+
+    // On x86 the function stages to scalar through the unsupported special-op mechanism.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
+        FunctionBuilder builder{context};
+        DeinterleavedPair pair = builder.load2(builder.arg(I32));
+        builder.store(pair.even, builder.arg(I32));
+        builder.store(pair.odd, builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->is_scalar_only(), "x86 deinterleave stages to scalar");
+        require_api_smoke(bool(fn->unsupported_vector_special_ops() & SpecialOp::Deinterleave),
+                          "x86 deinterleave unsupported vector op");
+    }
+
+    // A gather fed by a deinterleave lane marks the interleaved input as a bounded index source.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument pairs = builder.arg(I32);
+        DeinterleavedPair lanes = builder.load2(pairs);
+        builder.store(builder.gather(lanes.even, builder.arg(I32)), builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->argument_usage[pairs.idx_] & hir::ArgumentUsage::BoundedIndex),
+                          "deinterleaved gather index marks input bounded");
+        require_api_smoke(bool(fn->argument_usage[pairs.idx_] & hir::ArgumentUsage::Interleaved2x),
+                          "deinterleaved gather index input stays interleaved");
+    }
+
+    // The single-lane API produces the same leaves as the pair API (cross-API CSE).
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I32);
+        Value single = builder.load2_1(src);
+        DeinterleavedPair pair = builder.load2(src);
+        require_api_smoke(single.step_ == pair.odd.step_, "single-lane API unifies with pair odd lane");
+        require_api_smoke(pair.even.step_ != nullptr, "pair even lane materialized");
+        builder.store(single, builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->special_ops & SpecialOp::Deinterleave), "single-lane deinterleave special op");
+        size_t lane_count = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                if (step->is(hir::StepKind::LoadDeinterleave)) { ++lane_count; }
+            });
+        }
+        require_api_smoke(lane_count == 1, "only the consumed lane is reachable");
+    }
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.load_deinterleave(builder.arg(I32), 2, 2);
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidConfiguration,
+        "out-of-range deinterleave lane is rejected");
+    // N-way interleaving is not implemented yet: the general API is restricted to pairs until the
+    // backends and the row-width metadata support it.
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.load_deinterleave(builder.arg(I32), 3, 0);
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidConfiguration,
+        "3-way deinterleave is rejected");
+
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.load2(builder.arg(I1));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i1 deinterleave is rejected");
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.load2(builder.arg(I128));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i128 deinterleave is rejected");
+}
+
 static void run_public_api_smoke_tests() {
 #if SIMJIT_ASMJIT_BACKEND
     api_smoke_sum();
     api_smoke_special_op_capabilities();
+    api_smoke_load_deinterleave();
     api_smoke_raw_build_callbacks();
     api_smoke_try_compile_and_debug();
     api_smoke_serialized_debug_stage();

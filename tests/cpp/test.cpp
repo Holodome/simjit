@@ -34,6 +34,7 @@
 #include "float_test.cpp"
 #include "general_test.cpp"
 #include "int_test.cpp"
+#include "interleaved_test.cpp"
 #include "invalid_builder_test.cpp"
 #include "invalid_type_test.cpp"
 #include "libdivide_test.cpp"
@@ -199,7 +200,7 @@ enum class AnsiStyle : uint8_t {
 
 static bool g_use_ansi = false;
 
-static const std::array<SuiteDefinition, 11> kSuites{{
+static const std::array<SuiteDefinition, 12> kSuites{{
     {"int", 0, &int_tests},
     {"float", 1, &float_tests},
     {"nullable", 2, &nullable_tests},
@@ -211,6 +212,7 @@ static const std::array<SuiteDefinition, 11> kSuites{{
     {"invalid_builder", 8, &invalid_builder_tests},
     {"misc", 9, &misc_tests},
     {"ternarylogic", 10, &ternarylogic_tests},
+    {"interleaved", 11, &interleaved_tests},
 }};
 
 static const std::string base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -351,7 +353,9 @@ static std::string schema_json(const hir::Function *func) {
         } else {
             kind = "in";
         }
-        result += std::format("{{ \"dtype\": \"{}\", \"kind\": \"{}\"}}", dtype, kind);
+        std::string row_width;
+        if (bool(usages[arg.idx] & hir::ArgumentUsage::Interleaved2x)) { row_width = ", \"row_width\": 2"; }
+        result += std::format("{{ \"dtype\": \"{}\", \"kind\": \"{}\"{}}}", dtype, kind, row_width);
         if (&arg != &args[args.size() - 1]) { result += ","; }
     }
     result += "]}";
@@ -881,7 +885,7 @@ static void print_usage(FILE *out) {
                  "\n"
                  "Select suites:\n"
                  "  --suite <csv>          Comma-separated suites: int,float,nullable,tpcds,general,libdivide,agg,"
-                 "ternarylogic,invalid,all\n"
+                 "ternarylogic,interleaved,invalid,all\n"
                  "\n"
                  "Execution:\n"
                  "  --arch <native|x86|x86-ymm|arm|all>\n"

@@ -17,6 +17,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::LoadSplat: return "load-splat";
     case StepKind::Const: return "const";
     case StepKind::Load: return "load";
+    case StepKind::LoadDeinterleave: return "load-deinterleave";
     case StepKind::Gather: return "gather";
     case StepKind::ArithBinary: return "binary";
     case StepKind::CheckedOp: return "checked-op";
@@ -61,6 +62,7 @@ std::string show_special_ops(SpecialOp ops) {
     append(SpecialOp::SmallPopcount, "small-popcount");
     append(SpecialOp::LargePopcount, "large-popcount");
     append(SpecialOp::I8ConstantShift, "i8-constant-shift");
+    append(SpecialOp::Deinterleave, "deinterleave");
     return result;
 }
 
@@ -75,7 +77,7 @@ SpecialOp supported_vector_special_ops_for_arch(Arch arch) noexcept {
                SpecialOp::LargePopcount | SpecialOp::I8ConstantShift;
     case Arch::Arm64_NEON:
         return SpecialOp::Gather | SpecialOp::SmallPack | SpecialOp::SmallPopcount | SpecialOp::LargePopcount |
-               SpecialOp::I8ConstantShift | SpecialOp::Scatter;
+               SpecialOp::I8ConstantShift | SpecialOp::Scatter | SpecialOp::Deinterleave;
     }
     SIMJIT_UNREACHABLE();
 }
@@ -146,6 +148,11 @@ void add_step_argument_accesses(std::vector<ArgumentUsage> &usages, const Step *
         add_argument_access(usages, step->step_data<StepKind::LoadSplat>().idx, ArgumentUsage::SequentialRead);
         usages[step->step_data<StepKind::LoadSplat>().idx] |= ArgumentUsage::SplatRead;
         return;
+    case StepKind::LoadDeinterleave:
+        add_argument_access(usages, step->step_data<StepKind::LoadDeinterleave>().idx, ArgumentUsage::SequentialRead);
+        usages[step->step_data<StepKind::LoadDeinterleave>().idx] |=
+            ArgumentUsage::ArrayRead | ArgumentUsage::Interleaved2x;
+        return;
     case StepKind::Gather:
         add_argument_access(usages, step->step_data<StepKind::Gather>().data, ArgumentUsage::RandomRead);
         return;
@@ -168,6 +175,9 @@ void mark_bounded_index_inputs(std::vector<ArgumentUsage> &usages, Step *idx, si
         if (step->is(StepKind::Load) || step->is(StepKind::LoadSplat)) {
             usages[step->step_data<StepKind::Load>().idx] |= ArgumentUsage::BoundedIndex;
         }
+        if (step->is(StepKind::LoadDeinterleave)) {
+            usages[step->step_data<StepKind::LoadDeinterleave>().idx] |= ArgumentUsage::BoundedIndex;
+        }
     });
 }
 
@@ -176,15 +186,40 @@ void mark_bounded_index_inputs(std::vector<ArgumentUsage> &usages, Step *idx, si
 void analyze_argument_usage(Function *func) {
     std::vector<ArgumentUsage> usages(func->args.size());
     std::vector<uint8_t> state(func->step_id_count, 0);
+    // Per-argument interleaving model: lane_count of the deinterleave accesses (0 = none), and whether the
+    // argument also has a plain advancing access. Plain loads/stores advance one element per row while
+    // interleaved reads advance lane_count; the two access models cannot share an argument.
+    std::vector<uint8_t> interleave_lane_counts(func->args.size(), 0);
+    std::vector<uint8_t> plain_advancing_accesses(func->args.size(), 0);
     for (Step *root : func->step_roots) {
         traverse_steps_postorder_unique(root, state, [&](Step *step) {
             add_step_argument_accesses(usages, step);
+            if (step->is(StepKind::LoadDeinterleave)) {
+                auto &data = step->step_data<StepKind::LoadDeinterleave>();
+                uint8_t &lane_count = interleave_lane_counts[data.idx];
+                if (lane_count != 0 && lane_count != data.lane_count) {
+                    simjit_exception(ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidArgumentAccess,
+                                     "Argument %zu mixes interleaved accesses with different lane counts %u and %u",
+                                     data.idx, lane_count, data.lane_count);
+                }
+                lane_count = data.lane_count;
+            } else if (step->is(StepKind::Load)) {
+                plain_advancing_accesses[step->step_data<StepKind::Load>().idx] = 1;
+            } else if (step->is(StepKind::Store)) {
+                plain_advancing_accesses[step->step_data<StepKind::Store>().addr] = 1;
+            }
             if (step->is(StepKind::Gather)) {
                 mark_bounded_index_inputs(usages, step->step_data<StepKind::Gather>().idx, func->step_id_count);
             } else if (step->is(StepKind::Scatter)) {
                 mark_bounded_index_inputs(usages, step->step_data<StepKind::Scatter>().idx, func->step_id_count);
             }
         });
+    }
+    for (size_t idx = 0; idx < func->args.size(); ++idx) {
+        if (interleave_lane_counts[idx] != 0 && plain_advancing_accesses[idx] != 0) {
+            simjit_exception(ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidArgumentAccess,
+                             "Argument %zu mixes interleaved and plain accesses", idx);
+        }
     }
     for (const Accumulator &acc : func->accs) {
         add_argument_access(usages, acc.dst_arg, ArgumentUsage::AggregateWrite);
@@ -211,6 +246,8 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
         SIMJIT_MATCH (StepKind::Const) wr("value=%s", show_const_data(data, step->dtype).c_str());
         SIMJIT_MATCH2 (StepKind::Load, StepKind::LoadSplat)
             wr("arg=@%zu kind=%s", data.idx, show_load_store_kind(data.kind));
+        SIMJIT_MATCH (StepKind::LoadDeinterleave)
+            wr("arg=@%zu kind=%s lane=%u/%u", data.idx, show_load_store_kind(data.kind), data.lane, data.lane_count);
         SIMJIT_MATCH (StepKind::BitCast) wr("arg=%%%u", ref(data));
         SIMJIT_MATCH (StepKind::Gather) wr("arg=@%zu idx=%%%u", data.data, ref(data.idx));
         SIMJIT_MATCH (StepKind::Scatter) {

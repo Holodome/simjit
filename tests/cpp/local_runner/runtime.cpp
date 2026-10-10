@@ -152,37 +152,37 @@ template <typename T> void write_float_values(Buffer &buffer, size_t rows, Rando
     }
 }
 
-void generate_input(Buffer &buffer, const ArgumentInfo &arg, size_t rows, Random &random) {
+void generate_input(Buffer &buffer, const ArgumentInfo &arg, size_t rows, size_t row_width, Random &random) {
     if (arg.kind == BundleArgumentKind::Sequence) {
         switch (arg.dtype) {
         case ScalarDataType::I1:
         case ScalarDataType::I8:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<int8_t *>(buffer.data())[i] = static_cast<int8_t>(i);
+            for (size_t i = 0; i < rows * row_width; ++i)
+                static_cast<int8_t *>(buffer.data())[i] = static_cast<int8_t>(i % rows);
             break;
         case ScalarDataType::I16:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<int16_t *>(buffer.data())[i] = static_cast<int16_t>(i);
+            for (size_t i = 0; i < rows * row_width; ++i)
+                static_cast<int16_t *>(buffer.data())[i] = static_cast<int16_t>(i % rows);
             break;
         case ScalarDataType::I32:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<int32_t *>(buffer.data())[i] = static_cast<int32_t>(i);
+            for (size_t i = 0; i < rows * row_width; ++i)
+                static_cast<int32_t *>(buffer.data())[i] = static_cast<int32_t>(i % rows);
             break;
         case ScalarDataType::I64:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<int64_t *>(buffer.data())[i] = static_cast<int64_t>(i);
+            for (size_t i = 0; i < rows * row_width; ++i)
+                static_cast<int64_t *>(buffer.data())[i] = static_cast<int64_t>(i % rows);
             break;
         case ScalarDataType::I128:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<__int128 *>(buffer.data())[i] = i;
+            for (size_t i = 0; i < rows * row_width; ++i)
+                static_cast<__int128 *>(buffer.data())[i] = i % rows;
             break;
         case ScalarDataType::F32:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<float *>(buffer.data())[i] = static_cast<float>(i);
+            for (size_t i = 0; i < rows * row_width; ++i)
+                static_cast<float *>(buffer.data())[i] = static_cast<float>(i % rows);
             break;
         case ScalarDataType::F64:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<double *>(buffer.data())[i] = static_cast<double>(i);
+            for (size_t i = 0; i < rows * row_width; ++i)
+                static_cast<double *>(buffer.data())[i] = static_cast<double>(i % rows);
             break;
         }
         return;
@@ -190,13 +190,13 @@ void generate_input(Buffer &buffer, const ArgumentInfo &arg, size_t rows, Random
     if (arg.kind != BundleArgumentKind::Input) return;
     switch (arg.dtype) {
     case ScalarDataType::I1:
-    case ScalarDataType::I8: write_integer_values<int8_t>(buffer, rows, random); break;
-    case ScalarDataType::I16: write_integer_values<int16_t>(buffer, rows, random); break;
-    case ScalarDataType::I32: write_integer_values<int32_t>(buffer, rows, random); break;
-    case ScalarDataType::I64: write_integer_values<int64_t>(buffer, rows, random); break;
-    case ScalarDataType::I128: write_integer_values<__int128>(buffer, rows, random); break;
-    case ScalarDataType::F32: write_float_values<float>(buffer, rows, random); break;
-    case ScalarDataType::F64: write_float_values<double>(buffer, rows, random); break;
+    case ScalarDataType::I8: write_integer_values<int8_t>(buffer, rows * row_width, random); break;
+    case ScalarDataType::I16: write_integer_values<int16_t>(buffer, rows * row_width, random); break;
+    case ScalarDataType::I32: write_integer_values<int32_t>(buffer, rows * row_width, random); break;
+    case ScalarDataType::I64: write_integer_values<int64_t>(buffer, rows * row_width, random); break;
+    case ScalarDataType::I128: write_integer_values<__int128>(buffer, rows * row_width, random); break;
+    case ScalarDataType::F32: write_float_values<float>(buffer, rows * row_width, random); break;
+    case ScalarDataType::F64: write_float_values<double>(buffer, rows * row_width, random); break;
     }
 }
 
@@ -300,8 +300,8 @@ public:
         buffers.reserve(arguments_.size());
         argument_ptrs.reserve(arguments_.size());
         for (const auto &argument : arguments_) {
-            buffers.emplace_back(scalar_dtype_size(argument.dtype) * rows_);
-            generate_input(buffers.back(), argument, rows_, random);
+            buffers.emplace_back(scalar_dtype_size(argument.dtype) * rows_ * argument.stride_nrows);
+            generate_input(buffers.back(), argument, rows_, argument.stride_nrows, random);
             argument_ptrs.push_back(buffers.back().data());
         }
         for (auto _ : state) {
@@ -381,8 +381,8 @@ CaseResult execute_case(const BundleCase &item, const RunnerOptions &options) {
         arguments.reserve(item.args.size());
         argument_ptrs.reserve(item.args.size());
         for (const auto &arg : item.args) {
-            arguments.emplace_back(scalar_dtype_size(arg.dtype) * options.rows);
-            generate_input(arguments.back(), arg, options.rows, random);
+            arguments.emplace_back(scalar_dtype_size(arg.dtype) * options.rows * arg.stride_nrows);
+            generate_input(arguments.back(), arg, options.rows, arg.stride_nrows, random);
             argument_ptrs.push_back(arguments.back().data());
         }
 
@@ -423,7 +423,7 @@ CaseResult execute_case(const BundleCase &item, const RunnerOptions &options) {
                 const auto &right = implementation_outputs[baseline][output_index];
                 size_t mismatch_count = 0;
                 std::string samples;
-                for (size_t row = 0; row < options.rows; ++row) {
+                for (size_t row = 0; row < options.rows * item.args[arg_index].stride_nrows; ++row) {
                     if (row_value_equal(item.args[arg_index].dtype, left.data(), right.data(), row)) continue;
                     ++mismatch_count;
                     if (mismatch_count <= 40) {

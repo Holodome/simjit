@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <vector>
 
 #if SIMJIT_USE_LIBDIVIDE
 #include "libdivide.h"
@@ -260,6 +261,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     switch (kind) {
     case StepKind::Const: return "const";
     case StepKind::Load: return "load";
+    case StepKind::LoadDeinterleave: return "load-deinterleave";
     case StepKind::LoadSplat: return "load-splat";
     case StepKind::Gather: return "gather";
     case StepKind::ArithBinary: return "binary";
@@ -390,6 +392,9 @@ struct ExprShowState {
                        .c_str());
             SIMJIT_MATCH (StepKind::Load)
                 wr("arg=@%zu offset=%zu kind=%s", data.addr.arg, data.addr.offset, show_load_store_kind(data.kind));
+            SIMJIT_MATCH (StepKind::LoadDeinterleave)
+                wr("arg=@%zu offset=%zu kind=%s lanes=%u/%u", data.addr.arg, data.addr.offset,
+                   show_load_store_kind(data.kind), data.lane, data.lane_count);
             SIMJIT_MATCH (StepKind::LoadSplat) wr("arg=@%zu", data.addr.arg);
             SIMJIT_MATCH (StepKind::Gather) wr("arg=%zu idx=%%%u", data.data, ref(data.idx));
             SIMJIT_MATCH (StepKind::ArithBinary)
@@ -756,6 +761,40 @@ struct MirConstructState {
     ArchTraits arch_traits;
 
     MirConstructState() = delete;
+    // Deinterleave lane pairs of one argument under construction; lanes match on
+    // (offset, dtype, kind, lane_count) and fill their own slot.
+    struct InterleavePairDraft {
+        size_t offset{};
+        DataType dtype{};
+        LoadStoreKind kind{};
+        uint8_t lane_count = 0;
+        Step *even = nullptr;
+        Step *odd = nullptr;
+    };
+    std::vector<std::vector<InterleavePairDraft>> interleave_pairs{};
+
+    void collect_interleave_lane(Step *lane) {
+        auto &data = lane->step_data<StepKind::LoadDeinterleave>();
+        if (data.addr.arg >= interleave_pairs.size()) { interleave_pairs.resize(data.addr.arg + 1); }
+        auto &pairs = interleave_pairs[data.addr.arg];
+        for (InterleavePairDraft &pair : pairs) {
+            if (pair.offset != data.addr.offset || pair.dtype != lane->dtype || pair.kind != data.kind ||
+                pair.lane_count != data.lane_count) {
+                continue;
+            }
+            if (data.lane == 0 && pair.even == nullptr) {
+                pair.even = lane;
+                return;
+            }
+            if (data.lane == 1 && pair.odd == nullptr) {
+                pair.odd = lane;
+                return;
+            }
+        }
+        pairs.push_back(InterleavePairDraft{data.addr.offset, lane->dtype, data.kind, data.lane_count,
+                                            data.lane == 0 ? lane : nullptr, data.lane == 1 ? lane : nullptr});
+    }
+
     explicit MirConstructState(Context *ctx) : sm(ctx->arena), arch_traits(get_arch_traits(ctx->arch)) {}
 
     void count_vectorizer_node_refs_rec(const vect::Node *node, ArenaBitmap &visited) noexcept {
@@ -2303,6 +2342,7 @@ struct MirConstructState {
         case hir::StepKind::Permute:
         case hir::StepKind::Fpclass:
         case hir::StepKind::Load:
+        case hir::StepKind::LoadDeinterleave:
         case hir::StepKind::Gather:
         case hir::StepKind::LoadSplat: SIMJIT_UNREACHABLE();
         }
@@ -2618,6 +2658,12 @@ struct MirConstructState {
             SIMJIT_MATCH (hir::StepKind::Load) {
                 ArgumentAddress addr{data.idx, ctx.rows.row_offset()};
                 return sm.load({addr, data.kind}, node->dtype);
+            }
+            SIMJIT_MATCH (hir::StepKind::LoadDeinterleave) {
+                ArgumentAddress addr{data.idx, ctx.rows.row_offset()};
+                Step *lane = sm.load_deinterleave({addr, data.kind, data.lane_count, data.lane}, node->dtype);
+                collect_interleave_lane(lane);
+                return lane;
             }
             SIMJIT_MATCH (hir::StepKind::Gather) {
                 Step *idx = ref_arg();
@@ -3170,6 +3216,10 @@ struct MirConstructState {
                 ArgumentAddress addr{data.idx, 0};
                 return sm.load({addr, data.kind}, sdtype);
             }
+            SIMJIT_MATCH (hir::StepKind::LoadDeinterleave) {
+                ArgumentAddress addr{data.idx, 0};
+                return sm.load_deinterleave({addr, data.kind, data.lane_count, data.lane}, sdtype);
+            }
             SIMJIT_MATCH (hir::StepKind::LoadSplat) {
                 ArgumentAddress addr{data.idx, 0};
                 return sm.load_splat({addr, data.kind}, sdtype);
@@ -3422,6 +3472,15 @@ struct MirConstructState {
         func->epilogue_roots = arena->copy_array<Step *>(epilogue_roots);
         func->loop_width = loop_width;
         func->step_id_count = sm.max_id();
+        interleave_pairs.resize(func->args.size());
+        func->interleave.by_argument = arena->alloc_array<ArgumentInterleave>(func->args.size());
+        for (size_t i = 0; i < func->args.size(); ++i) {
+            const auto &drafts = interleave_pairs[i];
+            func->interleave.by_argument[i].pairs = arena->alloc_array<InterleavePair>(drafts.size());
+            for (size_t j = 0; j < drafts.size(); ++j) {
+                func->interleave.by_argument[i].pairs[j] = InterleavePair{drafts[j].even, drafts[j].odd};
+            }
+        }
 
         return func;
     }

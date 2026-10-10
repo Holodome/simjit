@@ -217,7 +217,9 @@ static std::string schema_json(const simjit::hir::Function *func) {
         result += simjit::show_scalar_dtype(arg.dtype);
         result += "\",\"kind\":\"";
         result += bundle_arg_kind(usages[i]);
-        result += "\"}";
+        result += "\"";
+        if (bool(usages[i] & simjit::hir::ArgumentUsage::Interleaved2x)) { result += ",\"row_width\":2"; }
+        result += "}";
     }
     result += "]}";
     return result;

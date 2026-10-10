@@ -111,6 +111,13 @@ struct LoadData {
     LoadStoreKind kind{};
 };
 
+struct LoadDeinterleaveData {
+    ArgumentIdx idx{};
+    LoadStoreKind kind{};
+    uint8_t lane_count = 2;
+    uint8_t lane = 0;
+};
+
 struct FpclassData {
     FpClass flags{};
     Step *arg{};
@@ -136,6 +143,7 @@ enum class StepKind : uint8_t {
     Load,
     Gather,
     LoadSplat,
+    LoadDeinterleave,
 
     // Stores
     Store,
@@ -176,6 +184,7 @@ private:
         ArithBinaryData ab;
         CheckedOpData checked_op;
         LoadData load;
+        LoadDeinterleaveData load_deinterleave;
         ArithUnaryData au;
         ConstData con;
         GatherData gather;
@@ -192,30 +201,31 @@ private:
     };
 };
 
-#define HIR_STEP_DATA_LIST(X)                        \
-    X(con, Const, con)                               \
-    X(arith_bin, ArithBinary, ab)                    \
-    X(checked_op, CheckedOp, checked_op)             \
-    X(arith_un, ArithUnary, au)                      \
-    X(cmp, Compare, cmp)                             \
-    X(int_cast, IntCast, int_cast)                   \
-    X(float_cast, FloatCast, float_cast)             \
-    X(load, Load, load)                              \
-    X(load_splat, LoadSplat, load)                   \
-    X(gather, Gather, gather)                        \
-    X(store, Store, store)                           \
-    X(acc_arith_bin, AccArithBinary, acc_ab)         \
-    X(acc_predicate_bin, AccPredicateBinary, acc_pb) \
-    X(predicate_bin, PredicateBinary, pb)            \
-    X(predicate_not, PredicateNot, arg)              \
-    X(select, Select, select)                        \
-    X(index, Index, index)                           \
-    X(scatter, Scatter, scatter)                     \
-    X(pack, Pack, pack)                              \
-    X(sum128, AccSum128, acc_ab)                     \
-    X(permute, Permute, permute)                     \
-    X(bitcast, BitCast, arg)                         \
-    X(fpclass, Fpclass, fpclass)                     \
+#define HIR_STEP_DATA_LIST(X)                                 \
+    X(con, Const, con)                                        \
+    X(arith_bin, ArithBinary, ab)                             \
+    X(checked_op, CheckedOp, checked_op)                      \
+    X(arith_un, ArithUnary, au)                               \
+    X(cmp, Compare, cmp)                                      \
+    X(int_cast, IntCast, int_cast)                            \
+    X(float_cast, FloatCast, float_cast)                      \
+    X(load, Load, load)                                       \
+    X(load_deinterleave, LoadDeinterleave, load_deinterleave) \
+    X(load_splat, LoadSplat, load)                            \
+    X(gather, Gather, gather)                                 \
+    X(store, Store, store)                                    \
+    X(acc_arith_bin, AccArithBinary, acc_ab)                  \
+    X(acc_predicate_bin, AccPredicateBinary, acc_pb)          \
+    X(predicate_bin, PredicateBinary, pb)                     \
+    X(predicate_not, PredicateNot, arg)                       \
+    X(select, Select, select)                                 \
+    X(index, Index, index)                                    \
+    X(scatter, Scatter, scatter)                              \
+    X(pack, Pack, pack)                                       \
+    X(sum128, AccSum128, acc_ab)                              \
+    X(permute, Permute, permute)                              \
+    X(bitcast, BitCast, arg)                                  \
+    X(fpclass, Fpclass, fpclass)                              \
     X(countif, Countif, acc_ab)
 
 #define ASSOC_STEP_DATA(_0, _kind, _field)           \
@@ -296,6 +306,7 @@ enum class SpecialOp : uint16_t {
     SmallPopcount = 0x400,
     LargePopcount = 0x800,
     I8ConstantShift = 0x1000,
+    Deinterleave = 0x2000,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(SpecialOp)
 
@@ -320,6 +331,8 @@ enum class ArgumentUsage : uint16_t {
     ArrayRead = 0x80,
     SplatRead = 0x100,
     SafetyCheck = 0x200,
+    // The argument consumes lane_count elements per logical row (interleaved layout, e.g. deinterleave loads).
+    Interleaved2x = 0x400,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(ArgumentUsage)
 
@@ -347,6 +360,7 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
     switch (step->kind) {
     case StepKind::Const:
     case StepKind::Load:
+    case StepKind::LoadDeinterleave:
     case StepKind::LoadSplat:
     case StepKind::Index:
         break;

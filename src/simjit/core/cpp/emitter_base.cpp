@@ -644,6 +644,10 @@ bool CppEmitterBase::can_inline_scalar_expr(const Step *step) const {
             if (use_counts[step->id] != 1) { return false; }
             return step->dtype != ScalarDataType::I1;
         }
+        SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+            if (use_counts[step->id] != 1) { return false; }
+            return step->dtype != ScalarDataType::I1;
+        }
         SIMJIT_MATCH (StepKind::LoadSplat) {
             if (use_counts[step->id] != 1) { return false; }
             return step->dtype != ScalarDataType::I1;
@@ -663,6 +667,10 @@ std::optional<std::string> CppEmitterBase::inline_scalar_leaf_expr(const Step *s
         SIMJIT_MATCH (StepKind::Load) {
             SIMJIT_ASSERT(step->dtype != ScalarDataType::I1);
             return format("arg%zu[i]", data.addr.arg);
+        }
+        SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+            SIMJIT_ASSERT(step->dtype != ScalarDataType::I1);
+            return format("arg%zu[2 * i + %u]", data.addr.arg, data.lane);
         }
         SIMJIT_MATCH (StepKind::LoadSplat) { return format("*arg%zu", data.addr.arg); }
         SIMJIT_MATCH (StepKind::Compare) {
@@ -781,6 +789,10 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
             return format("%s %s; memcpy(&%s, (char *)arg%zu + i * %zu%s, %zu)", cpp_dtype(step->dtype),
                           show_scalar_operand(step), show_scalar_operand(step), data.addr.arg, size, offset_str.c_str(),
                           size);
+        }
+        SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+            SIMJIT_ASSERT(step->dtype != ScalarDataType::I1);
+            return cpp_var_decl(step) + format("arg%zu[2 * i + %u]", data.addr.arg, data.lane);
         }
         SIMJIT_MATCH (StepKind::LoadSplat) {
             if (sdtype == ScalarDataType::I1) { return cpp_var_decl(step) + format("*arg%zu & 1", data.addr.arg); }

@@ -1182,6 +1182,9 @@ struct X86CppEmitter : CppEmitterBase {
                 return cpp_var_decl(step) +
                        unsafe_intrin_call(intrin, format("arg%zu + i%s", data.addr.arg, offset_str.c_str()));
             }
+            // Unreachable today: deinterleave is not in the x86 vector special-op set, so vectorized MIR can
+            // not contain this step. Kept as last-resort protection per backend conventions.
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) unsupported("Do not support vectorized load-deinterleave");
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 VecDataType vdtype = step->dtype.as_vec();
                 const x86::Intrinsic *imm_intrin = nullptr;
