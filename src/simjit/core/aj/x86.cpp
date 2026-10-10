@@ -181,28 +181,13 @@ static size_t mask_valid_bits_u32(MaskDataType mdtype) noexcept {
 }
 
 static ax86::Mem mem_offset(const GpR &base, const GpR &i, ScalarDataType dtype, int32_t offset = 0) {
-    switch (dtype) {
-    case ScalarDataType::I1: messed_up("can't have i1 mem");
-    case ScalarDataType::I8: return ax86::byte_ptr(base, i, 0, offset);
-    case ScalarDataType::I16: return ax86::word_ptr(base, i, 1, offset);
-    case ScalarDataType::I32:
-    case ScalarDataType::F32: return ax86::dword_ptr(base, i, 2, offset);
-    case ScalarDataType::I64:
-    case ScalarDataType::F64: return ax86::qword_ptr(base, i, 3, offset);
-    case ScalarDataType::I128: messed_up("can't have i128 mem");
-    }
-    SIMJIT_UNREACHABLE();
+    if (dtype == ScalarDataType::I1) { messed_up("can't have i1 mem"); }
+    if (dtype == ScalarDataType::I128) { messed_up("can't have i128 mem"); }
+    return ax86::Mem(base, i, scalar_dtype_size_log2(dtype), offset, scalar_dtype_size(dtype));
 }
 
 static ax86::Mem vec_mem_offset(const GpR &base, const GpR &i, size_t offset, VecDataType dtype) {
-    x86::Vector vec = x86::vec_to_x86(dtype);
-    size_t log2_size = dtype.element_size_bytes_log2();
-    switch (vec.reg) {
-    case x86::VecRegisterKind::XMM: return ax86::xmmword_ptr(base, i, log2_size, (int)offset); break;
-    case x86::VecRegisterKind::YMM: return ax86::ymmword_ptr(base, i, log2_size, (int)offset); break;
-    case x86::VecRegisterKind::ZMM: return ax86::zmmword_ptr(base, i, log2_size, (int)offset); break;
-    }
-    SIMJIT_UNREACHABLE();
+    return ax86::Mem(base, i, dtype.element_size_bytes_log2(), (int)offset, dtype.size_bytes());
 }
 
 template <typename T>
@@ -1923,17 +1908,8 @@ struct CompileState {
                 size_t elem_log2 = scalar_dtype_size_log2(sdtype);
                 int32_t disp = int32_t(uint32_t(data.lane) << elem_log2);
                 GpR base = args[data.addr.arg].gp;
-                ax86::Mem mem{};
-                switch (sdtype) {
-                case ScalarDataType::I1: messed_up("can't have i1 deinterleave");
-                case ScalarDataType::I8: mem = ax86::byte_ptr(base, counter, 1, disp); break;
-                case ScalarDataType::I16: mem = ax86::word_ptr(base, counter, 2, disp); break;
-                case ScalarDataType::I32:
-                case ScalarDataType::F32: mem = ax86::dword_ptr(base, counter, 3, disp); break;
-                case ScalarDataType::I64:
-                case ScalarDataType::F64: mem = ax86::qword_ptr(base, counter, 4, disp); break;
-                case ScalarDataType::I128: messed_up("can't have i128 deinterleave");
-                }
+                // The interleaved row consumes 2 elements: shift the counter by elem_log2 + lane_count_log2.
+                ax86::Mem mem = ax86::Mem(base, counter, elem_log2 + 1, disp, scalar_dtype_size(sdtype));
                 AnyR result = create_scalar_reg(sdtype);
                 scalar_mov(cc, result, mem, sdtype);
                 return result;
@@ -1941,17 +1917,8 @@ struct CompileState {
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 const ArgInfo &arg = args[data.addr.arg];
                 AnyR result = create_scalar_reg(sdtype);
-                ax86::Mem mem{};
-                switch (sdtype) {
-                case ScalarDataType::I128: messed_up("can't do i128 LoadSplat");
-                case ScalarDataType::I1: mem = asmjit::x86::byte_ptr(arg.gp); break;
-                case ScalarDataType::I8: mem = asmjit::x86::byte_ptr(arg.gp); break;
-                case ScalarDataType::I16: mem = asmjit::x86::word_ptr(arg.gp); break;
-                case ScalarDataType::I32:
-                case ScalarDataType::F32: mem = asmjit::x86::dword_ptr(arg.gp); break;
-                case ScalarDataType::I64:
-                case ScalarDataType::F64: mem = asmjit::x86::qword_ptr(arg.gp); break;
-                }
+                if (sdtype == ScalarDataType::I128) { messed_up("can't do i128 LoadSplat"); }
+                ax86::Mem mem = ax86::Mem(arg.gp, 0, scalar_dtype_size(sdtype));
                 scalar_mov(cc, result, mem, sdtype == ScalarDataType::I1 ? ScalarDataType::I8 : sdtype);
                 if (sdtype == ScalarDataType::I1) { cc.and_(result.as<GpR>(), 1); }
                 return result;
@@ -2270,17 +2237,14 @@ struct CompileState {
             SIMJIT_MATCH (StepKind::AggResult) {
                 const ArgInfo &info = args[data.dst];
                 AnyR arg = subexpr(data.arg);
-                ax86::Mem mem{};
-                switch (step->dtype.as_scalar()) {
-                case ScalarDataType::I8: mem = ax86::byte_ptr(info.gp); break;
-                case ScalarDataType::I16: mem = ax86::word_ptr(info.gp); break;
-                case ScalarDataType::I32:
-                case ScalarDataType::F32: mem = ax86::dword_ptr(info.gp); break;
-                case ScalarDataType::I64:
-                case ScalarDataType::F64: mem = ax86::qword_ptr(info.gp); break;
-                case ScalarDataType::I1: messed_up("i1 aggs should've been rewritten to use i8");
-                case ScalarDataType::I128: messed_up("i128 aggs should've been handled with special opcodes");
+                ScalarDataType dst_dtype = step->dtype.as_scalar();
+                if (dst_dtype == ScalarDataType::I1) {
+                    messed_up("i1 aggs should've been rewritten to use i8");
                 }
+                if (dst_dtype == ScalarDataType::I128) {
+                    messed_up("i128 aggs should've been handled with special opcodes");
+                }
+                ax86::Mem mem = ax86::Mem(info.gp, 0, scalar_dtype_size(dst_dtype));
                 scalar_mov(cc, mem, arg, sdtype);
                 return {};
             }
