@@ -306,7 +306,7 @@ enum class SpecialOp : uint16_t {
     SmallPopcount = 0x400,
     LargePopcount = 0x800,
     I8ConstantShift = 0x1000,
-    Deinterleave = 0x2000,
+    SmallDeinterleave = 0x4000,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(SpecialOp)
 

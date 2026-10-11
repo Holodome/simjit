@@ -1383,7 +1383,7 @@ Value FunctionBuilder::load_deinterleave(Argument argument, uint8_t lane_count, 
         invalid_input("load_deinterleave supports only 2-way interleaved loads, got %u lanes", lane_count);
     }
     if (lane >= lane_count) { invalid_input("load_deinterleave lane %u out of %u lanes", lane, lane_count); }
-    impl_->special_ops |= SpecialOp::Deinterleave;
+    if (func_arg.dtype == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::SmallDeinterleave; }
 
     uint64_t hash = make_hash(StepKind::LoadDeinterleave, argument, kind, lane_count, lane);
     if (auto *result = impl_->cse<StepKind::LoadDeinterleave>(hash, [argument, kind, lane_count, lane](const auto &x) {

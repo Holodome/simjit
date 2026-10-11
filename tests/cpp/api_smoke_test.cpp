@@ -635,10 +635,6 @@ static void api_smoke_transform_and_aggregate() {
 
 static void api_smoke_load_deinterleave() {
     using hir::SpecialOp;
-    require_api_smoke(bool(hir::supported_vector_special_ops_for_arch(Arch::Arm64_NEON) & SpecialOp::Deinterleave),
-                      "Arm deinterleave vector capability");
-    require_api_smoke(!bool(hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512) & SpecialOp::Deinterleave),
-                      "x86 deinterleave is staged off");
 
     // Repeated calls share lane steps (CSE), lanes carry self-sufficient metadata, and the argument is
     // flagged as interleaved.
@@ -655,7 +651,6 @@ static void api_smoke_load_deinterleave() {
         builder.store(builder.add(first.even, builder.i32(1)), builder.arg(I32));
         builder.store(second.odd, builder.arg(I32));
         hir::Function *fn = builder.build();
-        require_api_smoke(bool(fn->special_ops & SpecialOp::Deinterleave), "deinterleave special op recorded");
         require_api_smoke(bool(fn->argument_usage[src.idx_] & hir::ArgumentUsage::Interleaved2x),
                           "deinterleave argument usage flag");
         size_t lane_count = 0;
@@ -672,8 +667,10 @@ static void api_smoke_load_deinterleave() {
         require_api_smoke(lane_count == 2, "CSE collapses repeated deinterleave to two lane steps");
     }
 
-    // On x86 the function stages to scalar through the unsupported special-op mechanism.
+    // x86 vectorizes deinterleave through vpermi2var.
     {
+        SpecialOp x86_ops = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+        require_api_smoke(bool(x86_ops & SpecialOp::SmallDeinterleave), "x86 small deinterleave capability");
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
         FunctionBuilder builder{context};
@@ -681,9 +678,25 @@ static void api_smoke_load_deinterleave() {
         builder.store(pair.even, builder.arg(I32));
         builder.store(pair.odd, builder.arg(I32));
         hir::Function *fn = builder.build();
-        require_api_smoke(fn->is_scalar_only(), "x86 deinterleave stages to scalar");
-        require_api_smoke(bool(fn->unsupported_vector_special_ops() & SpecialOp::Deinterleave),
-                          "x86 deinterleave unsupported vector op");
+        require_api_smoke(!fn->is_scalar_only(), "x86 deinterleave vectorizes");
+    }
+
+    // i8 lanes require VBMI; hosts without it stage them to scalar while wider lanes stay vectorized.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
+        context.host_supported_vector_special_ops =
+            hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512) & ~SpecialOp::SmallDeinterleave;
+        FunctionBuilder builder{context};
+        DeinterleavedPair i8_pair = builder.load2(builder.arg(I8));
+        builder.store(i8_pair.even, builder.arg(I8));
+        builder.store(i8_pair.odd, builder.arg(I8));
+        builder.store(builder.load2(builder.arg(I32)).even, builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->special_ops & SpecialOp::SmallDeinterleave), "i8 deinterleave op recorded");
+        require_api_smoke(fn->is_scalar_only(), "i8 deinterleave stages to scalar without VBMI");
+        require_api_smoke(bool(fn->unsupported_vector_special_ops() & SpecialOp::SmallDeinterleave),
+                          "i8 deinterleave unsupported without VBMI");
     }
 
     // A gather fed by a deinterleave lane marks the interleaved input as a bounded index source.
@@ -713,7 +726,6 @@ static void api_smoke_load_deinterleave() {
         require_api_smoke(pair.even.step_ != nullptr, "pair even lane materialized");
         builder.store(single, builder.arg(I32));
         hir::Function *fn = builder.build();
-        require_api_smoke(bool(fn->special_ops & SpecialOp::Deinterleave), "single-lane deinterleave special op");
         size_t lane_count = 0;
         std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
         for (hir::Step *root : fn->step_roots) {

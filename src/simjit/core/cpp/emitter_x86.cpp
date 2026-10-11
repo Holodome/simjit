@@ -1182,9 +1182,35 @@ struct X86CppEmitter : CppEmitterBase {
                 return cpp_var_decl(step) +
                        unsafe_intrin_call(intrin, format("arg%zu + i%s", data.addr.arg, offset_str.c_str()));
             }
-            // Unreachable today: deinterleave is not in the x86 vector special-op set, so vectorized MIR can
-            // not contain this step. Kept as last-resort protection per backend conventions.
-            SIMJIT_MATCH (StepKind::LoadDeinterleave) unsupported("Do not support vectorized load-deinterleave");
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask load-deinterleave"); }
+                if (data.lane_count != 2 || data.lane >= data.lane_count) {
+                    unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                VecDataType vdtype = step->dtype.as_vec();
+                size_t width = vdtype.nelems();
+                const auto &loadu = x86::loadu_map.lookup(vdtype);
+                const auto &permute = x86::permutex2var_map.lookup(vdtype);
+                std::string lo =
+                    unsafe_intrin_call(loadu, format("arg%zu + 2 * i + %zu", data.addr.arg, 2 * data.addr.offset));
+                std::string hi = unsafe_intrin_call(
+                    loadu, format("arg%zu + 2 * i + %zu", data.addr.arg, 2 * data.addr.offset + width));
+
+                size_t esz = vdtype.element_size_bytes();
+                size_t reg_bytes = vdtype.size_bytes();
+                std::string idx = format("%s(", x86::setr_map.lookup(vdtype).name());
+                for (size_t q = 0; q < reg_bytes / 8; ++q) {
+                    uint64_t chunk = 0;
+                    for (size_t byte = 0; byte < 8; ++byte) {
+                        size_t pos = q * 8 + byte;
+                        chunk |= uint64_t(((2 * (pos / esz) + data.lane) >> (8 * (pos % esz))) & 0xff) << (8 * byte);
+                    }
+                    if (q != 0) { idx += ", "; }
+                    simjit::format_to(idx, "0x%016llxull", (unsigned long long)chunk);
+                }
+                idx += ')';
+                return cpp_var_decl(step) + unsafe_intrin_call(permute, lo, idx, hi);
+            }
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 VecDataType vdtype = step->dtype.as_vec();
                 const x86::Intrinsic *imm_intrin = nullptr;

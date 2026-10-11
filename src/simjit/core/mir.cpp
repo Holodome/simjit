@@ -3474,13 +3474,20 @@ struct MirConstructState {
         func->step_id_count = sm.max_id();
         interleave_pairs.resize(func->args.size());
         func->interleave.by_argument = arena->alloc_array<ArgumentInterleave>(func->args.size());
+        std::vector<VecDataType> interleave_dtypes{};
         for (size_t i = 0; i < func->args.size(); ++i) {
             const auto &drafts = interleave_pairs[i];
             func->interleave.by_argument[i].pairs = arena->alloc_array<InterleavePair>(drafts.size());
             for (size_t j = 0; j < drafts.size(); ++j) {
                 func->interleave.by_argument[i].pairs[j] = InterleavePair{drafts[j].even, drafts[j].odd};
+                VecDataType lane_dtype = drafts[j].dtype.as_vec();
+                if (std::find(interleave_dtypes.begin(), interleave_dtypes.end(), lane_dtype) ==
+                    interleave_dtypes.end()) {
+                    interleave_dtypes.push_back(lane_dtype);
+                }
             }
         }
+        func->interleave.dtypes = arena->copy_array<VecDataType>(interleave_dtypes);
 
         return func;
     }

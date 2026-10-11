@@ -708,6 +708,8 @@ struct ArgumentInterleave {
 // Pairing information for vectorized LoadDeinterleave steps.
 struct InterleaveInfo {
     ArenaArray<ArgumentInterleave> by_argument; // one per argument
+    // Distinct lane dtypes across all arguments (even/odd index tables are per dtype).
+    ArenaArray<VecDataType> dtypes;
 };
 
 struct Function {

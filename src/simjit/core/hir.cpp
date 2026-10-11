@@ -62,7 +62,7 @@ std::string show_special_ops(SpecialOp ops) {
     append(SpecialOp::SmallPopcount, "small-popcount");
     append(SpecialOp::LargePopcount, "large-popcount");
     append(SpecialOp::I8ConstantShift, "i8-constant-shift");
-    append(SpecialOp::Deinterleave, "deinterleave");
+    append(SpecialOp::SmallDeinterleave, "small-deinterleave");
     return result;
 }
 
@@ -74,10 +74,10 @@ SpecialOp supported_vector_special_ops_for_arch(Arch arch) noexcept {
         // 'reduced ice lake', where some special ops will be removed from supported list.
         return SpecialOp::I64Mul | SpecialOp::Gather | SpecialOp::Scatter | SpecialOp::CondScatter |
                SpecialOp::SmallPack | SpecialOp::ArbitraryBitPermute | SpecialOp::SmallPopcount |
-               SpecialOp::LargePopcount | SpecialOp::I8ConstantShift;
+               SpecialOp::LargePopcount | SpecialOp::I8ConstantShift | SpecialOp::SmallDeinterleave;
     case Arch::Arm64_NEON:
         return SpecialOp::Gather | SpecialOp::SmallPack | SpecialOp::SmallPopcount | SpecialOp::LargePopcount |
-               SpecialOp::I8ConstantShift | SpecialOp::Scatter | SpecialOp::Deinterleave;
+               SpecialOp::I8ConstantShift | SpecialOp::Scatter | SpecialOp::SmallDeinterleave;
     }
     SIMJIT_UNREACHABLE();
 }

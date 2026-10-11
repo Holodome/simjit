@@ -126,6 +126,7 @@ hir::SpecialOp AsmjitSession::host_supported_vector_special_ops() const noexcept
     case asmjit::Arch::kX64: {
         const auto &x86 = runtime_.cpu_features().x86();
         hir::SpecialOp result = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+        if (!x86.has_avx512_vbmi()) { result &= ~hir::SpecialOp::SmallDeinterleave; }
         if (!x86.has_avx512_vbmi2()) { result &= ~hir::SpecialOp::SmallPack; }
         if (!x86.has_gfni()) { result &= ~(hir::SpecialOp::ArbitraryBitPermute | hir::SpecialOp::I8ConstantShift); }
         if (!x86.has_avx512_bitalg()) { result &= ~hir::SpecialOp::SmallPopcount; }
