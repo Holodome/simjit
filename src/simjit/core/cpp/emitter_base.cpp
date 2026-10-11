@@ -818,6 +818,11 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
             return format("memcpy((char *)arg%zu + i * %zu%s, &%s, %zu)", data.addr.arg, size, offset_str.c_str(),
                           show_scalar_operand(data.what), size);
         }
+        SIMJIT_MATCH (StepKind::StoreInterleave) {
+            return format("arg%zu[2 * i] = %s;\n"
+                          "arg%zu[2 * i + 1] = %s",
+                          data.dst.arg, show_scalar_operand(data.even), data.dst.arg, show_scalar_operand(data.odd));
+        }
         SIMJIT_MATCH (StepKind::ArithBinary) {
             return cpp_var_decl(step) + scalar_arith_binary_expr(sdtype, data, show_scalar_operand(data.left),
                                                                  show_scalar_operand(data.right));

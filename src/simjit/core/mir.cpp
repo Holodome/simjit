@@ -302,6 +302,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::VecNarrowCombine: return "narrow-combine";
     case StepKind::VecFloatNarrowCombine: return "float-narrow-combine";
     case StepKind::ConstDiv: return "const-div";
+    case StepKind::StoreInterleave: return "store-interleave";
     }
     SIMJIT_UNREACHABLE();
 }
@@ -315,7 +316,8 @@ constexpr bool is_root_step(StepKind kind) noexcept {
     case StepKind::Pack:
     case StepKind::CondStore:
     case StepKind::StoreSum128:
-    case StepKind::CondScatter: return true;
+    case StepKind::CondScatter:
+    case StepKind::StoreInterleave: return true;
     default: break;
     }
     return false;
@@ -411,6 +413,9 @@ struct ExprShowState {
             SIMJIT_MATCH (StepKind::Store)
                 wr("dst=@%zu src=%%%u offset=%zu kind=%s", data.addr.arg, ref(data.what), data.addr.offset,
                    show_load_store_kind(data.kind));
+            SIMJIT_MATCH (StepKind::StoreInterleave)
+                wr("even=%%%u odd=%%%u dst=@%zu offset=%zu", ref(data.even), ref(data.odd), data.dst.arg,
+                   data.dst.offset);
             SIMJIT_MATCH (StepKind::Compare)
                 wr("op=%s left=%%%u right=%%%u is_unsigned=%s", show_cmp_op(data.op), ref(data.left), ref(data.right),
                    data.is_unsigned ? "true" : "false");
@@ -768,6 +773,7 @@ struct MirConstructState {
         DataType dtype{};
         LoadStoreKind kind{};
         uint8_t lane_count = 0;
+        bool store = false;
         Step *even = nullptr;
         Step *odd = nullptr;
     };
@@ -775,24 +781,29 @@ struct MirConstructState {
 
     void collect_interleave_lane(Step *lane) {
         auto &data = lane->step_data<StepKind::LoadDeinterleave>();
-        if (data.addr.arg >= interleave_pairs.size()) { interleave_pairs.resize(data.addr.arg + 1); }
-        auto &pairs = interleave_pairs[data.addr.arg];
+        collect_interleave_pair(data.addr.arg, data.addr.offset, lane->dtype, data.kind, data.lane_count, false, lane,
+                                nullptr);
+    }
+
+    void collect_interleave_store(Step *root) {
+        auto &data = root->step_data<StepKind::StoreInterleave>();
+        collect_interleave_pair(data.dst.arg, data.dst.offset, root->dtype, LoadStoreKind::Unaligned, 2, true,
+                                data.even, data.odd);
+    }
+
+    void collect_interleave_pair(ArgumentIdx arg, size_t offset, DataType dtype, LoadStoreKind kind, uint8_t lane_count,
+                                 bool store, Step *even, Step *odd) {
+        if (arg >= interleave_pairs.size()) { interleave_pairs.resize(arg + 1); }
+        auto &pairs = interleave_pairs[arg];
         for (InterleavePairDraft &pair : pairs) {
-            if (pair.offset != data.addr.offset || pair.dtype != lane->dtype || pair.kind != data.kind ||
-                pair.lane_count != data.lane_count) {
+            if (pair.offset != offset || pair.dtype != dtype || pair.kind != kind || pair.lane_count != lane_count) {
                 continue;
             }
-            if (data.lane == 0 && pair.even == nullptr) {
-                pair.even = lane;
-                return;
-            }
-            if (data.lane == 1 && pair.odd == nullptr) {
-                pair.odd = lane;
-                return;
-            }
+            if (pair.even == nullptr && even != nullptr) { pair.even = even; }
+            if (pair.odd == nullptr && odd != nullptr) { pair.odd = odd; }
+            return;
         }
-        pairs.push_back(InterleavePairDraft{data.addr.offset, lane->dtype, data.kind, data.lane_count,
-                                            data.lane == 0 ? lane : nullptr, data.lane == 1 ? lane : nullptr});
+        pairs.push_back(InterleavePairDraft{offset, dtype, kind, lane_count, store, even, odd});
     }
 
     explicit MirConstructState(Context *ctx) : sm(ctx->arena), arch_traits(get_arch_traits(ctx->arch)) {}
@@ -2211,6 +2222,18 @@ struct MirConstructState {
                 main_loop_roots.push_back(root);
                 return;
             }
+            SIMJIT_MATCH (hir::StepKind::StoreInterleave) {
+                ArgumentAddress addr{data.dst, ctx.rows.row_offset()};
+                Step *even = ref_left();
+                Step *odd = ref_right();
+                invariant_same_type(node, even);
+                invariant_same_type(node, odd);
+
+                Step *root = sm.store_interleave({even, odd, addr}, node->dtype);
+                collect_interleave_store(root);
+                main_loop_roots.push_back(root);
+                return;
+            }
             SIMJIT_MATCH (hir::StepKind::AccArithBinary) {
                 AccId acc_idx = acc_groups[data.acc].alloc_main(ctx.remap);
                 Step *acc = sm.acc_load(acc_idx, node->dtype);
@@ -2371,6 +2394,7 @@ struct MirConstructState {
         case hir::StepKind::AccPredicateBinary:
         case hir::StepKind::AccSum128:
         case hir::StepKind::Countif:
+        case hir::StepKind::StoreInterleave:
             SIMJIT_UNREACHABLE();
             SIMJIT_MATCH (hir::StepKind::Const) { return make_const(data, node->dtype); }
             SIMJIT_MATCH (hir::StepKind::CheckedOp) {
@@ -2886,6 +2910,11 @@ struct MirConstructState {
                 }
                 return remainder_roots.push_back(sm.store({{data.addr, 0}, ref(data.what), data.kind}, sdtype));
             }
+            SIMJIT_MATCH (hir::StepKind::StoreInterleave) {
+                Step *even = ref(data.even);
+                Step *odd = ref(data.odd);
+                return remainder_roots.push_back(sm.store_interleave({even, odd, {data.dst, 0}}, even->dtype));
+            }
             SIMJIT_MATCH (hir::StepKind::AccArithBinary) {
                 if (data.cond != nullptr) {
                     ScalarDataType dtype = sdtype;
@@ -2995,6 +3024,7 @@ struct MirConstructState {
         case hir::StepKind::AccPredicateBinary:
         case hir::StepKind::AccSum128:
         case hir::StepKind::Countif:
+        case hir::StepKind::StoreInterleave:
             SIMJIT_UNREACHABLE();
             SIMJIT_MATCH (hir::StepKind::Const) {
                 ScalarDataType dt = sdtype == ScalarDataType::I1 ? ScalarDataType::I8 : sdtype;
@@ -3474,6 +3504,7 @@ struct MirConstructState {
         func->step_id_count = sm.max_id();
         interleave_pairs.resize(func->args.size());
         func->interleave.by_argument = arena->alloc_array<ArgumentInterleave>(func->args.size());
+        std::vector<VecDataType> deinterleave_dtypes{};
         std::vector<VecDataType> interleave_dtypes{};
         for (size_t i = 0; i < func->args.size(); ++i) {
             const auto &drafts = interleave_pairs[i];
@@ -3481,14 +3512,14 @@ struct MirConstructState {
             for (size_t j = 0; j < drafts.size(); ++j) {
                 func->interleave.by_argument[i].pairs[j] = InterleavePair{drafts[j].even, drafts[j].odd};
                 VecDataType lane_dtype = drafts[j].dtype.as_vec();
-                if (std::find(interleave_dtypes.begin(), interleave_dtypes.end(), lane_dtype) ==
-                    interleave_dtypes.end()) {
-                    interleave_dtypes.push_back(lane_dtype);
+                std::vector<VecDataType> &dtypes = drafts[j].store ? interleave_dtypes : deinterleave_dtypes;
+                if (std::find(dtypes.begin(), dtypes.end(), lane_dtype) == dtypes.end()) {
+                    dtypes.push_back(lane_dtype);
                 }
             }
         }
-        func->interleave.dtypes = arena->copy_array<VecDataType>(interleave_dtypes);
-
+        func->interleave.deinterleave_dtypes = arena->copy_array<VecDataType>(deinterleave_dtypes);
+        func->interleave.interleave_dtypes = arena->copy_array<VecDataType>(interleave_dtypes);
         return func;
     }
 };

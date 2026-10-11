@@ -375,6 +375,11 @@ struct FunctionBuilderImpl {
         SIMJIT_ASSERT(dst.dtype == dtype);
         return sm.scatter({arg, idx, dst.idx, cond}, dtype);
     }
+    Step *store_interleave(Step *even, Step *odd, const ArgumentDecl &dst) {
+        SIMJIT_ASSERT(dst.dtype == even->dtype);
+        SIMJIT_ASSERT(dst.dtype == odd->dtype);
+        return sm.store_interleave({even, odd, dst.idx}, even->dtype);
+    }
     Step *pack(Step *arg, Step *cond, const ArgumentDecl &dst, const Accumulator &dst_size_acc) {
         ScalarDataType dtype = arg->dtype;
         SIMJIT_ASSERT(dst.dtype == dtype);
@@ -1246,6 +1251,25 @@ void FunctionBuilder::cond_scatter(Value value, Value idx, MaybePredicate cond, 
     }
 
     auto *step = impl_->scatter(value.step_, idx.step_, cond_step, func_arg);
+    impl_->step_roots.push_back(step);
+}
+
+void FunctionBuilder::store_interleave(Argument dst, Value even, Value odd) {
+    check_value(even);
+    check_value(odd);
+    if (even.dtype() != odd.dtype()) {
+        invalid_type("Store interleave even and odd arguments should have same type, got %s, %s",
+                     show_scalar_dtype(even.dtype()), show_scalar_dtype(odd.dtype()));
+    }
+    const ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
+    check_store_dst(func_arg, even.step_, StepKind::StoreInterleave);
+    if (func_arg.dtype == ScalarDataType::I1) { invalid_type("store_interleave should not be used with i1 type"); }
+    if (func_arg.dtype == ScalarDataType::I128) {
+        invalid_type("store_interleave does not support %s type", show_scalar_dtype(func_arg.dtype));
+    }
+    if (func_arg.dtype == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::SmallDeinterleave; }
+
+    auto *step = impl_->store_interleave(even.step_, odd.step_, func_arg);
     impl_->step_roots.push_back(step);
 }
 

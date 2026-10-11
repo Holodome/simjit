@@ -1198,18 +1198,67 @@ struct X86CppEmitter : CppEmitterBase {
 
                 size_t esz = vdtype.element_size_bytes();
                 size_t reg_bytes = vdtype.size_bytes();
-                std::string idx = format("%s(", x86::setr_map.lookup(vdtype).name());
-                for (size_t q = 0; q < reg_bytes / 8; ++q) {
+                const char *set_name =
+                    x86::vec_to_x86(vdtype).reg == x86::VecRegisterKind::XMM
+                        ? "_mm_set_epi64x"
+                        : (x86::vec_to_x86(vdtype).reg == x86::VecRegisterKind::YMM ? "_mm256_set_epi64x"
+                                                                                    : "_mm512_set_epi64");
+                std::string idx = format("%s(", set_name);
+                size_t qwords = reg_bytes / 8;
+                for (size_t qi = 0; qi < qwords; ++qi) {
+                    size_t q = qwords - 1 - qi;
                     uint64_t chunk = 0;
                     for (size_t byte = 0; byte < 8; ++byte) {
                         size_t pos = q * 8 + byte;
                         chunk |= uint64_t(((2 * (pos / esz) + data.lane) >> (8 * (pos % esz))) & 0xff) << (8 * byte);
                     }
-                    if (q != 0) { idx += ", "; }
+                    if (qi != 0) { idx += ", "; }
                     simjit::format_to(idx, "0x%016llxull", (unsigned long long)chunk);
                 }
                 idx += ')';
                 return cpp_var_decl(step) + unsafe_intrin_call(permute, lo, idx, hi);
+            }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                VecDataType vdtype = step->dtype.as_vec();
+                if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
+                const auto &permute = x86::permutex2var_map.lookup(vdtype);
+                const auto &storeu = x86::storeu_map.lookup(vdtype);
+                size_t width = vdtype.nelems();
+                size_t esz = vdtype.element_size_bytes();
+                size_t reg_bytes = vdtype.size_bytes();
+                size_t half_width = width / 2;
+                const char *set_name =
+                    x86::vec_to_x86(vdtype).reg == x86::VecRegisterKind::XMM
+                        ? "_mm_set_epi64x"
+                        : (x86::vec_to_x86(vdtype).reg == x86::VecRegisterKind::YMM ? "_mm256_set_epi64x"
+                                                                                    : "_mm512_set_epi64");
+                auto interleave_idx = [=](size_t parity_base) {
+                    std::string idx = format("%s(", set_name);
+                    size_t qwords = reg_bytes / 8;
+                    for (size_t qi = 0; qi < qwords; ++qi) {
+                        size_t q = qwords - 1 - qi;
+                        uint64_t chunk = 0;
+                        for (size_t byte = 0; byte < 8; ++byte) {
+                            size_t pos = q * 8 + byte;
+                            size_t k = pos / esz;
+                            size_t value = (k % 2 == 0) ? parity_base + k / 2 : half_width + parity_base + (k - 1) / 2;
+                            chunk |= uint64_t((value >> (8 * (pos % esz))) & 0xff) << (8 * byte);
+                        }
+                        if (qi != 0) { idx += ", "; }
+                        simjit::format_to(idx, "0x%016llxull", (unsigned long long)chunk);
+                    }
+                    return idx + ")";
+                };
+                std::string idx_lo = interleave_idx(0);
+                std::string idx_hi = interleave_idx(half_width);
+                std::string lo = unsafe_intrin_call(permute, show(data.even), idx_lo, show(data.odd));
+                std::string hi = unsafe_intrin_call(permute, show(data.even), idx_hi, show(data.odd));
+                std::string offset = format("2 * i + %zu", 2 * data.dst.offset);
+                std::string result =
+                    unsafe_intrin_call(storeu, format("arg%zu + %s", data.dst.arg, offset.c_str()), lo);
+                result += "\n" + unsafe_intrin_call(
+                                     storeu, format("arg%zu + %s + %zu", data.dst.arg, offset.c_str(), width), hi);
+                return result;
             }
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 VecDataType vdtype = step->dtype.as_vec();

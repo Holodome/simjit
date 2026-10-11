@@ -346,7 +346,6 @@ extern const MaskIntrinsicUnaryMap store_mask_map;
 extern const VecIntrinsicUnaryMap gp2affine_map;
 extern const VecIntrinsicUnaryMap permb_map;
 extern const VecIntrinsicUnaryMap permutex2var_map;
-extern const VecIntrinsicUnaryMap setr_map;
 extern const VecIntrinsicUnaryMap shuffle8_map;
 
 extern const VecIntrinsicUnaryMap roundscale_map;

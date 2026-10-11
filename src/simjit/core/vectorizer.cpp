@@ -1428,6 +1428,7 @@ struct AlgebraicVectorizer {
         case StepKind::PredicateBinary: node->dtype = node->left()->dtype; break;
         case StepKind::Compare: node->dtype = graph_value_dtype(node); break;
         case StepKind::Store: node->dtype = node->children[0]->dtype; break;
+        case StepKind::StoreInterleave: node->dtype = node->children[0]->dtype; break;
         case StepKind::Select: node->dtype = node->children[1]->dtype; break;
         case StepKind::Index:
         case StepKind::Const:

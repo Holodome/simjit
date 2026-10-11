@@ -516,6 +516,14 @@ struct CompileState {
         return {left, shrink_mask(right, right_size, left_size)};
     }
 
+    // TODO(a64 addressing): add an inline-offset-support argument to the Mem-returning helpers and fold the
+    // static row offset into the instruction instead of the second add in the fallback path. Per-instruction
+    // support (ARMv8 SIMD load/store addressing classes):
+    //   LDR/STR B/H/S/D/Q  - immediate (unsigned, scaled by size) and register offset: both supported
+    //   LDP/STP S/D/Q      - immediate only (signed, scaled by 8), no register offset
+    //   LD1R/LD2R/LD3R/LD4R (replicate) - no inline offset
+    //   LD1/ST1/LD2/ST2/LD3/ST4 multiple structures (incl. future ld2/st2) - no inline offset
+    //   LD1/ST1/.../LD4/ST4 single structure to one lane ({Vt.T}[i]) - no inline offset
     aja64::Mem row_address(const ArgumentAddress &addr, size_t elem_log2, size_t elems_per_row_log2,
                            size_t stride_elems, bool change_post_idx = true) {
         if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
@@ -1185,6 +1193,34 @@ struct CompileState {
                 AnyR what = subexpr(data.what);
                 aja64::Mem mem = scalar_mem(data.addr, sdtype);
                 store(cc, what, mem, sdtype);
+                return {};
+            }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                AnyR even = subexpr(data.even);
+                AnyR odd = subexpr(data.odd);
+                SIMJIT_ASSERT(data.dst.offset == 0);
+                aja64::Mem mem = row_address(data.dst, scalar_dtype_size_log2(sdtype), 1, 2);
+                switch (sdtype) {
+                case ScalarDataType::F32:
+                case ScalarDataType::F64: cc.stp(even.as<VecR>(), odd.as<VecR>(), mem); break;
+                case ScalarDataType::I32:
+                case ScalarDataType::I64: cc.stp(even.as<GpR>(), odd.as<GpR>(), mem); break;
+                case ScalarDataType::I8:
+                case ScalarDataType::I16: {
+                    GpR tmp = cc.new_gp32();
+                    cc.mov(tmp, even.as<GpR>());
+                    size_t bits = scalar_dtype_bits(sdtype);
+                    cc.bfi(tmp, odd.as<GpR>(), bits, bits);
+                    if (sdtype == ScalarDataType::I8) {
+                        cc.strh(tmp, mem);
+                    } else {
+                        cc.str(tmp, mem);
+                    }
+                    break;
+                }
+                case ScalarDataType::I1:
+                case ScalarDataType::I128: messed_up("...");
+                }
                 return {};
             }
             SIMJIT_MATCH (StepKind::ArithBinary) {
@@ -2558,6 +2594,19 @@ struct CompileState {
                 return {};
             }
 
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                VecDataType vdtype = step->dtype.as_vec();
+                if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
+                if (vdtype.size_bytes() != 16)
+                    messed_up("Invalid store-interleave of dtype %s", show_vec_dtype(vdtype));
+                ArgumentAddress pair_base{data.dst.arg, data.dst.offset * 2};
+                aja64::Mem mem = vec_deinterleave_mem(pair_base, vdtype);
+                VecR even = vec_subexpr(data.even);
+                VecR odd = vec_subexpr(data.odd);
+                cc.st2(even, odd, mem);
+                return {};
+            }
+
             SIMJIT_MATCH (StepKind::CondStore) {
                 // There is no direct cond store instruction like on x86. We rewrite it manually to
                 // load+blend+store. The performance is actually surprisingly good.
@@ -3692,15 +3741,21 @@ struct CompileState {
 
         traverse_steps_postorder_unique(step_map.size(), steps, [&](Step *step) {
             std::optional<ArgumentAddress> addr{};
+            size_t footprint_width = 0;
             if (step->is(StepKind::Load)) {
                 addr = step->step_data<StepKind::Load>().addr;
             } else if (step->is(StepKind::Store)) {
                 addr = step->step_data<StepKind::Store>().addr;
             } else if (step->is(StepKind::CondStore)) {
                 addr = step->step_data<StepKind::CondStore>().addr;
+            } else if (step->is(StepKind::StoreInterleave)) {
+                addr = step->step_data<StepKind::StoreInterleave>().dst;
+                footprint_width = step->dtype.is_vec() ? step->dtype.as_vec().nelems() : 0;
             }
             if (!addr.has_value()) { return; }
-            if (addr->offset + step_row_width(step) <= loop_width) { return; }
+            if (addr->offset + (footprint_width != 0 ? footprint_width : step_row_width(step)) <= loop_width) {
+                return;
+            }
 
             // Some normalized vector expressions read overlapping windows that extend past the rows produced by
             // one main-loop iteration. Post-index addressing would advance the argument pointer by those read-ahead
@@ -3728,6 +3783,12 @@ struct CompileState {
             if (data.lane != 0) { return {}; }
             return std::pair{ArgumentAddress{data.addr.arg, data.addr.offset * data.lane_count},
                              size_t{data.lane_count} * step->dtype.as_vec().nelems()};
+        }
+
+        if (step->is(StepKind::StoreInterleave)) {
+            if (!step->dtype.is_vec()) { return {}; }
+            auto data = step->step_data<StepKind::StoreInterleave>();
+            return std::pair{ArgumentAddress{data.dst.arg, data.dst.offset * 2}, 2 * step->dtype.as_vec().nelems()};
         }
 
         if (step->is(StepKind::Load)) {

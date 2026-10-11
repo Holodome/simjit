@@ -38,9 +38,8 @@ ComplexLanes load_complex(FunctionBuilder &b, Argument src) {
     return {lanes.even, lanes.odd};
 }
 
-void store_complex(FunctionBuilder &b, ComplexLanes z, Argument re_dst, Argument im_dst) {
-    b.store(z.re, re_dst);
-    b.store(z.im, im_dst);
+void store_complex(FunctionBuilder &b, ComplexLanes z, Argument dst) {
+    b.store_interleave(dst, z.re, z.im);
 }
 
 // Deinterleave both lanes, add a constant to the even lane, store both lanes.
@@ -270,6 +269,56 @@ def func(n, pairs, values, dst):
         dst[2*i] = values[i]
         )FOO"});
 
+    // Interleaved store over every supported element type (load2 -> store_interleave identity).
+#define ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, dt)                          \
+    tests.push_back(Test{[](FunctionBuilder &b) {                            \
+                             Argument src = b.arg(dt);                       \
+                             Argument dst = b.arg(dt);                       \
+                             DeinterleavedPair lanes = b.load2(src);         \
+                             b.store_interleave(dst, lanes.even, lanes.odd); \
+                         },                                                  \
+                         PASS_ALL, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[2*i] = src[2*i]
+        dst[2*i+1] = src[2*i+1]
+        )FOO"});
+
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, I8)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, I16)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, I32)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, I64)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, F32)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, F64)
+
+    // Interleaved store with swapped lanes.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg(I64);
+                             Argument dst = b.arg(I64);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store_interleave(dst, lanes.odd, lanes.even);
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[2*i] = src[2*i+1]
+        dst[2*i+1] = src[2*i]
+        )FOO"});
+
+    // Interleaved store of computed lanes over an interleaved source (i8 exercises the pair pack).
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg(I8);
+                             Argument dst = b.arg(I8);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store_interleave(dst, lanes.odd, b.add(lanes.even, lanes.odd));
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[2*i] = src[2*i+1]
+        dst[2*i+1] = src[2*i] + src[2*i+1]
+        )FOO"});
+
     // f32 basic access with distinct lane expressions.
     tests.push_back(Test{[](FunctionBuilder &b) {
                              Argument src = b.arg(F32);
@@ -286,25 +335,24 @@ def func(n, src, even_dst, odd_dst):
         odd_dst[i] = src[2*i+1] * 2
         )FOO"});
 
-    // f32 arithmetic: lanes as (real, imag), scaled rotation by a fixed angle.
+    // f32 arithmetic: lanes as (real, imag), scaled rotation by a fixed angle, interleaved store.
     tests.push_back(Test{[](FunctionBuilder &b) {
                              Argument src = b.arg(F32);
-                             Argument re_dst = b.arg(F32);
-                             Argument im_dst = b.arg(F32);
+                             Argument dst = b.arg(F32);
                              DeinterleavedPair lanes = b.load2(src);
                              Value re = lanes.even;
                              Value im = lanes.odd;
                              Value half_sqrt2 = b.f32(0.7071067811865476f);
-                             b.store(b.mul(b.sub(re, im), half_sqrt2), re_dst);
-                             b.store(b.mul(b.add(re, im), half_sqrt2), im_dst);
+                             b.store_interleave(dst, b.mul(b.sub(re, im), half_sqrt2),
+                                                b.mul(b.add(re, im), half_sqrt2));
                          },
                          PASS_ALL, R"FOO(
-def func(n, src, re_dst, im_dst):
+def func(n, src, dst):
     for i in range(n):
         e = src[2*i]
         o = src[2*i+1]
-        re_dst[i] = (e - o) * 0.7071067811865476
-        im_dst[i] = (e + o) * 0.7071067811865476
+        dst[2*i] = (e - o) * 0.7071067811865476
+        dst[2*i+1] = (e + o) * 0.7071067811865476
         )FOO"});
 
     // f64 series impedance Z(R, L, C, f) = R + i*2*pi*f*L + 1/(i*2*pi*f*C).
@@ -312,8 +360,7 @@ def func(n, src, re_dst, im_dst):
     tests.push_back(Test{[](FunctionBuilder &b) {
                              Argument rl_arg = b.arg(F64);
                              Argument cf_arg = b.arg(F64);
-                             Argument re_dst = b.arg(F64);
-                             Argument im_dst = b.arg(F64);
+                             Argument dst = b.arg(F64);
                              ComplexLanes rl = load_complex(b, rl_arg);
                              ComplexLanes cf = load_complex(b, cf_arg);
                              Value omega = b.mul(cf.im, b.f64(6.283185307179586));
@@ -322,7 +369,7 @@ def func(n, src, re_dst, im_dst):
                              ComplexLanes capacitor =
                                  complex_div(b, {b.f64(1), b.f64(0)}, {b.f64(0), b.mul(cf.re, omega)});
                              ComplexLanes z = complex_add(b, complex_add(b, resistance, inductor), capacitor);
-                             store_complex(b, z, re_dst, im_dst);
+                             store_complex(b, z, dst);
                          },
                          PASS_ALL});
 
@@ -330,8 +377,7 @@ def func(n, src, re_dst, im_dst):
     tests.push_back(Test{[](FunctionBuilder &b) {
                              Argument rl_arg = b.arg(F64);
                              Argument cf_arg = b.arg(F64);
-                             Argument re_dst = b.arg(F64);
-                             Argument im_dst = b.arg(F64);
+                             Argument dst = b.arg(F64);
                              ComplexLanes rl = load_complex(b, rl_arg);
                              ComplexLanes cf = load_complex(b, cf_arg);
                              Value omega = b.mul(cf.im, b.f64(6.283185307179586));
@@ -340,7 +386,7 @@ def func(n, src, re_dst, im_dst):
                              ComplexLanes denominator =
                                  complex_add(b, {b.div(b.f64(1), rl.re), b.mul(cf.re, omega)}, inductor_term);
                              ComplexLanes zp = complex_div(b, {b.f64(1), b.f64(0)}, denominator);
-                             store_complex(b, zp, re_dst, im_dst);
+                             store_complex(b, zp, dst);
                          },
                          PASS_ALL});
 
@@ -349,8 +395,7 @@ def func(n, src, re_dst, im_dst):
     tests.push_back(Test{[](FunctionBuilder &b) {
                              Argument rl_arg = b.arg(F64);
                              Argument cw_arg = b.arg(F64);
-                             Argument re_dst = b.arg(F64);
-                             Argument im_dst = b.arg(F64);
+                             Argument dst = b.arg(F64);
                              ComplexLanes rl = load_complex(b, rl_arg);
                              ComplexLanes cw = load_complex(b, cw_arg);
                              Value omega = cw.im;
@@ -358,7 +403,7 @@ def func(n, src, re_dst, im_dst):
                              Value real_denom = b.sub(b.f64(1), b.mul(b.mul(rl.im, capacitance), omega));
                              Value imag_denom = b.mul(b.mul(rl.re, capacitance), omega);
                              ComplexLanes h = complex_div(b, {b.f64(1), b.f64(0)}, {real_denom, imag_denom});
-                             store_complex(b, h, re_dst, im_dst);
+                             store_complex(b, h, dst);
                          },
                          PASS_ALL});
 
@@ -366,14 +411,13 @@ def func(n, src, re_dst, im_dst):
     tests.push_back(Test{[](FunctionBuilder &b) {
                              Argument z_arg = b.arg(F32);
                              Argument c_arg = b.arg(F32);
-                             Argument re_dst = b.arg(F32);
-                             Argument im_dst = b.arg(F32);
+                             Argument dst = b.arg(F32);
                              ComplexLanes z = load_complex(b, z_arg);
                              ComplexLanes c = load_complex(b, c_arg);
                              for (int iteration = 0; iteration < 4; ++iteration) {
                                  z = complex_add(b, complex_mul(b, z, z), c);
                              }
-                             store_complex(b, z, re_dst, im_dst);
+                             store_complex(b, z, dst);
                          },
                          PASS_ALL});
 

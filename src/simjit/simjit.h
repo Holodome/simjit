@@ -569,6 +569,7 @@ public:
     void pack(Value a, Predicate cond, Argument dst, Argument dst_size);
     void scatter(Value a, Value idx, Argument dst);
     void cond_scatter(Value a, Value idx, MaybePredicate cond, Argument dst);
+    void store_interleave(Argument a, Value even, Value odd);
 
     // Aggregates
 
@@ -582,13 +583,6 @@ public:
 
     Value load(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
     Predicate load_predicate(Argument a);
-
-    DeinterleavedPair load2(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
-
-    Value load2_0(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
-    Value load2_1(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
-
-    // Only lane_count == 2 is currently supported; prefer load2/load2_0/load2_1.
     Value load_deinterleave(Argument a, uint8_t lane_count, uint8_t lane,
                             LoadStoreKind kind = LoadStoreKind::Unaligned);
 
@@ -717,6 +711,11 @@ public:
         store(value, arg(value.dtype()), kind);
     }
     void output_arg(Predicate value) { store(value, arg(ScalarDataType::I1)); }
+
+    DeinterleavedPair load2(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
+
+    Value load2_0(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
+    Value load2_1(Argument a, LoadStoreKind kind = LoadStoreKind::Unaligned);
 
     template <ScalarDataType Ty> Value con(typename ScalarDataTypeMap<Ty>::type data) {
         if constexpr (Ty == ScalarDataType::F32) {

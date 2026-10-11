@@ -1288,31 +1288,6 @@ const VecIntrinsicUnaryMap gp2affine_map{
 };
 
 // XXX: This definition is nonsensical, but is enough for the current usage.
-const VecIntrinsicUnaryMap setr_map{
-    "setr",
-
-    IXMMI8{CT, "_mm_setr_epi64"},
-    IXMMI16{CT, "_mm_setr_epi64"},
-    IXMMI32{CT, "_mm_setr_epi64"},
-    IXMMI64{CT, "_mm_setr_epi64"},
-    IXMMF32{CT, "_mm_setr_epi64"},
-    IXMMF64{CT, "_mm_setr_epi64"},
-
-    IYMMI8{CT, "_mm256_setr_epi64"},
-    IYMMI16{CT, "_mm256_setr_epi64"},
-    IYMMI32{CT, "_mm256_setr_epi64"},
-    IYMMI64{CT, "_mm256_setr_epi64"},
-    IYMMF32{CT, "_mm256_setr_epi64"},
-    IYMMF64{CT, "_mm256_setr_epi64"},
-
-    IZMMI8{CT, "_mm512_setr_epi64"},
-    IZMMI16{CT, "_mm512_setr_epi64"},
-    IZMMI32{CT, "_mm512_setr_epi64"},
-    IZMMI64{CT, "_mm512_setr_epi64"},
-    IZMMF32{CT, "_mm512_setr_epi64"},
-    IZMMF64{CT, "_mm512_setr_epi64"},
-};
-
 const VecIntrinsicUnaryMap permutex2var_map{
     "permutex2var",
 

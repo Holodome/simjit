@@ -515,6 +515,16 @@ struct LLVMBuilder {
                 if (data.lane) { off = b->CreateNUWAdd(off, b->getInt64(data.lane)); }
                 return b->CreateLoad(info.element_type, index_arg(info, off));
             }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                ArgInfo &info = func_args[data.dst.arg];
+                V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
+                off = b->CreateNUWMul(off, b->getInt64(2));
+                V *even_ptr = index_arg(info, off);
+                V *odd_ptr = index_arg(info, b->CreateNUWAdd(off, b->getInt64(1)));
+                b->CreateStore(step_to_llvm(data.even), even_ptr);
+                b->CreateStore(step_to_llvm(data.odd), odd_ptr);
+                return nullptr;
+            }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 ArgInfo &info = func_args[data.addr.arg];
                 if (step->dtype == ScalarDataType::I1) {
@@ -936,6 +946,28 @@ struct LLVMBuilder {
                     lane_indices.push_back(int(i * data.lane_count + data.lane));
                 }
                 return b->CreateShuffleVector(wide, wide, lane_indices);
+            }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
+                VecDataType vdtype = step->dtype.as_vec();
+                size_t width = vdtype.nelems();
+                ArgInfo &info = func_args[data.dst.arg];
+                V *even = step_to_llvm(data.even);
+                V *odd = step_to_llvm(data.odd);
+                llvm::SmallVector<int, 64> interleave;
+                for (size_t i = 0; i < width; ++i) {
+                    interleave.push_back(int(i));
+                    interleave.push_back(int(width + i));
+                }
+                V *packed = b->CreateShuffleVector(even, odd, interleave);
+                V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
+                off = b->CreateNUWMul(off, b->getInt64(2));
+                size_t base_offset = data.dst.offset * 2;
+                if (base_offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(base_offset)); }
+                V *idx = index_arg(info, off);
+                llvm::StoreInst *inst = b->CreateStore(packed, idx);
+                inst->setAlignment(llvm::Align{1});
+                return nullptr;
             }
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 V *left = step_to_llvm(data.left);

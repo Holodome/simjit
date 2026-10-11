@@ -245,6 +245,7 @@ template <> struct hl::from_list<simjit::hir::StepKind> {
         if (s == "int-cast") return simjit::hir::StepKind::IntCast;
         if (s == "float-cast") return simjit::hir::StepKind::FloatCast;
         if (s == "store") return simjit::hir::StepKind::Store;
+        if (s == "store-interleave") return simjit::hir::StepKind::StoreInterleave;
         if (s == "cmp") return simjit::hir::StepKind::Compare;
         if (s == "acc-arith-bin") return simjit::hir::StepKind::AccArithBinary;
         if (s == "acc-predicate-bin") return simjit::hir::StepKind::AccPredicateBinary;
@@ -451,6 +452,10 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
         SIMJIT_MATCH (StepKind::Store) {
             payload = hl::list_dot(ref(data.what), serialize_arg_ref(data.addr), data.kind,
                                    data.cond ? hl::list(ref(data.cond)) : nullptr);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::StoreInterleave) {
+            payload = hl::list(ref(data.even), ref(data.odd), serialize_arg_ref(data.dst));
             break;
         }
         SIMJIT_MATCH (StepKind::Compare) {
@@ -686,6 +691,11 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         auto [func_arg, load_kind] = bind_step(hl::cap, hl::cap_as<LoadStoreKind>);
         if (dtype == ScalarDataType::I1) { return builder.load_predicate(parse_arg_ref(func_arg)); }
         return builder.load(parse_arg_ref(func_arg), load_kind);
+    }
+    case StepKind::StoreInterleave: {
+        auto [even, odd, dst] = bind_step(hl::cap, hl::cap, hl::cap);
+        builder.store_interleave(parse_arg_ref(dst), ref_value(even), ref_value(odd));
+        return {};
     }
     case StepKind::LoadDeinterleave: {
         auto [func_arg, load_kind, lane_count, lane] =

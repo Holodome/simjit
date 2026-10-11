@@ -108,6 +108,12 @@ struct IndexData {
     Step *inc;
 };
 
+struct StoreInterleaveData {
+    Step *even{};
+    Step *odd{};
+    ArgumentAddress dst{};
+};
+
 struct ScatterData {
     ArgumentIdx dst;
     Step *idx;
@@ -282,6 +288,7 @@ enum class StepKind : uint8_t {
     VecNarrowCombine,
     VecFloatNarrowCombine,
     ConstDiv,
+    StoreInterleave
 };
 
 struct Step {
@@ -337,6 +344,7 @@ private:
         VecNarrowCombineData narrow_combine;
         VecFloatNarrowCombineData float_narrow_combine;
         ConstDivData const_div;
+        StoreInterleaveData store_interleave;
     };
 };
 
@@ -392,7 +400,8 @@ enum class AllowedDataTypes : uint8_t {
     X(fpclass, Fpclass, fpclass, ScalarOrMask)                                    \
     X(vec_narrow_combine, VecNarrowCombine, narrow_combine, Vec)                  \
     X(vec_float_narrow_combine, VecFloatNarrowCombine, float_narrow_combine, Vec) \
-    X(const_div, ConstDiv, const_div, Scalar)
+    X(const_div, ConstDiv, const_div, Scalar)                                     \
+    X(store_interleave, StoreInterleave, store_interleave, ScalarOrVec)
 
 #define ASSOC_STEP_DATA(_0, _kind, _field, _2)       \
     template <> struct Step::Data<StepKind::_kind> { \
@@ -600,6 +609,11 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.arg);
             break;
         }
+        SIMJIT_MATCH (StepKind::StoreInterleave) {
+            process(data.even);
+            process(data.odd);
+            break;
+        }
     }
 }
 
@@ -685,17 +699,14 @@ struct AccumulatorInfo {
     }
 };
 
-// A pair of deinterleave lanes of one argument: even elements (lane 0) and odd elements (lane 1).
 struct InterleavePair {
     Step *even = nullptr;
     Step *odd = nullptr;
 };
 
-// Per-argument list of interleaved pairs in construction order; filled during MIR construction.
 struct ArgumentInterleave {
     ArenaArray<InterleavePair> pairs;
 
-    // Returns the sibling lane of `step` or nullptr when the sibling lane is unused or absent.
     Step *find_partner(const Step *step) const noexcept {
         for (const InterleavePair &pair : pairs) {
             if (pair.even == step) { return pair.odd; }
@@ -705,11 +716,10 @@ struct ArgumentInterleave {
     }
 };
 
-// Pairing information for vectorized LoadDeinterleave steps.
 struct InterleaveInfo {
-    ArenaArray<ArgumentInterleave> by_argument; // one per argument
-    // Distinct lane dtypes across all arguments (even/odd index tables are per dtype).
-    ArenaArray<VecDataType> dtypes;
+    ArenaArray<ArgumentInterleave> by_argument;
+    ArenaArray<VecDataType> deinterleave_dtypes;
+    ArenaArray<VecDataType> interleave_dtypes;
 };
 
 struct Function {
@@ -760,7 +770,8 @@ constexpr bool is_scalar_step(StepKind kind) noexcept {
     case StepKind::CondScatter:
     case StepKind::BitCast:
     case StepKind::Fpclass:
-    case StepKind::ConstDiv: return true;
+    case StepKind::ConstDiv:
+    case StepKind::StoreInterleave: return true;
     default: break;
     }
     return false;

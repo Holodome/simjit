@@ -772,6 +772,49 @@ static void api_smoke_load_deinterleave() {
             builder.load2(builder.arg(I128));
         },
         ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i128 deinterleave is rejected");
+
+    // store_interleave: usage flags, I1/I128 rejection, mixed plain-store rejection.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument dst = builder.arg(I32);
+        DeinterleavedPair pair = builder.load2(builder.arg(I32));
+        builder.store_interleave(dst, pair.even, pair.odd);
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->argument_usage[dst.idx_] & hir::ArgumentUsage::SequentialWrite),
+                          "store interleave marks dst sequential write");
+        require_api_smoke(bool(fn->argument_usage[dst.idx_] & hir::ArgumentUsage::Interleaved2x),
+                          "store interleave marks dst interleaved");
+    }
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.store_interleave(builder.arg(I1), builder.i32(0), builder.i32(1));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i1 store-interleave is rejected");
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.store_interleave(builder.arg(I128), builder.i64(0), builder.i64(1));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i128 store-interleave is rejected");
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            Argument mixed = builder.arg(I32);
+            Value even = builder.load2_0(mixed);
+            builder.store(even, mixed);
+            builder.build();
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidArgumentAccess,
+        "mixed plain store and interleaved load on one argument is rejected");
 }
 
 static void run_public_api_smoke_tests() {

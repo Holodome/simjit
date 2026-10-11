@@ -135,6 +135,32 @@ static void scalar_mov(ax86::Compiler &cc, const ax86::Mem &a, const AnyR &b, Sc
     }
 }
 
+template <typename T, typename U>
+static void vec_mov(ax86::Compiler &cc, const T &lhs, const U &rhs, LoadStoreKind kind, VecDataType vdtype) {
+    switch (kind) {
+    case LoadStoreKind::Aligned:
+        switch (vdtype.elem) {
+        case VecElemType::I8: cc.vmovdqu8(lhs, rhs); break;
+        case VecElemType::I16: cc.vmovdqu16(lhs, rhs); break;
+        case VecElemType::I32: cc.vmovdqa32(lhs, rhs); break;
+        case VecElemType::I64: cc.vmovdqa64(lhs, rhs); break;
+        case VecElemType::F32: cc.vmovaps(lhs, rhs); break;
+        case VecElemType::F64: cc.vmovapd(lhs, rhs); break;
+        }
+        break;
+    case LoadStoreKind::Unaligned:
+        switch (vdtype.elem) {
+        case VecElemType::I8: cc.vmovdqu8(lhs, rhs); break;
+        case VecElemType::I16: cc.vmovdqu16(lhs, rhs); break;
+        case VecElemType::I32: cc.vmovdqu32(lhs, rhs); break;
+        case VecElemType::I64: cc.vmovdqu64(lhs, rhs); break;
+        case VecElemType::F32: cc.vmovups(lhs, rhs); break;
+        case VecElemType::F64: cc.vmovupd(lhs, rhs); break;
+        }
+        break;
+    }
+}
+
 static void broadcast_f64(ax86::Compiler &cc, const VecR &dst, const ax86::Mem &src) {
     // VEX VBROADCASTSD has no XMM destination form. For two-lane F64 vectors
     // VMOVDDUP is the valid equivalent.
@@ -925,6 +951,17 @@ static void vec_fma_acc(ax86::Compiler &cc, FmaKind kind, VecElemType type, cons
     }
 }
 
+static void vec_permute2(ax86::Compiler &cc, const VecR &lo_dst, const VecR &idx, const VecR &hi, VecDataType vdtype) {
+    switch (vdtype.elem) {
+    case VecElemType::I8: cc.vpermt2b(lo_dst, idx, hi); break;
+    case VecElemType::I16: cc.vpermt2w(lo_dst, idx, hi); break;
+    case VecElemType::I32: cc.vpermt2d(lo_dst, idx, hi); break;
+    case VecElemType::I64: cc.vpermt2q(lo_dst, idx, hi); break;
+    case VecElemType::F32: cc.vpermt2ps(lo_dst, idx, hi); break;
+    case VecElemType::F64: cc.vpermt2pd(lo_dst, idx, hi); break;
+    }
+}
+
 static ax86::VFPClassImm make_fpclass_imm(FpClass flags) noexcept {
     return (bool(flags & FpClass::FPC_INFINITE) ? (ax86::VFPClassImm::kNInf | ax86::VFPClassImm::kPInf)
                                                 : ax86::VFPClassImm::kNone) |
@@ -1070,12 +1107,21 @@ struct CompileState {
 
     std::unordered_map<uint64_t, aj::Label> bit_permute_luts{};
 
-    struct InterleaveIdxTable {
+    struct DeinterleaveIdxTable {
         VecDataType dtype{};
         VecR even;
         VecR odd;
         ax86::Mem even_mem;
         ax86::Mem odd_mem;
+    };
+    std::vector<DeinterleaveIdxTable> deinterleave_tables{};
+
+    struct InterleaveIdxTable {
+        VecDataType dtype{};
+        VecR lo;
+        VecR hi;
+        ax86::Mem lo_mem;
+        ax86::Mem hi_mem;
     };
     std::vector<InterleaveIdxTable> interleave_tables{};
 
@@ -1106,8 +1152,15 @@ struct CompileState {
         return vec_mem_offset(args[addr.arg].gp, counter, addr.offset * dtype.element_size_bytes(), dtype);
     }
 
+    ax86::Mem vec_pair_mem(const ArgumentAddress &addr, VecDataType vdtype, size_t half) const {
+        size_t esz_log2 = vdtype.element_size_bytes_log2();
+        size_t esz = vdtype.element_size_bytes();
+        size_t reg_bytes = vdtype.size_bytes();
+        return ax86::Mem(args[addr.arg].gp, counter, esz_log2 + 1, (int32_t)(2 * addr.offset * esz + half * reg_bytes),
+                         reg_bytes);
+    }
     void prepare_deinterleave_tables() {
-        for (VecDataType vdtype : mir_func->interleave.dtypes) {
+        for (VecDataType vdtype : mir_func->interleave.deinterleave_dtypes) {
             size_t esz = vdtype.element_size_bytes();
             size_t width = vdtype.nelems();
             size_t reg_bytes = vdtype.size_bytes();
@@ -1119,21 +1172,55 @@ struct CompileState {
                     odd_idx[i * esz + byte] = uint8_t((2 * i + 1) >> (8 * byte));
                 }
             }
-            interleave_tables.push_back(
-                InterleaveIdxTable{vdtype, create_vec_reg(vdtype), create_vec_reg(vdtype),
-                                   cc.new_const(aj::ConstPoolScope::kLocal, even_idx, reg_bytes),
-                                   cc.new_const(aj::ConstPoolScope::kLocal, odd_idx, reg_bytes)});
+            deinterleave_tables.push_back(
+                DeinterleaveIdxTable{vdtype, create_vec_reg(vdtype), create_vec_reg(vdtype),
+                                     cc.new_const(aj::ConstPoolScope::kLocal, even_idx, reg_bytes),
+                                     cc.new_const(aj::ConstPoolScope::kLocal, odd_idx, reg_bytes)});
         }
     }
 
-    void load_deinterleave_tables() {
-        for (const InterleaveIdxTable &t : interleave_tables) {
+    void prepare_interleave_tables() {
+        for (VecDataType vdtype : mir_func->interleave.interleave_dtypes) {
+            size_t esz = vdtype.element_size_bytes();
+            size_t width = vdtype.nelems();
+            size_t reg_bytes = vdtype.size_bytes();
+            size_t half_width = width / 2;
+            uint8_t lo_idx[64] = {};
+            uint8_t hi_idx[64] = {};
+            for (size_t k = 0; k < width; ++k) {
+                size_t lo_value = (k % 2 == 0) ? k / 2 : half_width + (k - 1) / 2;
+                size_t hi_value = (k % 2 == 0) ? half_width + k / 2 : width + half_width + (k - 1) / 2;
+                for (size_t byte = 0; byte < esz; ++byte) {
+                    lo_idx[k * esz + byte] = uint8_t(lo_value >> (8 * byte));
+                    hi_idx[k * esz + byte] = uint8_t(hi_value >> (8 * byte));
+                }
+            }
+            interleave_tables.push_back(
+                InterleaveIdxTable{vdtype, create_vec_reg(vdtype), create_vec_reg(vdtype),
+                                   cc.new_const(aj::ConstPoolScope::kLocal, lo_idx, reg_bytes),
+                                   cc.new_const(aj::ConstPoolScope::kLocal, hi_idx, reg_bytes)});
+        }
+    }
+
+    void load_interleave_tables() {
+        for (const DeinterleaveIdxTable &t : deinterleave_tables) {
             cc.vmovdqu8(t.even, t.even_mem);
             cc.vmovdqu8(t.odd, t.odd_mem);
         }
+        for (const InterleaveIdxTable &t : interleave_tables) {
+            cc.vmovdqu8(t.lo, t.lo_mem);
+            cc.vmovdqu8(t.hi, t.hi_mem);
+        }
     }
 
-    const InterleaveIdxTable *deinterleave_table(VecDataType vdtype) const {
+    const DeinterleaveIdxTable *deinterleave_table(VecDataType vdtype) const {
+        for (const DeinterleaveIdxTable &t : deinterleave_tables) {
+            if (t.dtype == vdtype) { return &t; }
+        }
+        return nullptr;
+    }
+
+    const InterleaveIdxTable *interleave_table(VecDataType vdtype) const {
         for (const InterleaveIdxTable &t : interleave_tables) {
             if (t.dtype == vdtype) { return &t; }
         }
@@ -1956,6 +2043,19 @@ struct CompileState {
                 AnyR result = create_scalar_reg(sdtype);
                 scalar_mov(cc, result, mem, sdtype);
                 return result;
+            }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                if (sdtype == ScalarDataType::I1) { messed_up("..."); }
+                GpR base = args[data.dst.arg].gp;
+                ax86::Mem lo_mem =
+                    ax86::Mem(base, counter, scalar_dtype_size_log2(sdtype) + 1, 0, scalar_dtype_size(sdtype));
+                ax86::Mem hi_mem = lo_mem;
+                hi_mem.add_offset((int)scalar_dtype_size(sdtype));
+                AnyR even = subexpr(data.even);
+                AnyR odd = subexpr(data.odd);
+                scalar_mov(cc, lo_mem, even, sdtype);
+                scalar_mov(cc, hi_mem, odd, sdtype);
+                return {};
             }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 const ArgInfo &arg = args[data.addr.arg];
@@ -3918,70 +4018,48 @@ struct CompileState {
                     unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
                 }
                 VecDataType vdtype = step->dtype.as_vec();
-                const InterleaveIdxTable *table = deinterleave_table(vdtype);
+                const DeinterleaveIdxTable *table = deinterleave_table(vdtype);
                 if (table == nullptr) {
                     unsupported("Unsupported %s load-deinterleave outside the main loop", show_vec_dtype(vdtype));
                 }
-                size_t esz_log2 = vdtype.element_size_bytes_log2();
-                size_t esz = vdtype.element_size_bytes();
-                size_t reg_bytes = vdtype.size_bytes();
-                GpR base = args[data.addr.arg].gp;
-
-                auto pair_mem = [&](size_t half) {
-                    return ax86::Mem(base, counter, esz_log2 + 1,
-                                     (int32_t)(2 * data.addr.offset * esz + half * reg_bytes), reg_bytes);
-                };
-                auto load_vec = [&](const VecR &reg, const ax86::Mem &mem) {
-                    switch (data.kind) {
-                    case LoadStoreKind::Aligned:
-                        switch (vdtype.elem) {
-                        case VecElemType::I8: cc.vmovdqu8(reg, mem); break;
-                        case VecElemType::I16: cc.vmovdqu16(reg, mem); break;
-                        case VecElemType::I32: cc.vmovdqa32(reg, mem); break;
-                        case VecElemType::I64: cc.vmovdqa64(reg, mem); break;
-                        case VecElemType::F32: cc.vmovaps(reg, mem); break;
-                        case VecElemType::F64: cc.vmovapd(reg, mem); break;
-                        }
-                        break;
-                    case LoadStoreKind::Unaligned:
-                        switch (vdtype.elem) {
-                        case VecElemType::I8: cc.vmovdqu8(reg, mem); break;
-                        case VecElemType::I16: cc.vmovdqu16(reg, mem); break;
-                        case VecElemType::I32: cc.vmovdqu32(reg, mem); break;
-                        case VecElemType::I64: cc.vmovdqu64(reg, mem); break;
-                        case VecElemType::F32: cc.vmovups(reg, mem); break;
-                        case VecElemType::F64: cc.vmovupd(reg, mem); break;
-                        }
-                        break;
-                    }
-                };
                 VecR lo = create_vec_reg(vdtype);
-                load_vec(lo, pair_mem(0));
+                vec_mov(cc, lo, vec_pair_mem(data.addr, vdtype, 0), data.kind, vdtype);
                 VecR hi = create_vec_reg(vdtype);
-                load_vec(hi, pair_mem(1));
-
-                auto permute = [&](const VecR &dst, const VecR &idx) {
-                    switch (vdtype.elem) {
-                    case VecElemType::I8: cc.vpermt2b(dst, idx, hi); break;
-                    case VecElemType::I16: cc.vpermt2w(dst, idx, hi); break;
-                    case VecElemType::I32: cc.vpermt2d(dst, idx, hi); break;
-                    case VecElemType::I64: cc.vpermt2q(dst, idx, hi); break;
-                    case VecElemType::F32: cc.vpermt2ps(dst, idx, hi); break;
-                    case VecElemType::F64: cc.vpermt2pd(dst, idx, hi); break;
-                    }
-                };
+                vec_mov(cc, hi, vec_pair_mem(data.addr, vdtype, 1), data.kind, vdtype);
 
                 Step *partner = mir_func->interleave.by_argument[data.addr.arg].find_partner(step);
                 if (partner != nullptr) {
                     VecR lo_copy = create_vec_reg(vdtype);
                     cc.vmovdqa64(lo_copy, lo);
-                    permute(lo_copy, table->even);
-                    permute(lo, table->odd);
+                    vec_permute2(cc, lo_copy, table->even, hi, vdtype);
+                    vec_permute2(cc, lo, table->odd, hi, vdtype);
                     step_map[partner->id] = data.lane == 0 ? lo : lo_copy;
                     return data.lane == 0 ? lo_copy : lo;
                 }
-                permute(lo, data.lane == 0 ? table->even : table->odd);
+                vec_permute2(cc, lo, data.lane == 0 ? table->even : table->odd, hi, vdtype);
                 return lo;
+            }
+
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
+                VecDataType vdtype = step->dtype.as_vec();
+                const InterleaveIdxTable *table = interleave_table(vdtype);
+                if (table == nullptr) {
+                    unsupported("Unsupported %s store-interleave outside the main loop", show_vec_dtype(vdtype));
+                }
+                GpR base = args[data.dst.arg].gp;
+                VecR even = vec_subexpr(data.even);
+                VecR odd = vec_subexpr(data.odd);
+
+                VecR lo = create_vec_reg(vdtype);
+                VecR hi = create_vec_reg(vdtype);
+                cc.vmovdqa64(lo, even);
+                cc.vmovdqa64(hi, even);
+                vec_permute2(cc, lo, table->lo, odd, vdtype);
+                vec_permute2(cc, hi, table->hi, odd, vdtype);
+                vec_mov(cc, vec_pair_mem(data.dst, vdtype, 0), lo, LoadStoreKind::Unaligned, vdtype);
+                vec_mov(cc, vec_pair_mem(data.dst, vdtype, 1), hi, LoadStoreKind::Unaligned, vdtype);
+                return {};
             }
         }
         SIMJIT_UNREACHABLE();
@@ -4178,6 +4256,7 @@ static void compile_asmjit(const mir::Function *func, ax86::Compiler &cc) {
     state.init_args(func->args, usages, func_node);
     state.init_accs(func->prologue_roots);
     state.prepare_deinterleave_tables();
+    state.prepare_interleave_tables();
     bool has_delayed_prologue = state.has_delayed_prologue_steps(func->prologue_roots);
     aj::Label delayed_prologue_label{};
     if (has_delayed_prologue) {
@@ -4191,7 +4270,7 @@ static void compile_asmjit(const mir::Function *func, ax86::Compiler &cc) {
     cc.xor_(state.counter, state.counter);
     cc.test(state.row_count, state.row_count);
     cc.je(has_delayed_prologue ? delayed_prologue_label : state.end_label);
-    state.load_deinterleave_tables();
+    state.load_interleave_tables();
 
     // Main loop
 

@@ -88,6 +88,12 @@ struct ScatterData {
     Step *cond{};
 };
 
+struct StoreInterleaveData {
+    Step *even{};
+    Step *odd{};
+    ArgumentIdx dst{};
+};
+
 struct PackData {
     Step *arg{};
     Step *cond{};
@@ -149,6 +155,7 @@ enum class StepKind : uint8_t {
     Store,
     Pack,
     Scatter,
+    StoreInterleave,
 
     // Accumulator
     AccArithBinary,
@@ -198,6 +205,7 @@ private:
         FloatCastData float_cast;
         PermuteData permute;
         FpclassData fpclass;
+        StoreInterleaveData store_interleave;
     };
 };
 
@@ -226,7 +234,8 @@ private:
     X(permute, Permute, permute)                              \
     X(bitcast, BitCast, arg)                                  \
     X(fpclass, Fpclass, fpclass)                              \
-    X(countif, Countif, acc_ab)
+    X(countif, Countif, acc_ab)                               \
+    X(store_interleave, StoreInterleave, store_interleave)
 
 #define ASSOC_STEP_DATA(_0, _kind, _field)           \
     template <> struct Step::Data<StepKind::_kind> { \
@@ -452,6 +461,11 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.arg);
             break;
         }
+        SIMJIT_MATCH (StepKind::StoreInterleave) {
+            process(data.even);
+            process(data.odd);
+            break;
+        }
     }
 }
 
@@ -463,7 +477,8 @@ constexpr bool is_root_step(StepKind kind) {
     case StepKind::AccArithBinary:
     case StepKind::AccPredicateBinary:
     case StepKind::AccSum128:
-    case StepKind::Countif: return true;
+    case StepKind::Countif:
+    case StepKind::StoreInterleave: return true;
     default: break;
     }
     return false;

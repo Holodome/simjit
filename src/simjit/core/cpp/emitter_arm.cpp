@@ -2156,6 +2156,16 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             return format("%s(arg%zu + i%s, %s)", arm_intrin_name("st1", dtype).c_str(), data.addr.arg, offset.c_str(),
                           show(data.what));
         }
+        case StepKind::StoreInterleave: {
+            const auto &data = step->step_data<StepKind::StoreInterleave>();
+            if (step->dtype.is_mask()) { return unexpected_step_dtype(step, "vector"); }
+            VecDataType dtype = step->dtype.as_vec();
+            std::string vec_type = arm_vec_dtype_cpp(dtype);
+            std::string pair_type = vec_type.substr(0, vec_type.size() - 2) + "x2_t";
+            std::string offset = format("2 * i%s", offset_suffix(data.dst.offset * 2).c_str());
+            return format("%s(arg%zu + %s, ((%s){%s, %s}))", arm_intrin_name("st2", dtype).c_str(), data.dst.arg,
+                          offset.c_str(), pair_type.c_str(), show(data.even), show(data.odd));
+        }
         case StepKind::CondStore: {
             const auto &data = step->step_data<StepKind::CondStore>();
             return vector_cond_store_to_cpp(step, data);
