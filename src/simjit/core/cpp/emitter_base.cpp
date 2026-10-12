@@ -819,6 +819,11 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
                           show_scalar_operand(data.what), size);
         }
         SIMJIT_MATCH (StepKind::StoreInterleave) {
+            if (data.cond) {
+                return format("if (%s) { arg%zu[2 * i] = %s; arg%zu[2 * i + 1] = %s; }", show_scalar_operand(data.cond),
+                              data.dst.arg, show_scalar_operand(data.even), data.dst.arg,
+                              show_scalar_operand(data.odd));
+            }
             return format("arg%zu[2 * i] = %s;\n"
                           "arg%zu[2 * i + 1] = %s",
                           data.dst.arg, show_scalar_operand(data.even), data.dst.arg, show_scalar_operand(data.odd));

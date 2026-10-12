@@ -1195,6 +1195,12 @@ struct CompileState {
                 return {};
             }
             SIMJIT_MATCH (StepKind::StoreInterleave) {
+                aj::Label skip_label{};
+                if (data.cond != nullptr) {
+                    GpR cond = int_subexpr(data.cond);
+                    skip_label = cc.new_anonymous_label("skip");
+                    cc.cbz(cond, skip_label);
+                }
                 AnyR even = subexpr(data.even);
                 AnyR odd = subexpr(data.odd);
                 SIMJIT_ASSERT(data.dst.offset == 0);
@@ -1220,6 +1226,7 @@ struct CompileState {
                 case ScalarDataType::I1:
                 case ScalarDataType::I128: messed_up("...");
                 }
+                if (skip_label.is_valid()) cc.bind(skip_label);
                 return {};
             }
             SIMJIT_MATCH (StepKind::ArithBinary) {
@@ -2421,9 +2428,7 @@ struct CompileState {
                 VecR even = create_vec_reg(vdtype);
                 VecR odd = create_vec_reg(vdtype);
                 cc.ld2(even, odd, mem);
-                if (partner != nullptr) {
-                    step_map[partner->id] = data.lane == 0 ? odd : even;
-                }
+                if (partner != nullptr) { step_map[partner->id] = data.lane == 0 ? odd : even; }
                 return data.lane == 0 ? even : odd;
             }
             SIMJIT_MATCH (StepKind::Load) {
@@ -2572,6 +2577,22 @@ struct CompileState {
                 aja64::Mem mem = vec_deinterleave_mem(pair_base, vdtype);
                 VecR even = vec_subexpr(data.even);
                 VecR odd = vec_subexpr(data.odd);
+                if (data.cond != nullptr) {
+                    VecR cond = vec_subexpr(data.cond);
+                    size_t cond_sz = vec_elem_size(cond);
+                    if (cond_sz < vdtype.element_size_bytes()) {
+                        cond = expand_mask(cond, cond_sz, vdtype.element_size_bytes());
+                    } else if (cond_sz > vdtype.element_size_bytes()) {
+                        cond = shrink_mask(cond, cond_sz, vdtype.element_size_bytes());
+                    }
+                    VecR old_even = create_vec_reg(vdtype);
+                    VecR old_odd = create_vec_reg(vdtype);
+                    cc.ld2(old_even, old_odd, mem);
+                    cc.bit(old_even.b16(), even.b16(), cond.b16());
+                    cc.bit(old_odd.b16(), odd.b16(), cond.b16());
+                    cc.st2(old_even, old_odd, mem);
+                    return {};
+                }
                 cc.st2(even, odd, mem);
                 return {};
             }

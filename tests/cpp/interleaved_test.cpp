@@ -291,6 +291,31 @@ def func(n, src, dst):
     ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, F32)
     ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, F64)
 
+    // Conditional interleaved stores update or preserve both elements of each destination pair together.
+#define ADD_COND_INTERLEAVE_STORE_TEST(tests, dt, const_fn)                                       \
+    tests.push_back(Test{[](FunctionBuilder &b) {                                                 \
+                             Argument src = b.arg(dt);                                            \
+                             Argument dst = b.arg(dt);                                            \
+                             Predicate cond = b.cmp_eq(b.index(I64), b.index(I64));               \
+                             DeinterleavedPair lanes = b.load2(src);                              \
+                             b.cond_store_interleave(b.add(lanes.even, b.const_fn(1)),            \
+                                                     b.sub(lanes.odd, b.const_fn(1)), cond, dst); \
+                         },                                                                       \
+                         PASS_ALL, R"FOO(                                                        \
+def func(n, src, dst):                                                                            \
+    for i in range(n):                                                                            \
+        dst[2*i] = src[2*i] + 1                                                                   \
+        dst[2*i+1] = src[2*i+1] - 1                                                              \
+        )FOO"});
+
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, I8, i8)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, I16, i16)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, I32, i32)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, I64, i64)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, F32, f32)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, F64, f64)
+#undef ADD_COND_INTERLEAVE_STORE_TEST
+
     // Interleaved store with swapped lanes.
     tests.push_back(Test{[](FunctionBuilder &b) {
                              Argument src = b.arg(I64);

@@ -632,6 +632,12 @@ struct AlgebraicVectorizer {
                         accumulate(graph_unify_carriers(node->children[0], node->children[1]));
                     }
                     break;
+                case StepKind::StoreInterleave:
+                    accumulate(graph_unify_carriers(node->children[0], node->children[1]));
+                    if (node->child_count == 3) {
+                        accumulate(graph_unify_carriers(node->children[0], node->children[2]));
+                    }
+                    break;
                 case StepKind::Pack:
                     accumulate(graph_unify_carriers(node, node->left()));
                     accumulate(graph_unify_carriers(node->left(), node->right()));
@@ -1342,6 +1348,11 @@ struct AlgebraicVectorizer {
                 find_mask_combineable_nodes(root->children[2], forbidden_mask_nodes, is_forbidden_mask);
                 continue;
             }
+            if (root->is_step(StepKind::StoreInterleave) &&
+                root->step->step_data<StepKind::StoreInterleave>().cond != nullptr) {
+                find_mask_combineable_nodes(root->children[2], forbidden_mask_nodes, is_forbidden_mask);
+                continue;
+            }
 
             find_mask_combineable_nodes(root, mask_combineable_nodes, is_mask_combineable_node);
         }
@@ -1584,6 +1595,12 @@ struct AlgebraicVectorizer {
         case StepKind::Store:
         case StepKind::Pack:
             if (node->child_count == 2 && !graph_validate_same_width(node, node->left(), node->right())) {
+                return false;
+            }
+            break;
+        case StepKind::StoreInterleave:
+            if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }
+            if (node->child_count == 3 && !graph_validate_same_width(node, node->children[0], node->children[2])) {
                 return false;
             }
             break;

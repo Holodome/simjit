@@ -2163,6 +2163,21 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             std::string vec_type = arm_vec_dtype_cpp(dtype);
             std::string pair_type = vec_type.substr(0, vec_type.size() - 2) + "x2_t";
             std::string offset = format("2 * i%s", offset_suffix(data.dst.offset * 2).c_str());
+            if (data.cond != nullptr) {
+                std::string cond = mask_to_vec_mask_expr(data.cond->dtype.as_mask(), dtype, show(data.cond));
+                size_t id = step->id;
+                return format(R"STR(do {
+%s old_%zu = %s(arg%zu + %s);
+%s even_%zu = %s(%s, %s, old_%zu.val[0]);
+%s odd_%zu = %s(%s, %s, old_%zu.val[1]);
+%s(arg%zu + %s, ((%s){even_%zu, odd_%zu}));
+} while (false))STR",
+                              pair_type.c_str(), id, arm_intrin_name("ld2", dtype).c_str(), data.dst.arg,
+                              offset.c_str(), vec_type.c_str(), id, arm_intrin_name("bsl", dtype).c_str(), cond.c_str(),
+                              show(data.even), id, vec_type.c_str(), id, arm_intrin_name("bsl", dtype).c_str(),
+                              cond.c_str(), show(data.odd), id, arm_intrin_name("st2", dtype).c_str(), data.dst.arg,
+                              offset.c_str(), pair_type.c_str(), id, id);
+            }
             return format("%s(arg%zu + %s, ((%s){%s, %s}))", arm_intrin_name("st2", dtype).c_str(), data.dst.arg,
                           offset.c_str(), pair_type.c_str(), show(data.even), show(data.odd));
         }

@@ -375,10 +375,11 @@ struct FunctionBuilderImpl {
         SIMJIT_ASSERT(dst.dtype == dtype);
         return sm.scatter({arg, idx, dst.idx, cond}, dtype);
     }
-    Step *store_interleave(Step *even, Step *odd, const ArgumentDecl &dst) {
+    Step *store_interleave(Step *even, Step *odd, Step *cond, const ArgumentDecl &dst) {
+        cond = simplify_optional_cond(ctx, cond);
         SIMJIT_ASSERT(dst.dtype == even->dtype);
         SIMJIT_ASSERT(dst.dtype == odd->dtype);
-        return sm.store_interleave({even, odd, dst.idx}, even->dtype);
+        return sm.store_interleave({even, odd, dst.idx, cond}, even->dtype);
     }
     Step *pack(Step *arg, Step *cond, const ArgumentDecl &dst, const Accumulator &dst_size_acc) {
         ScalarDataType dtype = arg->dtype;
@@ -1255,6 +1256,10 @@ void FunctionBuilder::cond_scatter(Value value, Value idx, MaybePredicate cond, 
 }
 
 void FunctionBuilder::store_interleave(Argument dst, Value even, Value odd) {
+    cond_store_interleave(even, odd, {}, dst);
+}
+
+void FunctionBuilder::cond_store_interleave(Value even, Value odd, MaybePredicate cond, Argument dst) {
     check_value(even);
     check_value(odd);
     if (even.dtype() != odd.dtype()) {
@@ -1269,7 +1274,7 @@ void FunctionBuilder::store_interleave(Argument dst, Value even, Value odd) {
     }
     if (func_arg.dtype == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::SmallDeinterleave; }
 
-    auto *step = impl_->store_interleave(even.step_, odd.step_, func_arg);
+    auto *step = impl_->store_interleave(even.step_, odd.step_, cond.step_, func_arg);
     impl_->step_roots.push_back(step);
 }
 

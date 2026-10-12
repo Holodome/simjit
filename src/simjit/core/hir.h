@@ -92,6 +92,7 @@ struct StoreInterleaveData {
     Step *even{};
     Step *odd{};
     ArgumentIdx dst{};
+    Step *cond{};
 };
 
 struct PackData {
@@ -464,6 +465,7 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
         SIMJIT_MATCH (StepKind::StoreInterleave) {
             process(data.even);
             process(data.odd);
+            if (data.cond) process(data.cond);
             break;
         }
     }

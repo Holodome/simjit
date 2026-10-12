@@ -521,6 +521,18 @@ struct LLVMBuilder {
                 off = b->CreateNUWMul(off, b->getInt64(2));
                 V *even_ptr = index_arg(info, off);
                 V *odd_ptr = index_arg(info, b->CreateNUWAdd(off, b->getInt64(1)));
+                if (data.cond != nullptr) {
+                    llvm::BasicBlock *then = llvm::BasicBlock::Create(*context, "then", function);
+                    llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context, "merge", function);
+                    V *cond = b->CreateIntCast(step_to_llvm(data.cond), b->getInt1Ty(), false);
+                    b->CreateCondBr(cond, then, merge);
+                    b->SetInsertPoint(then);
+                    b->CreateStore(step_to_llvm(data.even), even_ptr);
+                    b->CreateStore(step_to_llvm(data.odd), odd_ptr);
+                    b->CreateBr(merge);
+                    b->SetInsertPoint(merge);
+                    return nullptr;
+                }
                 b->CreateStore(step_to_llvm(data.even), even_ptr);
                 b->CreateStore(step_to_llvm(data.odd), odd_ptr);
                 return nullptr;
@@ -965,6 +977,12 @@ struct LLVMBuilder {
                 size_t base_offset = data.dst.offset * 2;
                 if (base_offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(base_offset)); }
                 V *idx = index_arg(info, off);
+                if (data.cond != nullptr) {
+                    V *cond = step_to_llvm(data.cond);
+                    V *interleaved_cond = b->CreateShuffleVector(cond, cond, interleave);
+                    b->CreateMaskedStore(packed, idx, llvm::Align{1}, interleaved_cond);
+                    return nullptr;
+                }
                 llvm::StoreInst *inst = b->CreateStore(packed, idx);
                 inst->setAlignment(llvm::Align{1});
                 return nullptr;

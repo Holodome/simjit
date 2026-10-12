@@ -2046,6 +2046,13 @@ struct CompileState {
             }
             SIMJIT_MATCH (StepKind::StoreInterleave) {
                 if (sdtype == ScalarDataType::I1) { messed_up("..."); }
+                aj::Label skip_label{};
+                if (data.cond != nullptr) {
+                    GpR cond = int_subexpr(data.cond);
+                    skip_label = cc.new_anonymous_label("skip");
+                    cc.test(cond, cond);
+                    cc.jz(skip_label);
+                }
                 GpR base = args[data.dst.arg].gp;
                 ax86::Mem lo_mem =
                     ax86::Mem(base, counter, scalar_dtype_size_log2(sdtype) + 1, 0, scalar_dtype_size(sdtype));
@@ -2055,6 +2062,7 @@ struct CompileState {
                 AnyR odd = subexpr(data.odd);
                 scalar_mov(cc, lo_mem, even, sdtype);
                 scalar_mov(cc, hi_mem, odd, sdtype);
+                if (skip_label.is_valid()) cc.bind(skip_label);
                 return {};
             }
             SIMJIT_MATCH (StepKind::LoadSplat) {
@@ -4057,7 +4065,44 @@ struct CompileState {
                 cc.vmovdqa64(hi, even);
                 vec_permute2(cc, lo, table->lo, odd, vdtype);
                 vec_permute2(cc, hi, table->hi, odd, vdtype);
+                if (data.cond == nullptr) {
+                    vec_mov(cc, vec_pair_mem(data.dst, vdtype, 0), lo, LoadStoreKind::Unaligned, vdtype);
+                    vec_mov(cc, vec_pair_mem(data.dst, vdtype, 1), hi, LoadStoreKind::Unaligned, vdtype);
+                    return {};
+                }
+
+                MaskR cond = mask_subexpr(data.cond);
+                MaskDataType mdtype = data.cond->dtype.as_mask();
+                size_t width = vdtype.nelems();
+                size_t half_width = width / 2;
+                GpR cond_bits = width > 32 ? cc.new_gp64() : cc.new_gp32();
+                mask_to_gp(cc, mdtype, cond_bits, cond);
+                GpR deposit_mask = width > 32 ? cc.new_gp64() : cc.new_gp32();
+                cc.mov(deposit_mask, 0x55555555u);
+                if (width > 32) {
+                    GpR upper = cc.new_gp64();
+                    cc.mov(upper, deposit_mask);
+                    cc.shl(upper, 32);
+                    cc.or_(deposit_mask, upper);
+                }
+                GpR src = width > 32 ? cc.new_gp64() : cc.new_gp32();
+                GpR expanded = width > 32 ? cc.new_gp64() : cc.new_gp32();
+                cc.mov(src, cond_bits);
+                // Deposit into each pair's first bit, then x + 2*x duplicates it for both stores.
+                cc.pdep(expanded, src, deposit_mask);
+                cc.lea(expanded, ax86::ptr(expanded, expanded, 1));
+                MaskR lo_cond = create_mask_reg(mdtype);
+                gp_to_mask(mdtype, lo_cond, expanded);
+
+                cc.mov(src, cond_bits);
+                cc.shr(src, half_width);
+                cc.pdep(expanded, src, deposit_mask);
+                cc.lea(expanded, ax86::ptr(expanded, expanded, 1));
+                MaskR hi_cond = create_mask_reg(mdtype);
+                gp_to_mask(mdtype, hi_cond, expanded);
+                cc.k(lo_cond);
                 vec_mov(cc, vec_pair_mem(data.dst, vdtype, 0), lo, LoadStoreKind::Unaligned, vdtype);
+                cc.k(hi_cond);
                 vec_mov(cc, vec_pair_mem(data.dst, vdtype, 1), hi, LoadStoreKind::Unaligned, vdtype);
                 return {};
             }

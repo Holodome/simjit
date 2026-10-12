@@ -787,6 +787,31 @@ static void api_smoke_load_deinterleave() {
         require_api_smoke(bool(fn->argument_usage[dst.idx_] & hir::ArgumentUsage::Interleaved2x),
                           "store interleave marks dst interleaved");
     }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument dst = builder.arg(I32);
+        DeinterleavedPair pair = builder.load2(builder.arg(I32));
+        Predicate cond = builder.input_predicate_arg();
+        builder.cond_store_interleave(pair.even, pair.odd, cond, dst);
+        hir::Function *fn = builder.build();
+        hir::Step *root = fn->step_roots[0];
+        require_api_smoke(root->is(hir::StepKind::StoreInterleave), "conditional interleave store root kind");
+        require_api_smoke(root->step_data<hir::StepKind::StoreInterleave>().cond == cond.step_,
+                          "conditional interleave store keeps predicate");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument dst = builder.arg(I32);
+        DeinterleavedPair pair = builder.load2(builder.arg(I32));
+        builder.cond_store_interleave(pair.even, pair.odd, builder.true_(), dst);
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots[0]->step_data<hir::StepKind::StoreInterleave>().cond == nullptr,
+                          "true conditional interleave store simplifies to unconditional");
+    }
     expect_api_smoke_simjit_error(
         [&] {
             MemoryArena arena{};

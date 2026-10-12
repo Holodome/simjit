@@ -570,6 +570,7 @@ public:
     void scatter(Value a, Value idx, Argument dst);
     void cond_scatter(Value a, Value idx, MaybePredicate cond, Argument dst);
     void store_interleave(Argument a, Value even, Value odd);
+    void cond_store_interleave(Value even, Value odd, MaybePredicate cond, Argument dst);
 
     // Aggregates
 

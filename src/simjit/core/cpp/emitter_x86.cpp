@@ -1254,10 +1254,32 @@ struct X86CppEmitter : CppEmitterBase {
                 std::string lo = unsafe_intrin_call(permute, show(data.even), idx_lo, show(data.odd));
                 std::string hi = unsafe_intrin_call(permute, show(data.even), idx_hi, show(data.odd));
                 std::string offset = format("2 * i + %zu", 2 * data.dst.offset);
+                if (data.cond != nullptr) {
+                    uint64_t even_bits = UINT64_C(0x5555555555555555);
+                    if (width < 64) even_bits &= (uint64_t{1} << width) - 1;
+                    const auto &mask_storeu = x86::mask_storeu_map.lookup(vdtype);
+                    const auto &pdep = x86::pdep_map.lookup(width > 32 ? ScalarDataType::I64 : ScalarDataType::I32);
+                    std::string mask_type = cpp_dtype(data.cond->dtype);
+                    const char *bits_type = width > 32 ? "uint64_t" : "uint32_t";
+                    std::string deposit_mask =
+                        format(width > 32 ? "0x%llxull" : "0x%llxu", (unsigned long long)even_bits);
+                    std::string lo_pdep =
+                        unsafe_intrin_call(pdep, format("(%s)%s", bits_type, show(data.cond)), deposit_mask);
+                    std::string hi_pdep = unsafe_intrin_call(
+                        pdep, format("(%s)%s >> %zu", bits_type, show(data.cond), half_width), deposit_mask);
+                    std::string lo_cond = format("(%s)(%s * 3)", mask_type.c_str(), lo_pdep.c_str());
+                    std::string hi_cond = format("(%s)(%s * 3)", mask_type.c_str(), hi_pdep.c_str());
+                    std::string result = unsafe_intrin_call(
+                        mask_storeu, format("arg%zu + %s", data.dst.arg, offset.c_str()), lo_cond, lo);
+                    result += ";\n" + unsafe_intrin_call(
+                                         mask_storeu, format("arg%zu + %s + %zu", data.dst.arg, offset.c_str(), width),
+                                         hi_cond, hi) + ";";
+                    return result;
+                }
                 std::string result =
                     unsafe_intrin_call(storeu, format("arg%zu + %s", data.dst.arg, offset.c_str()), lo);
-                result += "\n" + unsafe_intrin_call(
-                                     storeu, format("arg%zu + %s + %zu", data.dst.arg, offset.c_str(), width), hi);
+                result += ";\n" + unsafe_intrin_call(
+                                     storeu, format("arg%zu + %s + %zu", data.dst.arg, offset.c_str(), width), hi) + ";";
                 return result;
             }
             SIMJIT_MATCH (StepKind::ArithBinary) {
