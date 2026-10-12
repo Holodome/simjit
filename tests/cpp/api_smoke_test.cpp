@@ -794,12 +794,14 @@ static void api_smoke_load_deinterleave() {
         Argument dst = builder.arg(I32);
         DeinterleavedPair pair = builder.load2(builder.arg(I32));
         Predicate cond = builder.input_predicate_arg();
-        builder.cond_store_interleave(pair.even, pair.odd, cond, dst);
+        builder.cond_store_interleave(pair.even, pair.odd, cond, dst, LoadStoreKind::Aligned);
         hir::Function *fn = builder.build();
         hir::Step *root = fn->step_roots[0];
         require_api_smoke(root->is(hir::StepKind::StoreInterleave), "conditional interleave store root kind");
         require_api_smoke(root->step_data<hir::StepKind::StoreInterleave>().cond == cond.step_,
                           "conditional interleave store keeps predicate");
+        require_api_smoke(root->step_data<hir::StepKind::StoreInterleave>().kind == LoadStoreKind::Aligned,
+                          "conditional interleave store keeps store kind");
     }
     {
         MemoryArena arena{};

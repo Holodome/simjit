@@ -414,8 +414,8 @@ struct ExprShowState {
                 wr("dst=@%zu src=%%%u offset=%zu kind=%s", data.addr.arg, ref(data.what), data.addr.offset,
                    show_load_store_kind(data.kind));
             SIMJIT_MATCH (StepKind::StoreInterleave) {
-                wr_("even=%%%u odd=%%%u dst=@%zu offset=%zu", ref(data.even), ref(data.odd), data.dst.arg,
-                    data.dst.offset);
+                wr_("even=%%%u odd=%%%u dst=@%zu offset=%zu kind=%s", ref(data.even), ref(data.odd), data.dst.arg,
+                    data.dst.offset, show_load_store_kind(data.kind));
                 if (data.cond) wr_(" cond=%%%u", ref(data.cond));
                 return;
             }
@@ -790,8 +790,7 @@ struct MirConstructState {
 
     void collect_interleave_store(Step *root) {
         const auto &data = root->step_data<StepKind::StoreInterleave>();
-        collect_interleave_pair(data.dst.arg, data.dst.offset, root->dtype, LoadStoreKind::Unaligned, 2, true,
-                                data.even, data.odd);
+        collect_interleave_pair(data.dst.arg, data.dst.offset, root->dtype, data.kind, 2, true, data.even, data.odd);
     }
 
     void collect_interleave_pair(ArgumentIdx arg, size_t offset, DataType dtype, LoadStoreKind kind, uint8_t lane_count,
@@ -2234,7 +2233,7 @@ struct MirConstructState {
 
                 Step *cond = data.cond != nullptr ? ref_nth(2) : nullptr;
                 if (cond != nullptr) invariant_vec_mask(node, cond);
-                Step *root = sm.store_interleave({even, odd, addr, cond}, node->dtype);
+                Step *root = sm.store_interleave({even, odd, addr, data.kind, cond}, node->dtype);
                 collect_interleave_store(root);
                 main_loop_roots.push_back(root);
                 return;
@@ -2919,7 +2918,8 @@ struct MirConstructState {
                 Step *even = ref(data.even);
                 Step *odd = ref(data.odd);
                 Step *cond = data.cond != nullptr ? ref(data.cond) : nullptr;
-                return remainder_roots.push_back(sm.store_interleave({even, odd, {data.dst, 0}, cond}, even->dtype));
+                return remainder_roots.push_back(
+                    sm.store_interleave({even, odd, {data.dst, 0}, data.kind, cond}, even->dtype));
             }
             SIMJIT_MATCH (hir::StepKind::AccArithBinary) {
                 if (data.cond != nullptr) {

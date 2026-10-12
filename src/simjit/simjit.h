@@ -569,8 +569,9 @@ public:
     void pack(Value a, Predicate cond, Argument dst, Argument dst_size);
     void scatter(Value a, Value idx, Argument dst);
     void cond_scatter(Value a, Value idx, MaybePredicate cond, Argument dst);
-    void store_interleave(Argument a, Value even, Value odd);
-    void cond_store_interleave(Value even, Value odd, MaybePredicate cond, Argument dst);
+    void store_interleave(Argument dst, Value even, Value odd, LoadStoreKind kind = LoadStoreKind::Unaligned);
+    void cond_store_interleave(Value even, Value odd, MaybePredicate cond, Argument dst,
+                               LoadStoreKind kind = LoadStoreKind::Unaligned);
 
     // Aggregates
 

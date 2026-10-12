@@ -71,7 +71,7 @@ predicate_not_step: "(" "step" step_id "predicate-not" scalar_dtype step_ref ")"
 select_step: "(" "step" step_id "select" scalar_dtype step_ref step_ref step_ref ")"
 
 store_step: "(" "step" step_id "store" scalar_dtype step_ref arg_ref load_store_kind step_ref? ")"
-store_interleave_step: "(" "step" step_id "store-interleave" scalar_dtype step_ref step_ref arg_ref step_ref? ")"
+store_interleave_step: "(" "step" step_id "store-interleave" scalar_dtype step_ref step_ref arg_ref load_store_kind step_ref? ")"
 scatter_step: "(" "step" step_id "scatter" scalar_dtype step_ref step_ref arg_ref step_ref? ")"
 pack_step: "(" "step" step_id "pack" scalar_dtype step_ref step_ref arg_ref acc_ref ")"
 

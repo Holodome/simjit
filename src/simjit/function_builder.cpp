@@ -375,11 +375,11 @@ struct FunctionBuilderImpl {
         SIMJIT_ASSERT(dst.dtype == dtype);
         return sm.scatter({arg, idx, dst.idx, cond}, dtype);
     }
-    Step *store_interleave(Step *even, Step *odd, Step *cond, const ArgumentDecl &dst) {
+    Step *store_interleave(Step *even, Step *odd, Step *cond, const ArgumentDecl &dst, LoadStoreKind kind) {
         cond = simplify_optional_cond(ctx, cond);
         SIMJIT_ASSERT(dst.dtype == even->dtype);
         SIMJIT_ASSERT(dst.dtype == odd->dtype);
-        return sm.store_interleave({even, odd, dst.idx, cond}, even->dtype);
+        return sm.store_interleave({even, odd, dst.idx, kind, cond}, even->dtype);
     }
     Step *pack(Step *arg, Step *cond, const ArgumentDecl &dst, const Accumulator &dst_size_acc) {
         ScalarDataType dtype = arg->dtype;
@@ -1255,11 +1255,12 @@ void FunctionBuilder::cond_scatter(Value value, Value idx, MaybePredicate cond, 
     impl_->step_roots.push_back(step);
 }
 
-void FunctionBuilder::store_interleave(Argument dst, Value even, Value odd) {
-    cond_store_interleave(even, odd, {}, dst);
+void FunctionBuilder::store_interleave(Argument dst, Value even, Value odd, LoadStoreKind kind) {
+    cond_store_interleave(even, odd, {}, dst, kind);
 }
 
-void FunctionBuilder::cond_store_interleave(Value even, Value odd, MaybePredicate cond, Argument dst) {
+void FunctionBuilder::cond_store_interleave(Value even, Value odd, MaybePredicate cond, Argument dst,
+                                            LoadStoreKind kind) {
     check_value(even);
     check_value(odd);
     if (even.dtype() != odd.dtype()) {
@@ -1274,7 +1275,7 @@ void FunctionBuilder::cond_store_interleave(Value even, Value odd, MaybePredicat
     }
     if (func_arg.dtype == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::SmallDeinterleave; }
 
-    auto *step = impl_->store_interleave(even.step_, odd.step_, cond.step_, func_arg);
+    auto *step = impl_->store_interleave(even.step_, odd.step_, cond.step_, func_arg, kind);
     impl_->step_roots.push_back(step);
 }
 

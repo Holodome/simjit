@@ -4066,8 +4066,8 @@ struct CompileState {
                 vec_permute2(cc, lo, table->lo, odd, vdtype);
                 vec_permute2(cc, hi, table->hi, odd, vdtype);
                 if (data.cond == nullptr) {
-                    vec_mov(cc, vec_pair_mem(data.dst, vdtype, 0), lo, LoadStoreKind::Unaligned, vdtype);
-                    vec_mov(cc, vec_pair_mem(data.dst, vdtype, 1), hi, LoadStoreKind::Unaligned, vdtype);
+                    vec_mov(cc, vec_pair_mem(data.dst, vdtype, 0), lo, data.kind, vdtype);
+                    vec_mov(cc, vec_pair_mem(data.dst, vdtype, 1), hi, data.kind, vdtype);
                     return {};
                 }
 
@@ -4101,9 +4101,9 @@ struct CompileState {
                 MaskR hi_cond = create_mask_reg(mdtype);
                 gp_to_mask(mdtype, hi_cond, expanded);
                 cc.k(lo_cond);
-                vec_mov(cc, vec_pair_mem(data.dst, vdtype, 0), lo, LoadStoreKind::Unaligned, vdtype);
+                vec_mov(cc, vec_pair_mem(data.dst, vdtype, 0), lo, data.kind, vdtype);
                 cc.k(hi_cond);
-                vec_mov(cc, vec_pair_mem(data.dst, vdtype, 1), hi, LoadStoreKind::Unaligned, vdtype);
+                vec_mov(cc, vec_pair_mem(data.dst, vdtype, 1), hi, data.kind, vdtype);
                 return {};
             }
         }

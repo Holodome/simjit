@@ -112,6 +112,7 @@ struct StoreInterleaveData {
     Step *even{};
     Step *odd{};
     ArgumentAddress dst{};
+    LoadStoreKind kind{};
     Step *cond{};
 };
 

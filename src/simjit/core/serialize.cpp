@@ -455,7 +455,7 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             break;
         }
         SIMJIT_MATCH (StepKind::StoreInterleave) {
-            payload = hl::list_dot(ref(data.even), ref(data.odd), serialize_arg_ref(data.dst),
+            payload = hl::list_dot(ref(data.even), ref(data.odd), serialize_arg_ref(data.dst), data.kind,
                                    data.cond ? hl::list(ref(data.cond)) : nullptr);
             break;
         }
@@ -694,12 +694,13 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         return builder.load(parse_arg_ref(func_arg), load_kind);
     }
     case StepKind::StoreInterleave: {
-        auto [even, odd, dst, cond] = bind_step(hl::cap, hl::cap, hl::cap, hl::maybe);
+        auto [even, odd, dst, store_kind, cond] =
+            bind_step(hl::cap, hl::cap, hl::cap, hl::cap_as<LoadStoreKind>, hl::maybe);
         if (cond) {
             builder.cond_store_interleave(ref_value(even), ref_value(odd), ref_predicate(cond.value()),
-                                          parse_arg_ref(dst));
+                                          parse_arg_ref(dst), store_kind);
         } else {
-            builder.store_interleave(parse_arg_ref(dst), ref_value(even), ref_value(odd));
+            builder.store_interleave(parse_arg_ref(dst), ref_value(even), ref_value(odd), store_kind);
         }
         return {};
     }
