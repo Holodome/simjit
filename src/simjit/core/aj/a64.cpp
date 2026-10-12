@@ -23,7 +23,6 @@
 #define SIMJIT_A64_ASMJIT_INDEX_REGS 1
 #define SIMJIT_A64_ASMJIT_LDP 1
 #define SIMJIT_A64_ASMJIT_STP 1
-#define SIMJIT_A64_ASMJIT_LD2 1
 #define SIMJIT_A64_ASMJIT_INLINE_SCALAR_COND 1
 #define SIMJIT_A64_ASMJIT_BLEND_SUB 1
 
@@ -2415,47 +2414,17 @@ struct CompileState {
                 // this point means this lane emits the pair now and fills the partner's slot. Pairing comes
                 // from the MIR interleave lane lists.
                 Step *partner = mir_func->interleave.by_argument[data.addr.arg].find_partner(step);
-                // The interleaved pair is one 32-byte load split into two lane registers with a pair of unzips.
-                // Not ld2: AsmJit ld2 bug - the consecutive-output allocator picks registers holding live values
-                // and asserts under pressure (miscompiles in release builds). ldp is not affected.
-                // Remove this workaround once https://github.com/asmjit/asmjit/pull/528 is merged and the
-                // asmjit submodule is updated.
                 if (vdtype.size_bytes() != 16) messed_up("Invalid deinterleave of dtype %s", show_vec_dtype(vdtype));
-                VecR pair_lo = create_vec_reg(vdtype);
-                VecR pair_hi = create_vec_reg(vdtype);
                 // The MIR offset counts logical rows; the pair occupies lane_count rows worth of elements.
                 ArgumentAddress pair_base{data.addr.arg, data.addr.offset * data.lane_count};
                 aja64::Mem mem = vec_deinterleave_mem(pair_base, vdtype);
-                cc.ldp(pair_lo.q(), pair_hi.q(), mem);
-                auto emit_unzip = [&](const VecR &dst, uint8_t lane) {
-                    switch (vdtype.element_size_bytes_log2()) {
-                    case 0:
-                        lane == 0 ? cc.uzp1(dst.b16(), pair_lo.b16(), pair_hi.b16())
-                                  : cc.uzp2(dst.b16(), pair_lo.b16(), pair_hi.b16());
-                        break;
-                    case 1:
-                        lane == 0 ? cc.uzp1(dst.h8(), pair_lo.h8(), pair_hi.h8())
-                                  : cc.uzp2(dst.h8(), pair_lo.h8(), pair_hi.h8());
-                        break;
-                    case 2:
-                        lane == 0 ? cc.uzp1(dst.s4(), pair_lo.s4(), pair_hi.s4())
-                                  : cc.uzp2(dst.s4(), pair_lo.s4(), pair_hi.s4());
-                        break;
-                    case 3:
-                        lane == 0 ? cc.uzp1(dst.d2(), pair_lo.d2(), pair_hi.d2())
-                                  : cc.uzp2(dst.d2(), pair_lo.d2(), pair_hi.d2());
-                        break;
-                    default: messed_up("Invalid deinterleave element size %s", show_vec_dtype(vdtype));
-                    }
-                };
-                VecR mine = create_vec_reg(vdtype);
-                emit_unzip(mine, data.lane);
+                VecR even = create_vec_reg(vdtype);
+                VecR odd = create_vec_reg(vdtype);
+                cc.ld2(even, odd, mem);
                 if (partner != nullptr) {
-                    VecR other = create_vec_reg(vdtype);
-                    emit_unzip(other, data.lane ^ 1);
-                    step_map[partner->id] = other;
+                    step_map[partner->id] = data.lane == 0 ? odd : even;
                 }
-                return mine;
+                return data.lane == 0 ? even : odd;
             }
             SIMJIT_MATCH (StepKind::Load) {
                 if (step->dtype.is_mask()) {
