@@ -432,10 +432,13 @@ enum class CodeTransformations : uint32_t {
     BinaryIdentityPeephole = 0x2000,
     // Remove constant conditions during HIR construction.
     ConstantConditionPeephole = 0x4000,
+    // Lower ordinary i128 load, store, and add operations to i64 interleaved pairs.
+    I128Rewrite = 0x8000,
 
     All = MuldqInst | MulConstPeephole | LogicalPeephole | BetweenPeephole | Unroll | AccSplit | MaskCombine |
         TernarylogicInst | FmaInst | CastPeephole | ProactiveUnroll | CastDecomposition | BinaryIdentityPeephole |
-        ConstantConditionPeephole
+        ConstantConditionPeephole |
+        I128Rewrite
 #if SIMJIT_USE_LIBDIVIDE
         // Actually we can just set it always, but I want to make it clear that libdivide is required.
         | ConstDiv

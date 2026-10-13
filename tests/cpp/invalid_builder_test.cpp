@@ -228,6 +228,28 @@ static void add_low_level_api_tests(std::vector<Test> &tests) {
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.cmp_ugt(b.input_arg(F32), b.input_arg(F32))); });
     add_unsupported(tests, [](FunctionBuilder &b) { b.sum(b.input_arg(I32), b.arg(I128)); });
     add_unsupported(tests, [](FunctionBuilder &b) { b.product(b.input_arg(I64), b.arg(I128)); });
+    add_unsupported(tests, [](FunctionBuilder &b) {
+        Argument src = b.arg(I128);
+        b.store(b.sub(b.load(src), b.load(src)), b.arg(I128));
+    });
+    add_unsupported(tests, [](FunctionBuilder &b) {
+        Argument src = b.arg(I128);
+        b.store(b.mul(b.load(src), b.load(src)), b.arg(I128));
+    });
+    add_unsupported(tests, [](FunctionBuilder &b) {
+        Argument src = b.arg(I128);
+        b.store(b.cmp_eq(b.load(src), b.load(src)), b.arg(I1));
+    });
+    add_invalid(tests, [](FunctionBuilder &b) {
+        Argument src = b.arg(I128);
+        b.store(b.trunc(b.load(src), I64), b.arg(I64));
+    });
+    add_unsupported(tests, [](FunctionBuilder &b) {
+        Argument truthy = b.arg(I128);
+        Argument falsy = b.arg(I128);
+        b.store(b.select(b.input_predicate_arg(), b.load(truthy), b.load(falsy)), b.arg(I128));
+    });
+    add_unsupported(tests, [](FunctionBuilder &b) { b.store(b.load_splat(b.arg(I128)), b.arg(I128)); });
 }
 
 static void add_constant_tests(std::vector<Test> &tests) {

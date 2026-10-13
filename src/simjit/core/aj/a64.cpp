@@ -525,10 +525,9 @@ struct CompileState {
     //   LD1/ST1/.../LD4/ST4 single structure to one lane ({Vt.T}[i]) - no inline offset
     aja64::Mem row_address(const ArgumentAddress &addr, size_t elem_log2, size_t elems_per_row_log2,
                            size_t stride_elems, bool change_post_idx = true) {
-        if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
+        if (change_post_idx && SIMJIT_A64_ASMJIT_INDEX_REGS) {
             if (auto &state = index_regs[addr.arg]; state.gp.is_valid()) {
                 if (state.offset == addr.offset) {
-                    if (!change_post_idx) { return aja64::ptr(state.gp); }
                     state.offset += stride_elems;
                     return aja64::ptr_post(state.gp, (int)(stride_elems << elem_log2));
                 }
@@ -1204,7 +1203,7 @@ struct CompileState {
                 AnyR even = subexpr(data.even);
                 AnyR odd = subexpr(data.odd);
                 SIMJIT_ASSERT(data.dst.offset == 0);
-                aja64::Mem mem = row_address(data.dst, scalar_dtype_size_log2(sdtype), 1, 2);
+                aja64::Mem mem = row_address(data.dst, scalar_dtype_size_log2(sdtype), 1, 2, data.cond == nullptr);
                 switch (sdtype) {
                 case ScalarDataType::F32:
                 case ScalarDataType::F64: cc.stp(even.as<VecR>(), odd.as<VecR>(), mem); break;

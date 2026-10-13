@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <optional>
 #include <tuple>
@@ -1192,6 +1191,194 @@ static HirComplexityStats check_hir_complexity(FunctionBuilderImpl *impl) {
     return stats;
 }
 
+struct I128RewriteState {
+    struct I128Pair {
+        Step *low;
+        Step *high;
+    };
+    struct RewrittenStep {
+        enum class Kind : uint8_t {
+            Scalar,
+            Pair,
+        };
+
+        Kind kind = Kind::Scalar;
+        union {
+            Step *scalar;
+            I128Pair pair;
+        };
+
+        RewrittenStep() : scalar(nullptr) {}
+
+        static RewrittenStep make_scalar(Step *step) {
+            RewrittenStep result;
+            result.scalar = step;
+            return result;
+        }
+
+        static RewrittenStep make_pair(I128Pair value) {
+            RewrittenStep result;
+            result.kind = Kind::Pair;
+            result.pair = value;
+            return result;
+        }
+
+        bool is_pair() const { return kind == Kind::Pair; }
+    };
+    struct ScalarChildRewriter {
+        I128RewriteState &state;
+        Step *consumer;
+
+        void operator()(Step *&child) const { child = state.rewrite_scalar(child, consumer); }
+    };
+
+    Function *func;
+    StepMaker &sm;
+    size_t original_step_count;
+    std::vector<RewrittenStep> rewritten;
+    ArenaBitmap rewritten_steps;
+    Step *zero = nullptr;
+    Step *one = nullptr;
+
+    I128RewriteState(FunctionBuilderImpl *impl, Function *func)
+        : func(func), sm(impl->sm), original_step_count(sm.max_id()), rewritten(original_step_count),
+          rewritten_steps(ArenaBitmap::create(impl->ctx->arena, original_step_count)) {}
+
+    void mark_i128_argument(ArgumentIdx idx) {
+        ArgumentDecl &arg = func->args[idx];
+        if (arg.dtype != ScalarDataType::I128) {
+            unsupported("ordinary i128 access requires an i128 {i64,i64} carrier");
+        }
+        if (!arg.interleaved) {
+            arg.interleaved = true;
+            arg.interleaved_half_dtype = ScalarDataType::I64;
+        }
+        if (arg.interleaved_half_dtype != ScalarDataType::I64) {
+            unsupported("ordinary i128 access requires an i128 {i64,i64} carrier");
+        }
+    }
+
+    template <typename Make> static Step *cached_step(Step **cache, Make make) {
+        if (*cache == nullptr) { *cache = make(); }
+        return *cache;
+    }
+
+    Step *rewrite_scalar(Step *child, const Step *consumer) {
+        RewrittenStep rewritten_child = rewrite(child);
+        if (rewritten_child.is_pair()) {
+            unsupported("i128 rewrite supports only load, store, and unflagged add; got %s",
+                        show_step_kind(consumer->kind));
+        }
+        return rewritten_child.scalar;
+    }
+
+    I128Pair rewrite_pair_child(Step *child, const Step *consumer) {
+        RewrittenStep rewritten_child = rewrite(child);
+        if (!rewritten_child.is_pair()) {
+            unsupported("i128 rewrite expected i128 input for %s", show_step_kind(consumer->kind));
+        }
+        return rewritten_child.pair;
+    }
+
+    RewrittenStep rewrite(Step *step) {
+        SIMJIT_ASSERT(step->id < original_step_count);
+        RewrittenStep &result = rewritten[step->id];
+        if (rewritten_steps.get(step->id)) { return result; }
+        rewritten_steps.set(step->id);
+
+        switch (step->kind) {
+            SIMJIT_MATCH (StepKind::Load) {
+                if (step->dtype != ScalarDataType::I128) { break; }
+                mark_i128_argument(data.idx);
+                result =
+                    RewrittenStep::make_pair({sm.load_deinterleave({data.idx, data.kind, 2, 0}, ScalarDataType::I64),
+                                              sm.load_deinterleave({data.idx, data.kind, 2, 1}, ScalarDataType::I64)});
+                return result;
+            }
+
+            SIMJIT_MATCH (StepKind::ArithBinary) {
+                if (step->dtype != ScalarDataType::I128) { break; }
+                if (data.op != ArithBinaryOp::Add || data.flags != ArithBinaryOpFlags::No) {
+                    unsupported("i128 rewrite supports only load, store, and unflagged add; got %s",
+                                show_step_kind(step->kind));
+                }
+                I128Pair left = rewrite_pair_child(data.left, step);
+                I128Pair right = rewrite_pair_child(data.right, step);
+                I128Pair sum{};
+                sum.low = sm.arith_bin({ArithBinaryOp::Add, left.low, right.low, ArithBinaryOpFlags::No},
+                                       ScalarDataType::I64);
+                Step *carry = sm.cmp({CmpOp::Less, sum.low, left.low, true}, ScalarDataType::I1);
+                Step *high = sm.arith_bin({ArithBinaryOp::Add, left.high, right.high, ArithBinaryOpFlags::No},
+                                          ScalarDataType::I64);
+                Step *i64_one = cached_step(
+                    &one, [this] { return sm.con(ConstData::u64(1).retag(ScalarDataType::I64), ScalarDataType::I64); });
+                Step *i64_zero = cached_step(&zero, [this] {
+                    return sm.con(ConstData::u64(0).retag(ScalarDataType::I64), ScalarDataType::I64);
+                });
+                Step *carry_i64 = sm.select({carry, i64_one, i64_zero}, ScalarDataType::I64);
+                sum.high =
+                    sm.arith_bin({ArithBinaryOp::Add, high, carry_i64, ArithBinaryOpFlags::No}, ScalarDataType::I64);
+                result = RewrittenStep::make_pair(sum);
+                return result;
+            }
+
+            SIMJIT_MATCH (StepKind::Store) {
+                if (step->dtype != ScalarDataType::I128) { break; }
+                mark_i128_argument(data.addr);
+                I128Pair value = rewrite_pair_child(data.what, step);
+                Step *cond = data.cond == nullptr ? nullptr : rewrite_scalar(data.cond, step);
+                result = RewrittenStep::make_scalar(
+                    sm.store_interleave({value.low, value.high, data.addr, data.kind, cond}, ScalarDataType::I64));
+                return result;
+            }
+
+        default: break;
+        }
+
+        if (step->dtype == ScalarDataType::I128 && !step->is(StepKind::AccSum128)) {
+            unsupported("i128 rewrite supports only load, store, and unflagged add; got %s",
+                        show_step_kind(step->kind));
+        }
+
+        // Ordinary steps retain their identity while their child links are
+        // rewritten in place. Future pair-to-scalar operations belong in the
+        // special cases above.
+        step_recurse(step, ScalarChildRewriter{*this, step});
+        result = RewrittenStep::make_scalar(step);
+        return result;
+    }
+
+    void rewrite_roots() {
+        for (Step *&root : func->step_roots) {
+            RewrittenStep rewritten_root = rewrite(root);
+            SIMJIT_ASSERT(!rewritten_root.is_pair());
+            root = rewritten_root.scalar;
+        }
+        func->step_id_count = sm.max_id();
+    }
+};
+
+// i128 is a public transfer type. Keep its desugaring here, at the boundary
+// between builder expressions and finalized HIR, so all later stages only see
+// the existing i64 interleaved-pair representation.
+static void rewrite_i128_hir(FunctionBuilderImpl *impl, Function *func) {
+    // Synthetic steps are ordinary builder steps. Original i128 steps remain
+    // allocated but become unreachable as their consumers are replaced.
+    I128RewriteState state(impl, func);
+    state.rewrite_roots();
+}
+
+static void validate_i128_hir(const Function *func) {
+    std::vector<uint8_t> state(func->step_id_count, 0);
+    for (Step *root : func->step_roots) {
+        traverse_steps_postorder_unique(root, state, [&](Step *step) {
+            if (step->dtype == ScalarDataType::I128 && !step->is(StepKind::AccSum128)) {
+                unsupported("unlowered i128 %s in finalized HIR; enable I128Rewrite", show_step_kind(step->kind));
+            }
+        });
+    }
+}
+
 static void check_arith_agg_op(ArithBinaryOp op) {
     if (op != ArithBinaryOp::Add && op != ArithBinaryOp::Mul && op != ArithBinaryOp::Min && op != ArithBinaryOp::Max &&
         op != ArithBinaryOp::UMin && op != ArithBinaryOp::UMax && op != ArithBinaryOp::And && op != ArithBinaryOp::Or &&
@@ -2086,6 +2273,8 @@ Function *FunctionBuilder::build() {
     func->step_roots = arena->copy_array<Step *>(impl_->step_roots);
     func->safety_check_arg = impl_->safety_check_arg;
     func->special_ops = impl_->special_ops;
+    if (bool(impl_->ctx->transformations & CodeTransformations::I128Rewrite)) { rewrite_i128_hir(impl_, func); }
+    validate_i128_hir(func);
     analyze_argument_usage(func);
     func->vectorization_hint = impl_->vectorization_hint;
     if (func->vectorization_hint == VectorizationHint::None &&

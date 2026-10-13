@@ -848,6 +848,47 @@ static void api_smoke_load_deinterleave() {
         require_api_smoke(fn->step_roots[1]->is(hir::StepKind::StoreInterleave),
                           "mixed pair access keeps interleaved store");
     }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument left = builder.arg(I128);
+        Argument right = builder.arg(I128);
+        Argument dst = builder.arg(I128);
+        Predicate cond = builder.input_predicate_arg();
+        builder.cond_store(builder.add(builder.load(left), builder.load(right)), cond, dst, LoadStoreKind::Aligned);
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->args[left.idx_].interleaved && fn->args[left.idx_].interleaved_half_dtype == I64,
+                          "ordinary i128 input becomes i64 interleaved carrier");
+        hir::Step *root = fn->step_roots[0];
+        require_api_smoke(root->is(hir::StepKind::StoreInterleave), "ordinary i128 store rewrites to pair store");
+        const auto &store = root->step_data<hir::StepKind::StoreInterleave>();
+        require_api_smoke(store.cond == cond.step_ && store.kind == LoadStoreKind::Aligned,
+                          "i128 store preserves predicate and kind");
+        size_t pair_loads = 0;
+        size_t i64_adds = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *step_root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(step_root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "rewritten i128 value is not reachable");
+                if (step->is(hir::StepKind::LoadDeinterleave)) { ++pair_loads; }
+                if (step->is(hir::StepKind::ArithBinary) && step->dtype == I64) { ++i64_adds; }
+            });
+        }
+        require_api_smoke(pair_loads == 4, "i128 add has four pair load lanes");
+        require_api_smoke(i64_adds == 3, "i128 add has low, high, and carry additions");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::I128Rewrite, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I128);
+        Argument dst = builder.arg(I128);
+        builder.store(builder.load(src), dst);
+        expect_api_smoke_simjit_error([&] { (void)builder.build(); }, ErrorModule::HIR, ErrorKind::Unsupported,
+                                      ErrorSubKind::UnsupportedFeature,
+                                      "build rejects unlowered i128 when rewrite is disabled");
+    }
 }
 
 static void run_public_api_smoke_tests() {

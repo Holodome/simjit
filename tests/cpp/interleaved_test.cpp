@@ -431,6 +431,21 @@ def func(n, src, dst):
                          },
                          PASS_ALL});
 
+    // Public i128 values desugar during build into i64 pair accesses. The
+    // test harness treats the marked i128 carriers as two i64 values per row.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg(I128);
+                             Argument dst = b.arg(I128);
+                             b.store(b.load(src), dst);
+                         },
+                         PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument left = b.arg(I128);
+                             Argument right = b.arg(I128);
+                             Argument dst = b.arg(I128);
+                             b.store(b.add(b.load(left), b.load(right)), dst);
+                         },
+                         PASS_ALL});
     return tests;
 }
 
