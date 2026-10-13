@@ -296,8 +296,10 @@ struct DataType {
 };
 
 struct ArgumentDecl {
-    ScalarDataType dtype;
-    ArgumentIdx idx;
+    ScalarDataType dtype{};
+    ArgumentIdx idx{};
+    bool interleaved = false;
+    ScalarDataType interleaved_half_dtype = ScalarDataType::I1;
 };
 
 ConstData scalar_dtype_max(ScalarDataType dt);

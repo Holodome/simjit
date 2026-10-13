@@ -342,8 +342,6 @@ enum class ArgumentUsage : uint16_t {
     ArrayRead = 0x80,
     SplatRead = 0x100,
     SafetyCheck = 0x200,
-    // The argument consumes lane_count elements per logical row (interleaved layout, e.g. deinterleave loads).
-    Interleaved2x = 0x400,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(ArgumentUsage)
 

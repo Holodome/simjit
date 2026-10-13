@@ -40,8 +40,7 @@ enum class Backend : uint8_t {
 struct ArgumentInfo {
     ScalarDataType dtype{};
     BundleArgumentKind kind{};
-    // Elements consumed or produced per logical row. Interleaved arguments read lane_count elements per row.
-    size_t stride_nrows = 1;
+    std::optional<ScalarDataType> interleaved_half_dtype{};
 };
 
 struct FunctionHandle {

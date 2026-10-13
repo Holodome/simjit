@@ -75,6 +75,7 @@ namespace {
 struct ArgInfo {
     V *data_ptr = nullptr;
     Ty *element_type = nullptr;
+    ScalarDataType dtype{};
 };
 
 struct AccInfo {
@@ -435,6 +436,12 @@ struct LLVMBuilder {
         return b->CreateInBoundsGEP(info.element_type, info.data_ptr, idx);
     }
 
+    V *index_interleaved_arg(const ArgInfo &info, V *row, ScalarDataType half_dtype, uint8_t lane = 0) {
+        V *byte_off = b->CreateNUWMul(row, b->getInt64(scalar_dtype_size(info.dtype)));
+        if (lane != 0) { byte_off = b->CreateNUWAdd(byte_off, b->getInt64(lane * scalar_dtype_size(half_dtype))); }
+        return b->CreateInBoundsGEP(b->getInt8Ty(), info.data_ptr, byte_off);
+    }
+
     V *load_acc(AccId id) {
         size_t idx = func->accs.index(id);
         SIMJIT_ASSERT(idx < accs.size());
@@ -511,16 +518,16 @@ struct LLVMBuilder {
                 }
                 ArgInfo &info = func_args[data.addr.arg];
                 V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
-                off = b->CreateNUWMul(off, b->getInt64(data.lane_count));
-                if (data.lane) { off = b->CreateNUWAdd(off, b->getInt64(data.lane)); }
-                return b->CreateLoad(info.element_type, index_arg(info, off));
+                if (data.addr.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.addr.offset)); }
+                return b->CreateLoad(scalar_type_to_llvm(step->dtype.as_scalar()),
+                                     index_interleaved_arg(info, off, step->dtype.as_scalar(), data.lane));
             }
             SIMJIT_MATCH (StepKind::StoreInterleave) {
                 ArgInfo &info = func_args[data.dst.arg];
                 V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
-                off = b->CreateNUWMul(off, b->getInt64(2));
-                V *even_ptr = index_arg(info, off);
-                V *odd_ptr = index_arg(info, b->CreateNUWAdd(off, b->getInt64(1)));
+                if (data.dst.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.dst.offset)); }
+                V *even_ptr = index_interleaved_arg(info, off, step->dtype.as_scalar());
+                V *odd_ptr = index_interleaved_arg(info, off, step->dtype.as_scalar(), 1);
                 llvm::Align alignment(data.kind == LoadStoreKind::Aligned ? scalar_dtype_size(step->dtype.as_scalar())
                                                                           : 1);
                 if (data.cond != nullptr) {
@@ -942,12 +949,10 @@ struct LLVMBuilder {
                 size_t width = vdtype.nelems();
                 ArgInfo &info = func_args[data.addr.arg];
                 V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
-                off = b->CreateNUWMul(off, b->getInt64(data.lane_count));
-                size_t base_offset = data.addr.offset * data.lane_count;
-                if (base_offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(base_offset)); }
-                llvm::VectorType *pair_type =
-                    llvm::VectorType::get(info.element_type, llvm::ElementCount::getFixed(width * data.lane_count));
-                V *idx = index_arg(info, off);
+                if (data.addr.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.addr.offset)); }
+                llvm::VectorType *pair_type = llvm::VectorType::get(
+                    scalar_type_to_llvm(vdtype.to_scalar()), llvm::ElementCount::getFixed(width * data.lane_count));
+                V *idx = index_interleaved_arg(info, off, vdtype.to_scalar());
                 llvm::LoadInst *wide = nullptr;
                 if (data.kind == LoadStoreKind::Unaligned) {
                     wide = b->CreateLoad(pair_type, idx);
@@ -975,10 +980,8 @@ struct LLVMBuilder {
                 }
                 V *packed = b->CreateShuffleVector(even, odd, interleave);
                 V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
-                off = b->CreateNUWMul(off, b->getInt64(2));
-                size_t base_offset = data.dst.offset * 2;
-                if (base_offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(base_offset)); }
-                V *idx = index_arg(info, off);
+                if (data.dst.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.dst.offset)); }
+                V *idx = index_interleaved_arg(info, off, vdtype.to_scalar());
                 llvm::Align alignment(data.kind == LoadStoreKind::Aligned ? vdtype.size_bytes() : 1);
                 if (data.cond != nullptr) {
                     V *cond = step_to_llvm(data.cond);
@@ -1408,6 +1411,7 @@ static void compile_function(LLVMBuilder &builder, const Function *func) {
         llvm::Argument *llvm_arg = args_it++;
         SIMJIT_ASSERT(llvm_arg < builder.function->arg_end());
         info.data_ptr = llvm_arg;
+        info.dtype = arg.dtype;
         info.element_type = (arg.dtype == ScalarDataType::I1 || arg.dtype == ScalarDataType::I128)
                                 ? builder.b->getVoidTy()
                                 : builder.scalar_type_to_llvm(arg.dtype);

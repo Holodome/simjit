@@ -636,13 +636,13 @@ static void api_smoke_transform_and_aggregate() {
 static void api_smoke_load_deinterleave() {
     using hir::SpecialOp;
 
-    // Repeated calls share lane steps (CSE), lanes carry self-sufficient metadata, and the argument is
-    // flagged as interleaved.
+    // Repeated calls share lane steps (CSE), and the carrier keeps its explicit
+    // interleaved-half declaration.
     {
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
-        Argument src = builder.arg(I32);
+        Argument src = builder.arg_interleaved(I32);
         DeinterleavedPair first = builder.load2(src);
         DeinterleavedPair second = builder.load2(src);
         require_api_smoke(first.even.step_ == second.even.step_, "deinterleave even lane CSE");
@@ -651,8 +651,9 @@ static void api_smoke_load_deinterleave() {
         builder.store(builder.add(first.even, builder.i32(1)), builder.arg(I32));
         builder.store(second.odd, builder.arg(I32));
         hir::Function *fn = builder.build();
-        require_api_smoke(bool(fn->argument_usage[src.idx_] & hir::ArgumentUsage::Interleaved2x),
-                          "deinterleave argument usage flag");
+        require_api_smoke(fn->args[src.idx_].dtype == I64 && fn->args[src.idx_].interleaved &&
+                              fn->args[src.idx_].interleaved_half_dtype == I32,
+                          "deinterleave carrier declaration");
         size_t lane_count = 0;
         std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
         for (hir::Step *root : fn->step_roots) {
@@ -674,7 +675,7 @@ static void api_smoke_load_deinterleave() {
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
         FunctionBuilder builder{context};
-        DeinterleavedPair pair = builder.load2(builder.arg(I32));
+        DeinterleavedPair pair = builder.load2(builder.arg_interleaved(I32));
         builder.store(pair.even, builder.arg(I32));
         builder.store(pair.odd, builder.arg(I32));
         hir::Function *fn = builder.build();
@@ -688,10 +689,10 @@ static void api_smoke_load_deinterleave() {
         context.host_supported_vector_special_ops =
             hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512) & ~SpecialOp::SmallDeinterleave;
         FunctionBuilder builder{context};
-        DeinterleavedPair i8_pair = builder.load2(builder.arg(I8));
+        DeinterleavedPair i8_pair = builder.load2(builder.arg_interleaved(I8));
         builder.store(i8_pair.even, builder.arg(I8));
         builder.store(i8_pair.odd, builder.arg(I8));
-        builder.store(builder.load2(builder.arg(I32)).even, builder.arg(I32));
+        builder.store(builder.load2(builder.arg_interleaved(I32)).even, builder.arg(I32));
         hir::Function *fn = builder.build();
         require_api_smoke(bool(fn->special_ops & SpecialOp::SmallDeinterleave), "i8 deinterleave op recorded");
         require_api_smoke(fn->is_scalar_only(), "i8 deinterleave stages to scalar without VBMI");
@@ -704,14 +705,13 @@ static void api_smoke_load_deinterleave() {
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
-        Argument pairs = builder.arg(I32);
+        Argument pairs = builder.arg_interleaved(I32);
         DeinterleavedPair lanes = builder.load2(pairs);
         builder.store(builder.gather(lanes.even, builder.arg(I32)), builder.arg(I32));
         hir::Function *fn = builder.build();
         require_api_smoke(bool(fn->argument_usage[pairs.idx_] & hir::ArgumentUsage::BoundedIndex),
                           "deinterleaved gather index marks input bounded");
-        require_api_smoke(bool(fn->argument_usage[pairs.idx_] & hir::ArgumentUsage::Interleaved2x),
-                          "deinterleaved gather index input stays interleaved");
+        require_api_smoke(fn->args[pairs.idx_].interleaved, "deinterleaved gather input stays marked");
     }
 
     // The single-lane API produces the same leaves as the pair API (cross-API CSE).
@@ -719,7 +719,7 @@ static void api_smoke_load_deinterleave() {
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
-        Argument src = builder.arg(I32);
+        Argument src = builder.arg_interleaved(I32);
         Value single = builder.load2_1(src);
         DeinterleavedPair pair = builder.load2(src);
         require_api_smoke(single.step_ == pair.odd.step_, "single-lane API unifies with pair odd lane");
@@ -740,18 +740,17 @@ static void api_smoke_load_deinterleave() {
             MemoryArena arena{};
             Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
             FunctionBuilder builder{context};
-            builder.load_deinterleave(builder.arg(I32), 2, 2);
+            builder.load_deinterleave(builder.arg_interleaved(I32), 2, 2);
         },
         ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidConfiguration,
         "out-of-range deinterleave lane is rejected");
-    // N-way interleaving is not implemented yet: the general API is restricted to pairs until the
-    // backends and the row-width metadata support it.
+    // N-way interleaving is not implemented yet: the general API is restricted to pairs.
     expect_api_smoke_simjit_error(
         [&] {
             MemoryArena arena{};
             Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
             FunctionBuilder builder{context};
-            builder.load_deinterleave(builder.arg(I32), 3, 0);
+            builder.load_deinterleave(builder.arg_interleaved(I32), 3, 0);
         },
         ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidConfiguration,
         "3-way deinterleave is rejected");
@@ -761,38 +760,39 @@ static void api_smoke_load_deinterleave() {
             MemoryArena arena{};
             Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
             FunctionBuilder builder{context};
-            builder.load2(builder.arg(I1));
+            builder.load2(builder.arg(I32));
         },
-        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i1 deinterleave is rejected");
-    expect_api_smoke_simjit_error(
-        [&] {
-            MemoryArena arena{};
-            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
-            FunctionBuilder builder{context};
-            builder.load2(builder.arg(I128));
-        },
-        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i128 deinterleave is rejected");
-
-    // store_interleave: usage flags, I1/I128 rejection, mixed plain-store rejection.
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "unmarked deinterleave is rejected");
     {
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
-        Argument dst = builder.arg(I32);
-        DeinterleavedPair pair = builder.load2(builder.arg(I32));
+        Argument arg = builder.arg(I128);
+        builder.mark_arg_interleave(arg, I64);
+        DeinterleavedPair pair = builder.load2(arg);
+        require_api_smoke(pair.even.dtype() == I64 && pair.odd.dtype() == I64, "i128 carrier yields i64 pair values");
+    }
+
+    // store_interleave: pair operations use explicit declarations, while ordinary
+    // carrier accesses remain legal on the same argument.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument dst = builder.arg_interleaved(I32);
+        DeinterleavedPair pair = builder.load2(builder.arg_interleaved(I32));
         builder.store_interleave(dst, pair.even, pair.odd);
         hir::Function *fn = builder.build();
         require_api_smoke(bool(fn->argument_usage[dst.idx_] & hir::ArgumentUsage::SequentialWrite),
                           "store interleave marks dst sequential write");
-        require_api_smoke(bool(fn->argument_usage[dst.idx_] & hir::ArgumentUsage::Interleaved2x),
-                          "store interleave marks dst interleaved");
+        require_api_smoke(fn->args[dst.idx_].interleaved, "store interleave destination is marked");
     }
     {
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
-        Argument dst = builder.arg(I32);
-        DeinterleavedPair pair = builder.load2(builder.arg(I32));
+        Argument dst = builder.arg_interleaved(I32);
+        DeinterleavedPair pair = builder.load2(builder.arg_interleaved(I32));
         Predicate cond = builder.input_predicate_arg();
         builder.cond_store_interleave(pair.even, pair.odd, cond, dst, LoadStoreKind::Aligned);
         hir::Function *fn = builder.build();
@@ -807,8 +807,8 @@ static void api_smoke_load_deinterleave() {
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
-        Argument dst = builder.arg(I32);
-        DeinterleavedPair pair = builder.load2(builder.arg(I32));
+        Argument dst = builder.arg_interleaved(I32);
+        DeinterleavedPair pair = builder.load2(builder.arg_interleaved(I32));
         builder.cond_store_interleave(pair.even, pair.odd, builder.true_(), dst);
         hir::Function *fn = builder.build();
         require_api_smoke(fn->step_roots[0]->step_data<hir::StepKind::StoreInterleave>().cond == nullptr,
@@ -819,29 +819,35 @@ static void api_smoke_load_deinterleave() {
             MemoryArena arena{};
             Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
             FunctionBuilder builder{context};
-            builder.store_interleave(builder.arg(I1), builder.i32(0), builder.i32(1));
+            builder.store_interleave(builder.arg(I32), builder.i32(0), builder.i32(1));
         },
-        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i1 store-interleave is rejected");
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "unmarked store-interleave is rejected");
     expect_api_smoke_simjit_error(
         [&] {
             MemoryArena arena{};
             Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
             FunctionBuilder builder{context};
-            builder.store_interleave(builder.arg(I128), builder.i64(0), builder.i64(1));
+            Argument dst = builder.arg_interleaved(I64);
+            builder.store_interleave(dst, builder.i32(0), builder.i32(1));
         },
-        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i128 store-interleave is rejected");
-    expect_api_smoke_simjit_error(
-        [&] {
-            MemoryArena arena{};
-            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
-            FunctionBuilder builder{context};
-            Argument mixed = builder.arg(I32);
-            Value even = builder.load2_0(mixed);
-            builder.store(even, mixed);
-            builder.build();
-        },
-        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidArgumentAccess,
-        "mixed plain store and interleaved load on one argument is rejected");
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "mismatched interleave half is rejected");
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument mixed_src = builder.arg_interleaved(I32);
+        Argument raw_dst = builder.arg(I64);
+        Argument pair_dst = builder.arg_interleaved(I32);
+        Value raw = builder.load(mixed_src);
+        DeinterleavedPair pair = builder.load2(mixed_src);
+        builder.store(raw, raw_dst);
+        builder.store_interleave(pair_dst, pair.even, pair.odd);
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots.size() == 2, "mixed carrier and pair accesses both remain roots");
+        require_api_smoke(fn->step_roots[0]->is(hir::StepKind::Store), "mixed carrier access keeps ordinary store");
+        require_api_smoke(fn->step_roots[1]->is(hir::StepKind::StoreInterleave),
+                          "mixed pair access keeps interleaved store");
+    }
 }
 
 static void run_public_api_smoke_tests() {

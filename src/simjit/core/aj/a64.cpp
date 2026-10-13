@@ -549,9 +549,10 @@ struct CompileState {
         return row_address(addr, dtype.element_size_bytes_log2(), 0, dtype.nelems() * 2);
     }
 
-    // Address of an interleaved pair. `addr` must be the pair base (lane 0 offset).
-    aja64::Mem vec_deinterleave_mem(const ArgumentAddress &pair_base, VecDataType dtype) {
-        return row_address(pair_base, dtype.element_size_bytes_log2(), 1, dtype.nelems() * 2);
+    // Address of an interleaved pair. The argument's carrier defines the record
+    // stride; dtype is the type of each half.
+    aja64::Mem vec_deinterleave_mem(const ArgumentAddress &addr, VecDataType dtype) {
+        return row_address(addr, scalar_dtype_size_log2(args[addr.arg].arg->dtype), 0, dtype.nelems());
     }
 
     aja64::Mem scalar_mem(const ArgumentAddress &addr, ScalarDataType sdtype) {
@@ -1149,7 +1150,6 @@ struct CompileState {
                 if (data.lane_count != 2 || data.lane >= data.lane_count || sdtype == ScalarDataType::I1) {
                     unsupported("Unsupported scalar load-deinterleave lane %u of %u", data.lane, data.lane_count);
                 }
-                // Explicit addressing only: the index-register cursor assumes one advance per row.
                 AnyR result = create_scalar_reg(sdtype);
                 GpR addr = cc.new_gp64();
                 cc.add(addr, args[data.addr.arg].gp, counter, aja64::lsl(scalar_dtype_size_log2(sdtype) + 1));
@@ -2423,8 +2423,7 @@ struct CompileState {
                 Step *partner = mir_func->interleave.by_argument[data.addr.arg].find_partner(step);
                 if (vdtype.size_bytes() != 16) messed_up("Invalid deinterleave of dtype %s", show_vec_dtype(vdtype));
                 // The MIR offset counts logical rows; the pair occupies lane_count rows worth of elements.
-                ArgumentAddress pair_base{data.addr.arg, data.addr.offset * data.lane_count};
-                aja64::Mem mem = vec_deinterleave_mem(pair_base, vdtype);
+                aja64::Mem mem = vec_deinterleave_mem(data.addr, vdtype);
                 VecR even = create_vec_reg(vdtype);
                 VecR odd = create_vec_reg(vdtype);
                 cc.ld2(even, odd, mem);
@@ -2573,8 +2572,7 @@ struct CompileState {
                 if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
                 if (vdtype.size_bytes() != 16)
                     messed_up("Invalid store-interleave of dtype %s", show_vec_dtype(vdtype));
-                ArgumentAddress pair_base{data.dst.arg, data.dst.offset * 2};
-                aja64::Mem mem = vec_deinterleave_mem(pair_base, vdtype);
+                aja64::Mem mem = vec_deinterleave_mem(data.dst, vdtype);
                 VecR even = vec_subexpr(data.even);
                 VecR odd = vec_subexpr(data.odd);
                 if (data.cond != nullptr) {
@@ -3767,18 +3765,17 @@ struct CompileState {
 
         if (step->is(StepKind::LoadDeinterleave)) {
             if (!step->dtype.is_vec()) { return {}; }
-            // The pair load advances the pointer once, so only lane 0 participates in the cursor model.
-            // The cursor is physical: scale the logical offset by the lane count.
+            // The pair load advances one declared carrier record per logical row, so only
+            // lane 0 participates in the cursor model.
             auto data = step->step_data<StepKind::LoadDeinterleave>();
             if (data.lane != 0) { return {}; }
-            return std::pair{ArgumentAddress{data.addr.arg, data.addr.offset * data.lane_count},
-                             size_t{data.lane_count} * step->dtype.as_vec().nelems()};
+            return std::pair{data.addr, step->dtype.as_vec().nelems()};
         }
 
         if (step->is(StepKind::StoreInterleave)) {
             if (!step->dtype.is_vec()) { return {}; }
             auto data = step->step_data<StepKind::StoreInterleave>();
-            return std::pair{ArgumentAddress{data.dst.arg, data.dst.offset * 2}, 2 * step->dtype.as_vec().nelems()};
+            return std::pair{data.dst, step->dtype.as_vec().nelems()};
         }
 
         if (step->is(StepKind::Load)) {

@@ -1189,12 +1189,17 @@ struct X86CppEmitter : CppEmitterBase {
                 }
                 VecDataType vdtype = step->dtype.as_vec();
                 size_t width = vdtype.nelems();
+                const ArgumentDecl &arg = func->args[data.addr.arg];
                 const auto &loadu = x86::loadu_map.lookup(vdtype);
                 const auto &permute = x86::permutex2var_map.lookup(vdtype);
-                std::string lo =
-                    unsafe_intrin_call(loadu, format("arg%zu + 2 * i + %zu", data.addr.arg, 2 * data.addr.offset));
+                std::string half_ptr = cpp_dtype(vdtype.to_scalar());
+                size_t stride = scalar_dtype_size(arg.dtype);
+                std::string lo = unsafe_intrin_call(loadu, format("(const %s *)((const char *)arg%zu + i * %zu + %zu)",
+                                                                  half_ptr.c_str(), data.addr.arg, stride,
+                                                                  data.addr.offset * stride));
                 std::string hi = unsafe_intrin_call(
-                    loadu, format("arg%zu + 2 * i + %zu", data.addr.arg, 2 * data.addr.offset + width));
+                    loadu, format("(const %s *)((const char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.addr.arg,
+                                  stride, data.addr.offset * stride + width * vdtype.element_size_bytes()));
 
                 size_t esz = vdtype.element_size_bytes();
                 size_t reg_bytes = vdtype.size_bytes();
@@ -1221,6 +1226,7 @@ struct X86CppEmitter : CppEmitterBase {
             SIMJIT_MATCH (StepKind::StoreInterleave) {
                 VecDataType vdtype = step->dtype.as_vec();
                 if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
+                const ArgumentDecl &arg = func->args[data.dst.arg];
                 const auto &permute = x86::permutex2var_map.lookup(vdtype);
                 const auto &storeu =
                     (data.kind == LoadStoreKind::Aligned ? x86::storea_map : x86::storeu_map).lookup(vdtype);
@@ -1254,7 +1260,12 @@ struct X86CppEmitter : CppEmitterBase {
                 std::string idx_hi = interleave_idx(half_width);
                 std::string lo = unsafe_intrin_call(permute, show(data.even), idx_lo, show(data.odd));
                 std::string hi = unsafe_intrin_call(permute, show(data.even), idx_hi, show(data.odd));
-                std::string offset = format("2 * i + %zu", 2 * data.dst.offset);
+                size_t stride = scalar_dtype_size(arg.dtype);
+                std::string half_ptr = cpp_dtype(vdtype.to_scalar());
+                std::string lo_ptr = format("(%s *)((char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.dst.arg,
+                                            stride, data.dst.offset * stride);
+                std::string hi_ptr = format("(%s *)((char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.dst.arg,
+                                            stride, data.dst.offset * stride + width * esz);
                 if (data.cond != nullptr) {
                     uint64_t even_bits = UINT64_C(0x5555555555555555);
                     if (width < 64) even_bits &= (uint64_t{1} << width) - 1;
@@ -1272,21 +1283,12 @@ struct X86CppEmitter : CppEmitterBase {
                         pdep, format("(%s)%s >> %zu", bits_type, show(data.cond), half_width), deposit_mask);
                     std::string lo_cond = format("(%s)(%s * 3)", mask_type.c_str(), lo_pdep.c_str());
                     std::string hi_cond = format("(%s)(%s * 3)", mask_type.c_str(), hi_pdep.c_str());
-                    std::string result = unsafe_intrin_call(
-                        mask_storeu, format("arg%zu + %s", data.dst.arg, offset.c_str()), lo_cond, lo);
-                    result += ";\n" +
-                              unsafe_intrin_call(mask_storeu,
-                                                 format("arg%zu + %s + %zu", data.dst.arg, offset.c_str(), width),
-                                                 hi_cond, hi) +
-                              ";";
+                    std::string result = unsafe_intrin_call(mask_storeu, lo_ptr, lo_cond, lo);
+                    result += ";\n" + unsafe_intrin_call(mask_storeu, hi_ptr, hi_cond, hi) + ";";
                     return result;
                 }
-                std::string result =
-                    unsafe_intrin_call(storeu, format("arg%zu + %s", data.dst.arg, offset.c_str()), lo);
-                result +=
-                    ";\n" +
-                    unsafe_intrin_call(storeu, format("arg%zu + %s + %zu", data.dst.arg, offset.c_str(), width), hi) +
-                    ";";
+                std::string result = unsafe_intrin_call(storeu, lo_ptr, lo);
+                result += ";\n" + unsafe_intrin_call(storeu, hi_ptr, hi) + ";";
                 return result;
             }
             SIMJIT_MATCH (StepKind::ArithBinary) {

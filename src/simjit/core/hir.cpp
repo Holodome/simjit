@@ -151,8 +151,7 @@ void add_step_argument_accesses(std::vector<ArgumentUsage> &usages, const Step *
         return;
     case StepKind::LoadDeinterleave:
         add_argument_access(usages, step->step_data<StepKind::LoadDeinterleave>().idx, ArgumentUsage::SequentialRead);
-        usages[step->step_data<StepKind::LoadDeinterleave>().idx] |=
-            ArgumentUsage::ArrayRead | ArgumentUsage::Interleaved2x;
+        usages[step->step_data<StepKind::LoadDeinterleave>().idx] |= ArgumentUsage::ArrayRead;
         return;
     case StepKind::Gather:
         add_argument_access(usages, step->step_data<StepKind::Gather>().data, ArgumentUsage::RandomRead);
@@ -162,7 +161,6 @@ void add_step_argument_accesses(std::vector<ArgumentUsage> &usages, const Step *
         return;
     case StepKind::StoreInterleave:
         add_argument_access(usages, step->step_data<StepKind::StoreInterleave>().dst, ArgumentUsage::SequentialWrite);
-        usages[step->step_data<StepKind::StoreInterleave>().dst] |= ArgumentUsage::Interleaved2x;
         return;
     case StepKind::Scatter:
         add_argument_access(usages, step->step_data<StepKind::Scatter>().dst, ArgumentUsage::RandomWrite);
@@ -191,37 +189,15 @@ void mark_bounded_index_inputs(std::vector<ArgumentUsage> &usages, Step *idx, si
 void analyze_argument_usage(Function *func) {
     std::vector<ArgumentUsage> usages(func->args.size());
     std::vector<uint8_t> state(func->step_id_count, 0);
-    // Per-argument interleaving model: lane_count of the deinterleave accesses (0 = none), and whether the
-    // argument also has a plain advancing access. Plain loads/stores advance one element per row while
-    // interleaved reads advance lane_count; the two access models cannot share an argument.
-    std::vector<bool> is_interleaved(func->args.size(), false);
-    std::vector<uint8_t> plain_advancing_accesses(func->args.size(), 0);
     for (Step *root : func->step_roots) {
         traverse_steps_postorder_unique(root, state, [&](Step *step) {
             add_step_argument_accesses(usages, step);
-            if (step->is(StepKind::LoadDeinterleave)) {
-                auto &data = step->step_data<StepKind::LoadDeinterleave>();
-                is_interleaved[data.idx] = true;
-            } else if (step->is(StepKind::StoreInterleave)) {
-                ArgumentIdx dst = step->step_data<StepKind::StoreInterleave>().dst;
-                is_interleaved[dst] = true;
-            } else if (step->is(StepKind::Load)) {
-                plain_advancing_accesses[step->step_data<StepKind::Load>().idx] = 1;
-            } else if (step->is(StepKind::Store)) {
-                plain_advancing_accesses[step->step_data<StepKind::Store>().addr] = 1;
-            }
             if (step->is(StepKind::Gather)) {
                 mark_bounded_index_inputs(usages, step->step_data<StepKind::Gather>().idx, func->step_id_count);
             } else if (step->is(StepKind::Scatter)) {
                 mark_bounded_index_inputs(usages, step->step_data<StepKind::Scatter>().idx, func->step_id_count);
             }
         });
-    }
-    for (size_t idx = 0; idx < func->args.size(); ++idx) {
-        if (is_interleaved[idx] && plain_advancing_accesses[idx] != 0) {
-            simjit_exception(ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidArgumentAccess,
-                             "Argument %zu mixes interleaved and plain accesses", idx);
-        }
     }
     for (const Accumulator &acc : func->accs) {
         add_argument_access(usages, acc.dst_arg, ArgumentUsage::AggregateWrite);

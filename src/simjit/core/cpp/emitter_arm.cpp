@@ -2138,13 +2138,16 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
                 unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
             }
             VecDataType dtype = step->dtype.as_vec();
+            const ArgumentDecl &arg = func->args[data.addr.arg];
             std::string vec_type = arm_vec_dtype_cpp(dtype);
             std::string pair_type = vec_type.substr(0, vec_type.size() - 2) + "x2_t";
             std::string tmp = format("ld2%u", step->id);
-            size_t pair_base = data.addr.offset * data.lane_count;
-            std::string offset = format("2 * i%s", offset_suffix(pair_base).c_str());
-            return format("%s %s = %s(arg%zu + %s);\n", pair_type.c_str(), tmp.c_str(),
-                          arm_intrin_name("ld2", dtype).c_str(), data.addr.arg, offset.c_str()) +
+            std::string half_ptr = cpp_dtype(dtype.to_scalar());
+            std::string ptr =
+                format("(const %s *)((const char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.addr.arg,
+                       scalar_dtype_size(arg.dtype), data.addr.offset * scalar_dtype_size(arg.dtype));
+            return format("%s %s = %s(%s);\n", pair_type.c_str(), tmp.c_str(), arm_intrin_name("ld2", dtype).c_str(),
+                          ptr.c_str()) +
                    cpp_var_decl(step) + format("%s.val[%u]", tmp.c_str(), data.lane);
         }
         case StepKind::Store: {
@@ -2160,26 +2163,29 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             const auto &data = step->step_data<StepKind::StoreInterleave>();
             if (step->dtype.is_mask()) { return unexpected_step_dtype(step, "vector"); }
             VecDataType dtype = step->dtype.as_vec();
+            const ArgumentDecl &arg = func->args[data.dst.arg];
             std::string vec_type = arm_vec_dtype_cpp(dtype);
             std::string pair_type = vec_type.substr(0, vec_type.size() - 2) + "x2_t";
-            std::string offset = format("2 * i%s", offset_suffix(data.dst.offset * 2).c_str());
+            std::string half_ptr = cpp_dtype(dtype.to_scalar());
+            std::string ptr = format("(%s *)((char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.dst.arg,
+                                     scalar_dtype_size(arg.dtype), data.dst.offset * scalar_dtype_size(arg.dtype));
             if (data.cond != nullptr) {
                 std::string cond = mask_to_vec_mask_expr(data.cond->dtype.as_mask(), dtype, show(data.cond));
                 size_t id = step->id;
                 return format(R"STR(do {
-%s old_%zu = %s(arg%zu + %s);
+%s old_%zu = %s(%s);
 %s even_%zu = %s(%s, %s, old_%zu.val[0]);
 %s odd_%zu = %s(%s, %s, old_%zu.val[1]);
-%s(arg%zu + %s, ((%s){even_%zu, odd_%zu}));
+%s(%s, ((%s){even_%zu, odd_%zu}));
 } while (false))STR",
-                              pair_type.c_str(), id, arm_intrin_name("ld2", dtype).c_str(), data.dst.arg,
-                              offset.c_str(), vec_type.c_str(), id, arm_intrin_name("bsl", dtype).c_str(), cond.c_str(),
+                              pair_type.c_str(), id, arm_intrin_name("ld2", dtype).c_str(), ptr.c_str(),
+                              vec_type.c_str(), id, arm_intrin_name("bsl", dtype).c_str(), cond.c_str(),
                               show(data.even), id, vec_type.c_str(), id, arm_intrin_name("bsl", dtype).c_str(),
-                              cond.c_str(), show(data.odd), id, arm_intrin_name("st2", dtype).c_str(), data.dst.arg,
-                              offset.c_str(), pair_type.c_str(), id, id);
+                              cond.c_str(), show(data.odd), id, arm_intrin_name("st2", dtype).c_str(), ptr.c_str(),
+                              pair_type.c_str(), id, id);
             }
-            return format("%s(arg%zu + %s, ((%s){%s, %s}))", arm_intrin_name("st2", dtype).c_str(), data.dst.arg,
-                          offset.c_str(), pair_type.c_str(), show(data.even), show(data.odd));
+            return format("%s(%s, ((%s){%s, %s}))", arm_intrin_name("st2", dtype).c_str(), ptr.c_str(),
+                          pair_type.c_str(), show(data.even), show(data.odd));
         }
         case StepKind::CondStore: {
             const auto &data = step->step_data<StepKind::CondStore>();

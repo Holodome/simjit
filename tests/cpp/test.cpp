@@ -353,9 +353,11 @@ static std::string schema_json(const hir::Function *func) {
         } else {
             kind = "in";
         }
-        std::string row_width;
-        if (bool(usages[arg.idx] & hir::ArgumentUsage::Interleaved2x)) { row_width = ", \"row_width\": 2"; }
-        result += std::format("{{ \"dtype\": \"{}\", \"kind\": \"{}\"{}}}", dtype, kind, row_width);
+        std::string interleaved;
+        if (arg.interleaved) {
+            interleaved = std::format(", \"interleaved_dtype\": \"{}\"", show_scalar_dtype(arg.interleaved_half_dtype));
+        }
+        result += std::format("{{ \"dtype\": \"{}\", \"kind\": \"{}\"{}}}", dtype, kind, interleaved);
         if (&arg != &args[args.size() - 1]) { result += ","; }
     }
     result += "]}";

@@ -558,6 +558,8 @@ public:
     hir::Function *build();
 
     Argument arg(ScalarDataType dtype);
+    void mark_arg_interleave(Argument arg, ScalarDataType half_dtype);
+    Argument arg_interleaved(ScalarDataType half_dtype);
     Argument arg_safety_check();
 
     // Stores

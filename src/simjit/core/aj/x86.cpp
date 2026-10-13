@@ -1152,12 +1152,28 @@ struct CompileState {
         return vec_mem_offset(args[addr.arg].gp, counter, addr.offset * dtype.element_size_bytes(), dtype);
     }
 
-    ax86::Mem vec_pair_mem(const ArgumentAddress &addr, VecDataType vdtype, size_t half) const {
-        size_t esz_log2 = vdtype.element_size_bytes_log2();
-        size_t esz = vdtype.element_size_bytes();
-        size_t reg_bytes = vdtype.size_bytes();
-        return ax86::Mem(args[addr.arg].gp, counter, esz_log2 + 1, (int32_t)(2 * addr.offset * esz + half * reg_bytes),
-                         reg_bytes);
+    ax86::Mem pair_mem(const ArgumentAddress &addr, size_t access_size, size_t lane_offset) {
+        const ArgumentDecl &arg = *args[addr.arg].arg;
+        size_t stride_log2 = scalar_dtype_size_log2(arg.dtype);
+        size_t stride = scalar_dtype_size(arg.dtype);
+        int32_t displacement = (int32_t)(addr.offset * stride + lane_offset);
+        // x86 addressing modes only encode scales through 8. For an i128
+        // carrier, materialize 2 * row and retain the normal base+index*8 form.
+        if (stride_log2 >= 4) {
+            GpR doubled_counter = cc.new_gp64();
+            cc.lea(doubled_counter, ax86::ptr(counter, counter, 0));
+            return ax86::Mem(args[addr.arg].gp, doubled_counter, 3, displacement, access_size);
+        }
+        return ax86::Mem(args[addr.arg].gp, counter, stride_log2, displacement, access_size);
+    }
+
+    ax86::Mem vec_pair_mem(const ArgumentAddress &addr, VecDataType vdtype, size_t half) {
+        return pair_mem(addr, vdtype.size_bytes(), half * vdtype.size_bytes());
+    }
+
+    ax86::Mem scalar_pair_mem(const ArgumentAddress &addr, ScalarDataType half_dtype, uint8_t lane) {
+        size_t half_size = scalar_dtype_size(half_dtype);
+        return pair_mem(addr, half_size, lane * half_size);
     }
     void prepare_deinterleave_tables() {
         for (VecDataType vdtype : mir_func->interleave.deinterleave_dtypes) {
@@ -2035,13 +2051,8 @@ struct CompileState {
                 if (data.lane_count != 2 || data.lane >= data.lane_count || sdtype == ScalarDataType::I1) {
                     unsupported("Unsupported scalar load-deinterleave lane %u of %u", data.lane, data.lane_count);
                 }
-                size_t elem_log2 = scalar_dtype_size_log2(sdtype);
-                int32_t disp = int32_t(uint32_t(data.lane) << elem_log2);
-                GpR base = args[data.addr.arg].gp;
-                // The interleaved row consumes 2 elements: shift the counter by elem_log2 + lane_count_log2.
-                ax86::Mem mem = ax86::Mem(base, counter, elem_log2 + 1, disp, scalar_dtype_size(sdtype));
                 AnyR result = create_scalar_reg(sdtype);
-                scalar_mov(cc, result, mem, sdtype);
+                scalar_mov(cc, result, scalar_pair_mem(data.addr, sdtype, data.lane), sdtype);
                 return result;
             }
             SIMJIT_MATCH (StepKind::StoreInterleave) {
@@ -2053,15 +2064,10 @@ struct CompileState {
                     cc.test(cond, cond);
                     cc.jz(skip_label);
                 }
-                GpR base = args[data.dst.arg].gp;
-                ax86::Mem lo_mem =
-                    ax86::Mem(base, counter, scalar_dtype_size_log2(sdtype) + 1, 0, scalar_dtype_size(sdtype));
-                ax86::Mem hi_mem = lo_mem;
-                hi_mem.add_offset((int)scalar_dtype_size(sdtype));
                 AnyR even = subexpr(data.even);
                 AnyR odd = subexpr(data.odd);
-                scalar_mov(cc, lo_mem, even, sdtype);
-                scalar_mov(cc, hi_mem, odd, sdtype);
+                scalar_mov(cc, scalar_pair_mem(data.dst, sdtype, 0), even, sdtype);
+                scalar_mov(cc, scalar_pair_mem(data.dst, sdtype, 1), odd, sdtype);
                 if (skip_label.is_valid()) cc.bind(skip_label);
                 return {};
             }

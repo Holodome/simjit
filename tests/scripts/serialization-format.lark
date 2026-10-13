@@ -14,7 +14,8 @@ document: function
 function: "(" "func" args_section accs_section? steps_section roots_section? scalar_only_section? ")"
 
 args_section: "(" "args" arg_decl* ")"
-arg_decl: "(" "arg" arg_id scalar_dtype ")" | "(" "safety-check-arg" arg_id ")"
+arg_decl: "(" "arg" arg_id scalar_dtype interleaved_arg? ")" | "(" "safety-check-arg" arg_id ")"
+interleaved_arg: "(" "interleaved" scalar_dtype ")"
 
 accs_section: "(" "accs" acc_decl* ")"
 acc_decl: "(" "acc" acc_id scalar_dtype arg_ref step_ref ")"

@@ -45,7 +45,7 @@ void store_complex(FunctionBuilder &b, ComplexLanes z, Argument dst) {
 // Deinterleave both lanes, add a constant to the even lane, store both lanes.
 #define ADD_DEINTERLEAVE_ACCESS_TEST(tests, dt, const_fn)                         \
     tests.push_back(Test{[](FunctionBuilder &b) {                                 \
-                             Argument src = b.arg(dt);                            \
+                             Argument src = b.arg_interleaved(dt);                \
                              Argument even_dst = b.arg(dt);                       \
                              Argument odd_dst = b.arg(dt);                        \
                              DeinterleavedPair lanes = b.load2(src);              \
@@ -62,37 +62,13 @@ def func(n, src, even_dst, odd_dst):
 // Consume a single lane of the interleave; the other lane must be dropped.
 #define ADD_DEINTERLEAVE_SINGLE_LANE_TEST(tests, dt, const_fn, lane_value, py)        \
     tests.push_back(Test{[](FunctionBuilder &b) {                                     \
-                             Argument src = b.arg(dt);                                \
+                             Argument src = b.arg_interleaved(dt);                    \
                              Argument dst = b.arg(dt);                                \
                              DeinterleavedPair lanes = b.load2(src);                  \
                              Value lane = (lane_value) == 0 ? lanes.even : lanes.odd; \
                              b.store(b.add(lane, b.const_fn(2)), dst);                \
                          },                                                           \
                          PASS_ALL, py});
-
-// Plain loads and deinterleave loads mixed on the same argument: rejected at analysis time. A plain
-// access advances one element per row while the interleaved view advances lane_count, so the two
-// access models cannot share an argument.
-#define ADD_DEINTERLEAVE_MIXED_ACCESS_TEST(tests, dt, const_fn)                                             \
-    tests.push_back(Test{[](FunctionBuilder &b) {                                                           \
-                             Argument src = b.arg(dt);                                                      \
-                             Argument plain_dst = b.arg(dt);                                                \
-                             Argument lanes_dst = b.arg(dt);                                                \
-                             Value plain = b.load(src);                                                     \
-                             DeinterleavedPair lanes = b.load2(src);                                        \
-                             b.store(b.add(plain, b.const_fn(3)), plain_dst);                               \
-                             b.store(b.add(lanes.even, lanes.odd), lanes_dst);                              \
-                         },                                                                                 \
-                         test_meta()                                                                        \
-                             .limitation(TestVariant::All)                                                  \
-                             .structured_error(TestVariant::All, ErrorModule::HIR, ErrorKind::InvalidInput, \
-                                               ErrorSubKind::InvalidArgumentAccess),                        \
-                         R"FOO(
-def func(n, src, plain_dst, lanes_dst):
-    for i in range(n):
-        plain_dst[i] = src[i] + 3
-        lanes_dst[i] = src[2*i] + src[2*i+1]
-        )FOO"});
 
 std::vector<Test> make_interleaved_tests() {
     std::vector<Test> tests;
@@ -129,7 +105,7 @@ def func(n, src, dst):
 
     // The single-lane API mixes with the pair API: CSE unifies the leaves.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(I32);
+                             Argument src = b.arg_interleaved(I32);
                              Argument even_dst = b.arg(I32);
                              Argument odd_dst = b.arg(I32);
                              Value even = b.load2_0(src);
@@ -144,14 +120,23 @@ def func(n, src, even_dst, odd_dst):
         odd_dst[i] = src[2*i+1] + 2
         )FOO"});
 
-    // The interleaved buffer is also read by a plain (non-deinterleaving) load.
-    ADD_DEINTERLEAVE_MIXED_ACCESS_TEST(tests, I32, i32)
-    ADD_DEINTERLEAVE_MIXED_ACCESS_TEST(tests, I64, i64)
+    // One marked argument may be read both as a full carrier record and as a
+    // pair. The two representations are copied independently.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I32);
+                             Argument raw_dst = b.arg(I64);
+                             Argument pair_dst = b.arg_interleaved(I32);
+                             Value raw = b.load(src);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store(raw, raw_dst);
+                             b.store_interleave(pair_dst, lanes.even, lanes.odd);
+                         },
+                         PASS_ALL});
 
     // i64 arithmetic: lanes as (real, imag) of a complex number, squared.
     // Vectorized i64 mul is an x86-only special op; arm falls back to scalar.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(I64);
+                             Argument src = b.arg_interleaved(I64);
                              Argument re_dst = b.arg(I64);
                              Argument im_dst = b.arg(I64);
                              DeinterleavedPair lanes = b.load2(src);
@@ -176,7 +161,7 @@ def func(n, src, re_dst, im_dst):
     // i64 arithmetic: division and modulo by constants (constant-division lowering).
     // Arm vector lowering of i64 const-div/-mod requires i64 mul, which is x86-only.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(I64);
+                             Argument src = b.arg_interleaved(I64);
                              Argument div_dst = b.arg(I64);
                              Argument mod_dst = b.arg(I64);
                              DeinterleavedPair lanes = b.load2(src);
@@ -196,7 +181,7 @@ def func(n, src, div_dst, mod_dst):
 
     // i64 arithmetic: shifts and bit operations over both lanes.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(I64);
+                             Argument src = b.arg_interleaved(I64);
                              Argument dst = b.arg(I64);
                              DeinterleavedPair lanes = b.load2(src);
                              Value shifted = b.sra(lanes.even, b.i64(3));
@@ -210,7 +195,7 @@ def func(n, src, dst):
 
     // Asymmetric lane consumers force different vectorizer widths per lane.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(I32);
+                             Argument src = b.arg_interleaved(I32);
                              Argument even_dst = b.arg(I16);
                              Argument odd_dst = b.arg(I32);
                              DeinterleavedPair lanes = b.load2(src);
@@ -226,7 +211,7 @@ def func(n, src, even_dst, odd_dst):
 
     // Repeated load2 calls share lane steps (CSE).
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(I32);
+                             Argument src = b.arg_interleaved(I32);
                              Argument even_dst = b.arg(I32);
                              Argument odd_dst = b.arg(I32);
                              DeinterleavedPair first = b.load2(src);
@@ -243,7 +228,7 @@ def func(n, src, even_dst, odd_dst):
 
     // gather with interleaved index/value pairs (even slots hold indices)
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument pairs = b.arg(I32);
+                             Argument pairs = b.arg_interleaved(I32);
                              Argument data = b.arg(I32);
                              Argument dst = b.arg(I32);
                              DeinterleavedPair lanes = b.load2(pairs);
@@ -257,7 +242,7 @@ def func(n, pairs, data, dst):
 
     // scatter with interleaved index/value pairs (even slots hold indices)
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument pairs = b.arg(I32);
+                             Argument pairs = b.arg_interleaved(I32);
                              Value values = b.input_arg(I32);
                              Argument dst = b.arg(I32);
                              DeinterleavedPair lanes = b.load2(pairs);
@@ -272,8 +257,8 @@ def func(n, pairs, values, dst):
     // Interleaved store over every supported element type (load2 -> store_interleave identity).
 #define ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, dt)                          \
     tests.push_back(Test{[](FunctionBuilder &b) {                            \
-                             Argument src = b.arg(dt);                       \
-                             Argument dst = b.arg(dt);                       \
+                             Argument src = b.arg_interleaved(dt);           \
+                             Argument dst = b.arg_interleaved(dt);           \
                              DeinterleavedPair lanes = b.load2(src);         \
                              b.store_interleave(dst, lanes.even, lanes.odd); \
                          },                                                  \
@@ -294,8 +279,8 @@ def func(n, src, dst):
     // Conditional interleaved stores update or preserve both elements of each destination pair together.
 #define ADD_COND_INTERLEAVE_STORE_TEST(tests, dt, const_fn)                                       \
     tests.push_back(Test{[](FunctionBuilder &b) {                                                 \
-                             Argument src = b.arg(dt);                                            \
-                             Argument dst = b.arg(dt);                                            \
+                             Argument src = b.arg_interleaved(dt);                                \
+                             Argument dst = b.arg_interleaved(dt);                                \
                              Predicate cond = b.cmp_eq(b.index(I64), b.index(I64));               \
                              DeinterleavedPair lanes = b.load2(src);                              \
                              b.cond_store_interleave(b.add(lanes.even, b.const_fn(1)),            \
@@ -318,8 +303,8 @@ def func(n, src, dst):                                                          
 
     // Interleaved store with swapped lanes.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(I64);
-                             Argument dst = b.arg(I64);
+                             Argument src = b.arg_interleaved(I64);
+                             Argument dst = b.arg_interleaved(I64);
                              DeinterleavedPair lanes = b.load2(src);
                              b.store_interleave(dst, lanes.odd, lanes.even);
                          },
@@ -332,8 +317,8 @@ def func(n, src, dst):
 
     // Interleaved store of computed lanes over an interleaved source (i8 exercises the pair pack).
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(I8);
-                             Argument dst = b.arg(I8);
+                             Argument src = b.arg_interleaved(I8);
+                             Argument dst = b.arg_interleaved(I8);
                              DeinterleavedPair lanes = b.load2(src);
                              b.store_interleave(dst, lanes.odd, b.add(lanes.even, lanes.odd));
                          },
@@ -346,7 +331,7 @@ def func(n, src, dst):
 
     // f32 basic access with distinct lane expressions.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(F32);
+                             Argument src = b.arg_interleaved(F32);
                              Argument even_dst = b.arg(F32);
                              Argument odd_dst = b.arg(F32);
                              DeinterleavedPair lanes = b.load2(src);
@@ -362,8 +347,8 @@ def func(n, src, even_dst, odd_dst):
 
     // f32 arithmetic: lanes as (real, imag), scaled rotation by a fixed angle, interleaved store.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument src = b.arg(F32);
-                             Argument dst = b.arg(F32);
+                             Argument src = b.arg_interleaved(F32);
+                             Argument dst = b.arg_interleaved(F32);
                              DeinterleavedPair lanes = b.load2(src);
                              Value re = lanes.even;
                              Value im = lanes.odd;
@@ -383,9 +368,9 @@ def func(n, src, dst):
     // f64 series impedance Z(R, L, C, f) = R + i*2*pi*f*L + 1/(i*2*pi*f*C).
     // R and L arrive as one interleaved stream, C and f as another.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument rl_arg = b.arg(F64);
-                             Argument cf_arg = b.arg(F64);
-                             Argument dst = b.arg(F64);
+                             Argument rl_arg = b.arg_interleaved(F64);
+                             Argument cf_arg = b.arg_interleaved(F64);
+                             Argument dst = b.arg_interleaved(F64);
                              ComplexLanes rl = load_complex(b, rl_arg);
                              ComplexLanes cf = load_complex(b, cf_arg);
                              Value omega = b.mul(cf.im, b.f64(6.283185307179586));
@@ -400,9 +385,9 @@ def func(n, src, dst):
 
     // f64 parallel impedance Z_parallel = 1 / (1/R + 1/(i*2*pi*f*L) + i*2*pi*f*C).
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument rl_arg = b.arg(F64);
-                             Argument cf_arg = b.arg(F64);
-                             Argument dst = b.arg(F64);
+                             Argument rl_arg = b.arg_interleaved(F64);
+                             Argument cf_arg = b.arg_interleaved(F64);
+                             Argument dst = b.arg_interleaved(F64);
                              ComplexLanes rl = load_complex(b, rl_arg);
                              ComplexLanes cf = load_complex(b, cf_arg);
                              Value omega = b.mul(cf.im, b.f64(6.283185307179586));
@@ -418,9 +403,9 @@ def func(n, src, dst):
     // f64 low-pass filter H(w, R, L, C) = 1 / (1 - w*w*L*C + i*w*R*C).
     // R and L arrive as one interleaved stream, C and w as another.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument rl_arg = b.arg(F64);
-                             Argument cw_arg = b.arg(F64);
-                             Argument dst = b.arg(F64);
+                             Argument rl_arg = b.arg_interleaved(F64);
+                             Argument cw_arg = b.arg_interleaved(F64);
+                             Argument dst = b.arg_interleaved(F64);
                              ComplexLanes rl = load_complex(b, rl_arg);
                              ComplexLanes cw = load_complex(b, cw_arg);
                              Value omega = cw.im;
@@ -434,9 +419,9 @@ def func(n, src, dst):
 
     // f32 mandelbrot iteration: z_{k+1} = z_k^2 + c, four iterations per row.
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument z_arg = b.arg(F32);
-                             Argument c_arg = b.arg(F32);
-                             Argument dst = b.arg(F32);
+                             Argument z_arg = b.arg_interleaved(F32);
+                             Argument c_arg = b.arg_interleaved(F32);
+                             Argument dst = b.arg_interleaved(F32);
                              ComplexLanes z = load_complex(b, z_arg);
                              ComplexLanes c = load_complex(b, c_arg);
                              for (int iteration = 0; iteration < 4; ++iteration) {

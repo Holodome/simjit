@@ -670,7 +670,10 @@ std::optional<std::string> CppEmitterBase::inline_scalar_leaf_expr(const Step *s
         }
         SIMJIT_MATCH (StepKind::LoadDeinterleave) {
             SIMJIT_ASSERT(step->dtype != ScalarDataType::I1);
-            return format("arg%zu[2 * i + %u]", data.addr.arg, data.lane);
+            const ArgumentDecl &arg = func->args[data.addr.arg];
+            size_t half_size = scalar_dtype_size(step->dtype.as_scalar());
+            return format("*(const %s *)((const char *)arg%zu + (i + %zu) * %zu + %zu)", cpp_dtype(step->dtype),
+                          data.addr.arg, data.addr.offset, scalar_dtype_size(arg.dtype), data.lane * half_size);
         }
         SIMJIT_MATCH (StepKind::LoadSplat) { return format("*arg%zu", data.addr.arg); }
         SIMJIT_MATCH (StepKind::Compare) {
@@ -792,7 +795,11 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
         }
         SIMJIT_MATCH (StepKind::LoadDeinterleave) {
             SIMJIT_ASSERT(step->dtype != ScalarDataType::I1);
-            return cpp_var_decl(step) + format("arg%zu[2 * i + %u]", data.addr.arg, data.lane);
+            const ArgumentDecl &arg = func->args[data.addr.arg];
+            size_t half_size = scalar_dtype_size(sdtype);
+            return cpp_var_decl(step) + format("*(const %s *)((const char *)arg%zu + (i + %zu) * %zu + %zu)",
+                                               cpp_dtype(step->dtype), data.addr.arg, data.addr.offset,
+                                               scalar_dtype_size(arg.dtype), data.lane * half_size);
         }
         SIMJIT_MATCH (StepKind::LoadSplat) {
             if (sdtype == ScalarDataType::I1) { return cpp_var_decl(step) + format("*arg%zu & 1", data.addr.arg); }
@@ -819,14 +826,22 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
                           show_scalar_operand(data.what), size);
         }
         SIMJIT_MATCH (StepKind::StoreInterleave) {
+            const ArgumentDecl &arg = func->args[data.dst.arg];
+            size_t half_size = scalar_dtype_size(step->dtype.as_scalar());
+            size_t stride = scalar_dtype_size(arg.dtype);
+            const char *half_cpp_type = cpp_dtype(step->dtype);
             if (data.cond) {
-                return format("if (%s) { arg%zu[2 * i] = %s; arg%zu[2 * i + 1] = %s; }", show_scalar_operand(data.cond),
-                              data.dst.arg, show_scalar_operand(data.even), data.dst.arg,
-                              show_scalar_operand(data.odd));
+                return format("if (%s) { *(%s *)((char *)arg%zu + (i + %zu) * %zu) = %s; "
+                              "*(%s *)((char *)arg%zu + (i + %zu) * %zu + %zu) = %s; }",
+                              show_scalar_operand(data.cond), half_cpp_type, data.dst.arg, data.dst.offset, stride,
+                              show_scalar_operand(data.even), half_cpp_type, data.dst.arg, data.dst.offset, stride,
+                              half_size, show_scalar_operand(data.odd));
             }
-            return format("arg%zu[2 * i] = %s;\n"
-                          "arg%zu[2 * i + 1] = %s",
-                          data.dst.arg, show_scalar_operand(data.even), data.dst.arg, show_scalar_operand(data.odd));
+            return format("*(%s *)((char *)arg%zu + (i + %zu) * %zu) = %s;\n"
+                          "*(%s *)((char *)arg%zu + (i + %zu) * %zu + %zu) = %s",
+                          half_cpp_type, data.dst.arg, data.dst.offset, stride, show_scalar_operand(data.even),
+                          half_cpp_type, data.dst.arg, data.dst.offset, stride, half_size,
+                          show_scalar_operand(data.odd));
         }
         SIMJIT_MATCH (StepKind::ArithBinary) {
             return cpp_var_decl(step) + scalar_arith_binary_expr(sdtype, data, show_scalar_operand(data.left),

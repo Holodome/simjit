@@ -377,8 +377,9 @@ struct FunctionBuilderImpl {
     }
     Step *store_interleave(Step *even, Step *odd, Step *cond, const ArgumentDecl &dst, LoadStoreKind kind) {
         cond = simplify_optional_cond(ctx, cond);
-        SIMJIT_ASSERT(dst.dtype == even->dtype);
-        SIMJIT_ASSERT(dst.dtype == odd->dtype);
+        SIMJIT_ASSERT(dst.interleaved);
+        SIMJIT_ASSERT(dst.interleaved_half_dtype == even->dtype);
+        SIMJIT_ASSERT(dst.interleaved_half_dtype == odd->dtype);
         return sm.store_interleave({even, odd, dst.idx, kind, cond}, even->dtype);
     }
     Step *pack(Step *arg, Step *cond, const ArgumentDecl &dst, const Accumulator &dst_size_acc) {
@@ -397,7 +398,8 @@ struct FunctionBuilderImpl {
     Step *load(const ArgumentDecl &arg, LoadStoreKind kind) { return sm.load({arg.idx, kind}, arg.dtype); }
 
     Step *load_deinterleave(const ArgumentDecl &arg, LoadStoreKind kind, uint8_t lane_count, uint8_t lane) {
-        return sm.load_deinterleave({arg.idx, kind, lane_count, lane}, arg.dtype);
+        SIMJIT_ASSERT(arg.interleaved);
+        return sm.load_deinterleave({arg.idx, kind, lane_count, lane}, arg.interleaved_half_dtype);
     }
 
     Step *gather(Step *idx, const ArgumentDecl &dst) { return sm.gather({idx, dst.idx}, dst.dtype); }
@@ -1121,6 +1123,41 @@ Argument FunctionBuilder::arg(ScalarDataType dtype) {
     return {impl_->args.back().idx};
 }
 
+static ScalarDataType interleaved_carrier_dtype(ScalarDataType half_dtype) {
+    switch (half_dtype) {
+    case ScalarDataType::I8: return ScalarDataType::I16;
+    case ScalarDataType::I16: return ScalarDataType::I32;
+    case ScalarDataType::I32:
+    case ScalarDataType::F32: return ScalarDataType::I64;
+    case ScalarDataType::I64:
+    case ScalarDataType::F64: return ScalarDataType::I128;
+    case ScalarDataType::I1:
+    case ScalarDataType::I128: break;
+    }
+    invalid_type("invalid interleaved half type %s", show_scalar_dtype(half_dtype));
+}
+
+void FunctionBuilder::mark_arg_interleave(Argument argument, ScalarDataType half_dtype) {
+    ArgumentDecl &decl = impl_->get_arg(argument.idx_);
+    ScalarDataType carrier_dtype = interleaved_carrier_dtype(half_dtype);
+    if (decl.dtype != carrier_dtype) {
+        invalid_type("interleaved half type %s requires %s carrier, got %s", show_scalar_dtype(half_dtype),
+                     show_scalar_dtype(carrier_dtype), show_scalar_dtype(decl.dtype));
+    }
+    if (decl.interleaved && decl.interleaved_half_dtype != half_dtype) {
+        invalid_type("argument %zu is already interleaved as %s", argument.idx_,
+                     show_scalar_dtype(decl.interleaved_half_dtype));
+    }
+    decl.interleaved = true;
+    decl.interleaved_half_dtype = half_dtype;
+}
+
+Argument FunctionBuilder::arg_interleaved(ScalarDataType half_dtype) {
+    Argument result = arg(interleaved_carrier_dtype(half_dtype));
+    mark_arg_interleave(result, half_dtype);
+    return result;
+}
+
 static void check_store_dst(const ArgumentDecl &decl, const Step *arg, StepKind kind) {
     if (decl.dtype != arg->dtype) {
         invalid_type("Step %s argument and destination have different types %s %s", show_step_kind(kind),
@@ -1268,12 +1305,12 @@ void FunctionBuilder::cond_store_interleave(Value even, Value odd, MaybePredicat
                      show_scalar_dtype(even.dtype()), show_scalar_dtype(odd.dtype()));
     }
     const ArgumentDecl &func_arg = impl_->get_arg(dst.idx_);
-    check_store_dst(func_arg, even.step_, StepKind::StoreInterleave);
-    if (func_arg.dtype == ScalarDataType::I1) { invalid_type("store_interleave should not be used with i1 type"); }
-    if (func_arg.dtype == ScalarDataType::I128) {
-        invalid_type("store_interleave does not support %s type", show_scalar_dtype(func_arg.dtype));
+    if (!func_arg.interleaved) { invalid_type("store_interleave requires an interleaved argument"); }
+    if (func_arg.interleaved_half_dtype != even.dtype()) {
+        invalid_type("store_interleave values have type %s but argument halves are %s", show_scalar_dtype(even.dtype()),
+                     show_scalar_dtype(func_arg.interleaved_half_dtype));
     }
-    if (func_arg.dtype == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::SmallDeinterleave; }
+    if (func_arg.interleaved_half_dtype == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::SmallDeinterleave; }
 
     auto *step = impl_->store_interleave(even.step_, odd.step_, cond.step_, func_arg, kind);
     impl_->step_roots.push_back(step);
@@ -1405,15 +1442,12 @@ Value FunctionBuilder::load2_1(Argument argument, LoadStoreKind kind) {
 
 Value FunctionBuilder::load_deinterleave(Argument argument, uint8_t lane_count, uint8_t lane, LoadStoreKind kind) {
     const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
-    if (func_arg.dtype == ScalarDataType::I1) { invalid_type("load_deinterleave should not be used with i1 type"); }
-    if (func_arg.dtype == ScalarDataType::I128) {
-        invalid_type("load_deinterleave does not support %s type", show_scalar_dtype(func_arg.dtype));
-    }
+    if (!func_arg.interleaved) { invalid_type("load_deinterleave requires an interleaved argument"); }
     if (lane_count != 2) {
         invalid_input("load_deinterleave supports only 2-way interleaved loads, got %u lanes", lane_count);
     }
     if (lane >= lane_count) { invalid_input("load_deinterleave lane %u out of %u lanes", lane, lane_count); }
-    if (func_arg.dtype == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::SmallDeinterleave; }
+    if (func_arg.interleaved_half_dtype == ScalarDataType::I8) { impl_->special_ops |= SpecialOp::SmallDeinterleave; }
 
     uint64_t hash = make_hash(StepKind::LoadDeinterleave, argument, kind, lane_count, lane);
     if (auto *result = impl_->cse<StepKind::LoadDeinterleave>(hash, [argument, kind, lane_count, lane](const auto &x) {

@@ -377,8 +377,11 @@ static hl::value serialize_args(const Function *func) {
     size_t i = 0;
     for (const auto &arg : func->args) {
         SIMJIT_ASSERT(arg.idx == i);
-        hl::value it = bool(usages[i] & ArgumentUsage::SafetyCheck) ? hl::list("safety-check-arg", arg.idx)
-                                                                    : hl::list("arg", arg.idx, arg.dtype);
+        hl::value it = bool(usages[i] & ArgumentUsage::SafetyCheck)
+                           ? hl::list("safety-check-arg", arg.idx)
+                           : (arg.interleaved ? hl::list("arg", arg.idx, arg.dtype,
+                                                         hl::list("interleaved", arg.interleaved_half_dtype))
+                                              : hl::list("arg", arg.idx, arg.dtype));
         b.add(it);
         ++i;
     }
@@ -564,6 +567,13 @@ static void process_deserialized_args(hl::value args, FunctionBuilder &builder) 
         if (auto match = hl::match(arg, "safety-check-arg", hl::cap_as<int>)) {
             auto [idx] = *match;
             Argument arg_id = builder.arg_safety_check();
+            GUARD_DESERIALIZE((int)arg_id.idx_ == idx);
+        } else if (auto m = hl::match(arg, "arg", hl::cap_as<int>, hl::cap_as<ScalarDataType>, hl::cap)) {
+            auto [idx, dtype, layout] = *m;
+            auto [half_dtype] = hl::require_match("invalid interleaved argument layout", layout, "interleaved",
+                                                  hl::cap_as<ScalarDataType>);
+            Argument arg_id = builder.arg(dtype);
+            builder.mark_arg_interleave(arg_id, half_dtype);
             GUARD_DESERIALIZE((int)arg_id.idx_ == idx);
         } else {
             auto [idx, dtype] =
