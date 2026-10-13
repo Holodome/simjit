@@ -2590,6 +2590,11 @@ struct CompileState {
                     cc.st2(old_even, old_odd, mem);
                     return {};
                 }
+                if (even.id() == odd.id()) {
+                    VecR copy = create_vec_reg(vdtype);
+                    cc.orr(copy.b16(), odd.b16(), odd.b16());
+                    odd = copy;
+                }
                 cc.st2(even, odd, mem);
                 return {};
             }

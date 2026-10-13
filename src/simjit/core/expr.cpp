@@ -175,7 +175,7 @@ const char *show_load_store_kind(LoadStoreKind kind) noexcept {
 
 ConstData scalar_dtype_max(ScalarDataType dt) {
     switch (dt) {
-    case ScalarDataType::I128: messed_up("invalid dtype for dtype_max");
+    case ScalarDataType::I128: messed_up("invalid dtype for scalar_dtype_max");
     case ScalarDataType::I1: return ConstData::i1(true);
     case ScalarDataType::I8: return ConstData::i8(INT8_MAX);
     case ScalarDataType::I16: return ConstData::i16(INT16_MAX);
@@ -196,14 +196,14 @@ uint64_t scalar_dtype_umax(ScalarDataType dt) {
     case ScalarDataType::I64: return (int64_t)(uint64_t)UINT64_MAX;
     case ScalarDataType::I128:
     case ScalarDataType::F32:
-    case ScalarDataType::F64: messed_up("invalid dtype %s for dtype_max", show_scalar_dtype(dt));
+    case ScalarDataType::F64: messed_up("invalid dtype %s for scalar_dtype_umax", show_scalar_dtype(dt));
     }
     SIMJIT_UNREACHABLE();
 }
 
 ConstData scalar_dtype_min(ScalarDataType dt) {
     switch (dt) {
-    case ScalarDataType::I128: messed_up("invalid dtype %s for dtype_max", show_scalar_dtype(dt));
+    case ScalarDataType::I128: messed_up("invalid dtype %s for scalar_dtype_min", show_scalar_dtype(dt));
     case ScalarDataType::I1: return ConstData::i1(false);
     case ScalarDataType::I8: return ConstData::i8(INT8_MIN);
     case ScalarDataType::I16: return ConstData::i16(INT16_MIN);

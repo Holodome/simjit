@@ -230,24 +230,7 @@ static void add_low_level_api_tests(std::vector<Test> &tests) {
     add_unsupported(tests, [](FunctionBuilder &b) { b.product(b.input_arg(I64), b.arg(I128)); });
     add_unsupported(tests, [](FunctionBuilder &b) {
         Argument src = b.arg(I128);
-        b.store(b.sub(b.load(src), b.load(src)), b.arg(I128));
-    });
-    add_unsupported(tests, [](FunctionBuilder &b) {
-        Argument src = b.arg(I128);
         b.store(b.mul(b.load(src), b.load(src)), b.arg(I128));
-    });
-    add_unsupported(tests, [](FunctionBuilder &b) {
-        Argument src = b.arg(I128);
-        b.store(b.cmp_eq(b.load(src), b.load(src)), b.arg(I1));
-    });
-    add_invalid(tests, [](FunctionBuilder &b) {
-        Argument src = b.arg(I128);
-        b.store(b.trunc(b.load(src), I64), b.arg(I64));
-    });
-    add_unsupported(tests, [](FunctionBuilder &b) {
-        Argument truthy = b.arg(I128);
-        Argument falsy = b.arg(I128);
-        b.store(b.select(b.input_predicate_arg(), b.load(truthy), b.load(falsy)), b.arg(I128));
     });
     add_unsupported(tests, [](FunctionBuilder &b) { b.store(b.load_splat(b.arg(I128)), b.arg(I128)); });
 }
@@ -288,7 +271,7 @@ static void add_wrapper_tests(std::vector<Test> &tests) {
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.bit_test(b.input_arg(I32), b.input_arg(I64))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.bit_testn(b.input_arg(I16), b.input_arg(I32))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.copysign_no_zero(b.input_arg(I32), b.input_arg(I1))); });
-    add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.copysign(b.input_arg(I64), b.input_arg(I128))); });
+    add_valid(tests, [](FunctionBuilder &b) { b.output_arg(b.copysign(b.input_arg(I64), b.input_arg(I128))); });
 }
 
 static std::vector<Test> make_invalid_builder_tests() {

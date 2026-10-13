@@ -5,6 +5,7 @@
 
 #include <array>
 
+#include "simjit/core/expr.h"
 #include "simjit/simjit.h"
 #include "test.h"
 
@@ -103,17 +104,9 @@ static constexpr std::array<ScalarDataType, 8> kAllDtypes{
     I8, I16, I32, I64, F32, F64, I1, I128,
 };
 
-static bool is_simple_int(ScalarDataType dtype) {
-    return dtype == I8 || dtype == I16 || dtype == I32 || dtype == I64;
-}
-
-static bool is_float(ScalarDataType dtype) {
-    return dtype == F32 || dtype == F64;
-}
-
 static bool is_valid_float_cast(ScalarDataType from, ScalarDataType to) {
-    return (is_float(from) && is_float(to)) || (is_simple_int(from) && is_float(to)) ||
-           (is_simple_int(to) && is_float(from));
+    return (is_float_dtype(from) && is_float_dtype(to)) || (is_simple_int_dtype(from) && is_float_dtype(to)) ||
+           (is_simple_int_dtype(to) && is_float_dtype(from));
 }
 
 static bool is_valid_bitcast(ScalarDataType from, ScalarDataType to) {
@@ -123,7 +116,7 @@ static bool is_valid_bitcast(ScalarDataType from, ScalarDataType to) {
 
 static bool is_valid_int_cast(ScalarDataType from, ScalarDataType to, IntCastKind kind) {
     if (to == I1 || from == to) { return false; }
-    if (!is_simple_int(from) || !is_simple_int(to)) { return false; }
+    if (!is_int_dtype(from) || !is_int_dtype(to)) { return false; }
 
     size_t from_size = 0;
     size_t to_size = 0;
@@ -132,6 +125,7 @@ static bool is_valid_int_cast(ScalarDataType from, ScalarDataType to, IntCastKin
     case I16: from_size = 2; break;
     case I32: from_size = 4; break;
     case I64: from_size = 8; break;
+    case I128: from_size = 16; break;
     default: return false;
     }
     switch (to) {
@@ -139,6 +133,7 @@ static bool is_valid_int_cast(ScalarDataType from, ScalarDataType to, IntCastKin
     case I16: to_size = 2; break;
     case I32: to_size = 4; break;
     case I64: to_size = 8; break;
+    case I128: to_size = 16; break;
     default: return false;
     }
 
@@ -199,7 +194,7 @@ static void add_pack_tests(std::vector<Test> &tests) {
 
 static void add_gather_scatter_tests(std::vector<Test> &tests) {
     for (ScalarDataType idx_dtype : kAllDtypes) {
-        bool valid_idx = is_simple_int(idx_dtype);
+        bool valid_idx = is_simple_int_dtype(idx_dtype);
         for (ScalarDataType data_dtype : kAllDtypes) {
             if (!valid_idx) {
                 add_invalid(tests, [idx_dtype, data_dtype](FunctionBuilder &b) {
@@ -272,7 +267,7 @@ static void add_grouped_aggregate_tests(std::vector<Test> &tests) {
 #undef SIMJIT_ADD_INVALID_GROUPED_TABLE_TEST
         }
         for (ScalarDataType idx_dtype : kAllDtypes) {
-            if (is_simple_int(idx_dtype)) { continue; }
+            if (is_simple_int_dtype(idx_dtype)) { continue; }
 #define SIMJIT_ADD_INVALID_GROUPED_INDEX_TEST(OP, OP_IF)                                                    \
     add_invalid(tests, [arg_dtype, idx_dtype](FunctionBuilder &b) {                                         \
         b.OP(b.input_arg(arg_dtype), b.input_arg(idx_dtype), b.arg(arg_dtype));                             \
@@ -358,7 +353,7 @@ static void add_cast_tests(std::vector<Test> &tests) {
 
 static void add_unary_tests(std::vector<Test> &tests) {
     for (ScalarDataType dtype : kAllDtypes) {
-        if (dtype != I1 && dtype != I128) { continue; }
+        if (dtype != I1) { continue; }
 #define SIMJIT_ADD_INVALID_GENERIC_UNARY_TEST(OP) \
     add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.OP(b.input_arg(dtype))); });
         SIMJIT_GENERIC_UNARY_OPS(SIMJIT_ADD_INVALID_GENERIC_UNARY_TEST)
@@ -366,7 +361,7 @@ static void add_unary_tests(std::vector<Test> &tests) {
     }
 
     for (ScalarDataType dtype : kAllDtypes) {
-        if (is_simple_int(dtype)) { continue; }
+        if (is_int_dtype(dtype)) { continue; }
 #define SIMJIT_ADD_INVALID_INT_UNARY_TEST(OP) \
     add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.OP(b.input_arg(dtype))); });
         SIMJIT_INT_UNARY_OPS(SIMJIT_ADD_INVALID_INT_UNARY_TEST)
@@ -374,7 +369,7 @@ static void add_unary_tests(std::vector<Test> &tests) {
     }
 
     for (ScalarDataType dtype : kAllDtypes) {
-        if (is_float(dtype)) { continue; }
+        if (is_float_dtype(dtype)) { continue; }
 #define SIMJIT_ADD_INVALID_FLOAT_UNARY_TEST(OP) \
     add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.OP(b.input_arg(dtype))); });
         SIMJIT_FLOAT_UNARY_OPS(SIMJIT_ADD_INVALID_FLOAT_UNARY_TEST)
@@ -382,7 +377,7 @@ static void add_unary_tests(std::vector<Test> &tests) {
     }
 
     for (ScalarDataType dtype : kAllDtypes) {
-        if (!is_float(dtype)) { continue; }
+        if (!is_float_dtype(dtype)) { continue; }
         add_unsupported(tests, [dtype](FunctionBuilder &b) {
             b.arg_safety_check();
             b.output_arg(b.negate_checked(b.input_arg(dtype)));
@@ -396,16 +391,16 @@ static void add_unary_tests(std::vector<Test> &tests) {
 
 static void add_misc_tests(std::vector<Test> &tests) {
     for (ScalarDataType dtype : kAllDtypes) {
-        if (!is_float(dtype)) {
+        if (!is_float_dtype(dtype)) {
             add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.isnan(b.input_arg(dtype))); });
             add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.isinf(b.input_arg(dtype))); });
             add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.isfinite(b.input_arg(dtype))); });
             add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.isnormal(b.input_arg(dtype))); });
         }
-        if (!is_simple_int(dtype) && !is_float(dtype)) {
+        if (!is_simple_int_dtype(dtype) && !is_float_dtype(dtype)) {
             add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.index(dtype)); });
         }
-        if (!is_simple_int(dtype)) {
+        if (!is_simple_int_dtype(dtype)) {
             add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.permute(b.input_arg(dtype), 0, false)); });
             add_invalid(tests, [dtype](FunctionBuilder &b) { b.output_arg(b.permute(b.input_arg(dtype), 0, true)); });
             add_invalid(tests, [dtype](FunctionBuilder &b) {
@@ -445,9 +440,9 @@ static void add_misc_tests(std::vector<Test> &tests) {
 static void add_checked_tests(std::vector<Test> &tests) {
     for (ScalarDataType dtype : kAllDtypes) {
         bool valid_checked_binary = dtype == I32 || dtype == I64;
-        bool valid_checked_add_sub = is_simple_int(dtype);
-        bool valid_checked_mul = is_simple_int(dtype);
-        bool valid_checked_shift = is_simple_int(dtype);
+        bool valid_checked_add_sub = is_simple_int_dtype(dtype);
+        bool valid_checked_mul = is_simple_int_dtype(dtype);
+        bool valid_checked_shift = is_simple_int_dtype(dtype);
         if (dtype == ScalarDataType::I1) continue;
         if (!valid_checked_add_sub) {
             add_unsupported(tests, [dtype](FunctionBuilder &b) {

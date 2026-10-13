@@ -49,6 +49,11 @@ constexpr bool is_simple_int_dtype(ScalarDataType dtype) noexcept {
            dtype == ScalarDataType::I64;
 }
 
+constexpr bool is_int_dtype(ScalarDataType dtype) noexcept {
+    return dtype == ScalarDataType::I8 || dtype == ScalarDataType::I16 || dtype == ScalarDataType::I32 ||
+           dtype == ScalarDataType::I64 || dtype == ScalarDataType::I128;
+}
+
 constexpr bool is_float_dtype(ScalarDataType dtype) noexcept {
     return dtype == ScalarDataType::F32 || dtype == ScalarDataType::F64;
 }

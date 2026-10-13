@@ -439,13 +439,112 @@ def func(n, src, dst):
                              b.store(b.load(src), dst);
                          },
                          PASS_ALL});
+#define i128_bop(op)                                                          \
+    tests.push_back(Test{[](FunctionBuilder &b) {                             \
+                             Argument left = b.arg(I128);                     \
+                             Argument right = b.arg(I128);                    \
+                             Argument dst = b.arg(I128);                      \
+                             b.store(b.op(b.load(left), b.load(right)), dst); \
+                         },                                                   \
+                         PASS_ALL})
+    i128_bop(add);
+    i128_bop(sub);
+    i128_bop(xor_);
+    i128_bop(and_);
+    i128_bop(or_);
+    i128_bop(andnot);
+    i128_bop(min);
+    i128_bop(umin);
+    i128_bop(max);
+    i128_bop(umax);
+
+#define i128_uop(op)                                          \
+    tests.push_back(Test{[](FunctionBuilder &b) {             \
+                             Argument arg = b.arg(I128);      \
+                             Argument dst = b.arg(I128);      \
+                             b.store(b.op(b.load(arg)), dst); \
+                         },                                   \
+                         PASS_ALL})
+
+    i128_uop(not_);
+    i128_uop(negate);
+    i128_uop(popcnt);
+    i128_uop(lzcnt);
+    i128_uop(tzcnt);
+    i128_uop(abs);
+
+    tests.push_back(Test{[](FunctionBuilder &b) { b.store(b.con(0, I128), b.arg(I128)); }, PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) { b.store(b.con(-1, I128), b.arg(I128)); }, PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) { b.store(b.con(42, I128), b.arg(I128)); }, PASS_ALL});
     tests.push_back(Test{[](FunctionBuilder &b) {
-                             Argument left = b.arg(I128);
-                             Argument right = b.arg(I128);
-                             Argument dst = b.arg(I128);
-                             b.store(b.add(b.load(left), b.load(right)), dst);
+                             Argument src = b.arg(I128);
+                             b.store(b.add(b.load(src), b.con(-1, I128)), b.arg(I128));
                          },
                          PASS_ALL});
+
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.trunc(b.input_arg(I128), I64), b.arg(I64)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.trunc(b.input_arg(I128), I32), b.arg(I32)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.trunc(b.input_arg(I128), I16), b.arg(I16)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.trunc(b.input_arg(I128), I8), b.arg(I8)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.sext(b.input_arg(I8), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.sext(b.input_arg(I16), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.sext(b.input_arg(I32), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.sext(b.input_arg(I64), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.zext(b.input_arg(I8), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.zext(b.input_arg(I16), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.zext(b.input_arg(I32), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.zext(b.input_arg(I64), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        Argument truthy = b.arg(I128);
+        Argument falsy = b.arg(I128);
+        b.store(b.select(b.input_predicate_arg(), b.load(truthy), b.load(falsy)), b.arg(I128));
+    }});
+
+#define i128_cmp(op, is_unsigned)                                                               \
+    tests.push_back(Test{[](FunctionBuilder &b) {                                               \
+                             Argument left = b.arg(I128);                                       \
+                             Argument right = b.arg(I128);                                      \
+                             Argument dst = b.arg(I1);                                          \
+                             b.store(b.cmp(b.load(left), b.load(right), op, is_unsigned), dst); \
+                         },                                                                     \
+                         PASS_ALL})
+
+    i128_cmp(CmpOp::Equal, true);
+    i128_cmp(CmpOp::Equal, false);
+    i128_cmp(CmpOp::NotEqual, true);
+    i128_cmp(CmpOp::NotEqual, false);
+    i128_cmp(CmpOp::Less, true);
+    i128_cmp(CmpOp::Less, false);
+    i128_cmp(CmpOp::LessEqual, true);
+    i128_cmp(CmpOp::LessEqual, false);
+    i128_cmp(CmpOp::Greater, true);
+    i128_cmp(CmpOp::Greater, false);
+    i128_cmp(CmpOp::GreaterEqual, true);
+    i128_cmp(CmpOp::GreaterEqual, false);
     return tests;
 }
 

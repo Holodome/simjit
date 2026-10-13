@@ -1239,6 +1239,9 @@ struct I128RewriteState {
     ArenaBitmap rewritten_steps;
     Step *zero = nullptr;
     Step *one = nullptr;
+    Step *ones = nullptr;
+    Step *sixty3 = nullptr;
+    Step *sixty4 = nullptr;
 
     I128RewriteState(FunctionBuilderImpl *impl, Function *func)
         : func(func), sm(impl->sm), original_step_count(sm.max_id()), rewritten(original_step_count),
@@ -1280,56 +1283,274 @@ struct I128RewriteState {
         return rewritten_child.pair;
     }
 
+    Step *get_i64_one() {
+        return cached_step(&one, [this] { return sm.con(ConstData::i64(1), ScalarDataType::I64); });
+    }
+
+    Step *get_i64_ones() {
+        return cached_step(&ones, [this] {
+            return sm.con(ConstData::u64(scalar_dtype_umax(ScalarDataType::I64)), ScalarDataType::I64);
+        });
+    }
+
+    Step *get_i64_zero() {
+        return cached_step(&zero, [this] { return sm.con(ConstData::i64(0), ScalarDataType::I64); });
+    }
+
+    Step *get_i64_63() {
+        return cached_step(&sixty3, [this] { return sm.con(ConstData::i64(63), ScalarDataType::I64); });
+    }
+
+    Step *get_i64_64() {
+        return cached_step(&sixty4, [this] { return sm.con(ConstData::i64(64), ScalarDataType::I64); });
+    }
+
     RewrittenStep rewrite(Step *step) {
         SIMJIT_ASSERT(step->id < original_step_count);
         RewrittenStep &result = rewritten[step->id];
         if (rewritten_steps.get(step->id)) { return result; }
         rewritten_steps.set(step->id);
+        result = rewrite_internal(step);
+        return result;
+    }
+
+    I128Pair negate_i128(I128Pair arg) {
+        // lo = 0-al; hi = ~ah + (al != 0)
+        Step *low = sm.arith_bin({ArithBinaryOp::Sub, get_i64_zero(), arg.low}, ScalarDataType::I64);
+        Step *high = sm.arith_un({ArithUnaryOp::Not, arg.high}, ScalarDataType::I64);
+        Step *carry_i64 = sm.select(
+            {sm.cmp({CmpOp::NotEqual, low, get_i64_zero()}, ScalarDataType::I1), get_i64_one(), get_i64_zero()},
+            ScalarDataType::I64);
+        high = sm.arith_bin({ArithBinaryOp::Add, high, carry_i64}, ScalarDataType::I64);
+        return {low, high};
+    }
+
+    I128Pair select_i128(Step *cond, I128Pair truthy, I128Pair falsy) {
+        Step *low = sm.select({cond, truthy.low, falsy.low}, ScalarDataType::I64);
+        Step *high = sm.select({cond, truthy.high, falsy.high}, ScalarDataType::I64);
+        return {low, high};
+    }
+
+    Step *cmp_i128(I128Pair left, I128Pair right, CmpOp op, bool is_unsigned) {
+        if (op == CmpOp::Equal) {
+            Step *lo_cond = sm.cmp({op, left.low, right.low}, ScalarDataType::I1);
+            Step *hi_cond = sm.cmp({op, left.high, right.high}, ScalarDataType::I1);
+            return sm.predicate_bin({lo_cond, hi_cond, PredicateBinaryOp::And}, ScalarDataType::I1);
+        }
+        if (op == CmpOp::NotEqual) {
+            Step *lo_cond = sm.cmp({op, left.low, right.low}, ScalarDataType::I1);
+            Step *hi_cond = sm.cmp({op, left.high, right.high}, ScalarDataType::I1);
+            return sm.predicate_bin({lo_cond, hi_cond, PredicateBinaryOp::Or}, ScalarDataType::I1);
+        }
+
+        switch (op) {
+        case CmpOp::Less:
+        case CmpOp::Greater: {
+            // (ah < bh) | ((ah == bh) & (al <u bl))
+            Step *hi_cond = sm.cmp({op, left.high, right.high, is_unsigned}, ScalarDataType::I1);
+            Step *lo_cond = sm.cmp({op, left.low, right.low, true}, ScalarDataType::I1);
+            Step *hi_eq = sm.cmp({CmpOp::Equal, left.high, right.high}, ScalarDataType::I1);
+            Step *lo = sm.predicate_bin({hi_eq, lo_cond, PredicateBinaryOp::And}, ScalarDataType::I1);
+            return sm.predicate_bin({hi_cond, lo, PredicateBinaryOp::Or}, ScalarDataType::I1);
+        }
+        case CmpOp::LessEqual:
+        case CmpOp::GreaterEqual: {
+            CmpOp strict_op = op == CmpOp::LessEqual ? CmpOp::Less : CmpOp::Greater;
+            Step *hi_strict = sm.cmp({strict_op, left.high, right.high, is_unsigned}, ScalarDataType::I1);
+            Step *lo_cond = sm.cmp({op, left.low, right.low, true}, ScalarDataType::I1);
+            Step *hi_eq = sm.cmp({CmpOp::Equal, left.high, right.high}, ScalarDataType::I1);
+            Step *lo = sm.predicate_bin({hi_eq, lo_cond, PredicateBinaryOp::And}, ScalarDataType::I1);
+            return sm.predicate_bin({hi_strict, lo, PredicateBinaryOp::Or}, ScalarDataType::I1);
+        }
+        default: SIMJIT_UNREACHABLE();
+        }
+        SIMJIT_UNREACHABLE();
+    }
+
+    RewrittenStep rewrite_internal(Step *step) {
+        SIMJIT_ASSERT(step->id < original_step_count);
 
         switch (step->kind) {
+            SIMJIT_MATCH (StepKind::Const) {
+                if (step->dtype != ScalarDataType::I128) break;
+                SIMJIT_ASSERT(data.dtype == ScalarDataType::I64);
+                int64_t val = data.as_i64();
+                Step *lo = sm.con(data.retag(ScalarDataType::I64), ScalarDataType::I64);
+                Step *hi = nullptr;
+                if (val < 0) {
+                    hi = get_i64_ones();
+                } else {
+                    hi = get_i64_zero();
+                }
+                return RewrittenStep::make_pair({lo, hi});
+            }
             SIMJIT_MATCH (StepKind::Load) {
-                if (step->dtype != ScalarDataType::I128) { break; }
+                if (step->dtype != ScalarDataType::I128) break;
                 mark_i128_argument(data.idx);
-                result =
-                    RewrittenStep::make_pair({sm.load_deinterleave({data.idx, data.kind, 2, 0}, ScalarDataType::I64),
-                                              sm.load_deinterleave({data.idx, data.kind, 2, 1}, ScalarDataType::I64)});
-                return result;
+                return RewrittenStep::make_pair(
+                    {sm.load_deinterleave({data.idx, data.kind, 2, 0}, ScalarDataType::I64),
+                     sm.load_deinterleave({data.idx, data.kind, 2, 1}, ScalarDataType::I64)});
             }
 
             SIMJIT_MATCH (StepKind::ArithBinary) {
-                if (step->dtype != ScalarDataType::I128) { break; }
-                if (data.op != ArithBinaryOp::Add || data.flags != ArithBinaryOpFlags::No) {
+                if (step->dtype != ScalarDataType::I128) break;
+                if (data.flags != ArithBinaryOpFlags::No) {
                     unsupported("i128 rewrite supports only load, store, and unflagged add; got %s",
                                 show_step_kind(step->kind));
                 }
                 I128Pair left = rewrite_pair_child(data.left, step);
                 I128Pair right = rewrite_pair_child(data.right, step);
-                I128Pair sum{};
-                sum.low = sm.arith_bin({ArithBinaryOp::Add, left.low, right.low, ArithBinaryOpFlags::No},
-                                       ScalarDataType::I64);
-                Step *carry = sm.cmp({CmpOp::Less, sum.low, left.low, true}, ScalarDataType::I1);
-                Step *high = sm.arith_bin({ArithBinaryOp::Add, left.high, right.high, ArithBinaryOpFlags::No},
-                                          ScalarDataType::I64);
-                Step *i64_one = cached_step(
-                    &one, [this] { return sm.con(ConstData::u64(1).retag(ScalarDataType::I64), ScalarDataType::I64); });
-                Step *i64_zero = cached_step(&zero, [this] {
-                    return sm.con(ConstData::u64(0).retag(ScalarDataType::I64), ScalarDataType::I64);
-                });
-                Step *carry_i64 = sm.select({carry, i64_one, i64_zero}, ScalarDataType::I64);
-                sum.high =
-                    sm.arith_bin({ArithBinaryOp::Add, high, carry_i64, ArithBinaryOpFlags::No}, ScalarDataType::I64);
-                result = RewrittenStep::make_pair(sum);
-                return result;
+                switch (data.op) {
+                case ArithBinaryOp::Add: {
+                    // lo=al+bl; carry=(lo <u al); hi=ah+bh+carry
+                    Step *low = sm.arith_bin({ArithBinaryOp::Add, left.low, right.low}, ScalarDataType::I64);
+                    Step *high = sm.arith_bin({ArithBinaryOp::Add, left.high, right.high}, ScalarDataType::I64);
+                    Step *carry = sm.cmp({CmpOp::Less, low, left.low, true}, ScalarDataType::I1);
+                    Step *carry_i64 = sm.select({carry, get_i64_one(), get_i64_zero()}, ScalarDataType::I64);
+                    high = sm.arith_bin({ArithBinaryOp::Add, high, carry_i64}, ScalarDataType::I64);
+                    return RewrittenStep::make_pair({low, high});
+                }
+                case ArithBinaryOp::Sub: {
+                    // lo=al-bl; borrow=(al <u bl); hi=ah-bh-borrow
+                    Step *low = sm.arith_bin({ArithBinaryOp::Sub, left.low, right.low}, ScalarDataType::I64);
+                    Step *high = sm.arith_bin({ArithBinaryOp::Sub, left.high, right.high}, ScalarDataType::I64);
+                    Step *borrow = sm.cmp({CmpOp::Less, left.low, right.low, true}, ScalarDataType::I1);
+                    Step *borrow_i64 = sm.select({borrow, get_i64_one(), get_i64_zero()}, ScalarDataType::I64);
+                    high = sm.arith_bin({ArithBinaryOp::Sub, high, borrow_i64}, ScalarDataType::I64);
+                    return RewrittenStep::make_pair({low, high});
+                }
+                case ArithBinaryOp::And:
+                case ArithBinaryOp::Or:
+                case ArithBinaryOp::Xor:
+                case ArithBinaryOp::AndNot: {
+                    ArithBinaryOp op = data.op;
+                    Step *low = sm.arith_bin({op, left.low, right.low}, ScalarDataType::I64);
+                    Step *high = sm.arith_bin({op, left.high, right.high}, ScalarDataType::I64);
+                    return RewrittenStep::make_pair({low, high});
+                }
+                case ArithBinaryOp::Min: {
+                    Step *cond = cmp_i128(left, right, CmpOp::Less, false);
+                    return RewrittenStep::make_pair(select_i128(cond, left, right));
+                }
+                case ArithBinaryOp::Max: {
+                    Step *cond = cmp_i128(left, right, CmpOp::Less, false);
+                    return RewrittenStep::make_pair(select_i128(cond, right, left));
+                }
+                case ArithBinaryOp::UMin: {
+                    Step *cond = cmp_i128(left, right, CmpOp::Less, true);
+                    return RewrittenStep::make_pair(select_i128(cond, left, right));
+                }
+                case ArithBinaryOp::UMax: {
+                    Step *cond = cmp_i128(left, right, CmpOp::Less, true);
+                    return RewrittenStep::make_pair(select_i128(cond, right, left));
+                }
+                default: break;
+                }
+                break;
             }
-
+            SIMJIT_MATCH (StepKind::Select) {
+                if (step->dtype != ScalarDataType::I128) break;
+                I128Pair truthy = rewrite_pair_child(data.truthy, step);
+                I128Pair falsy = rewrite_pair_child(data.falsy, step);
+                Step *cond = rewrite_scalar(data.cond, step);
+                return RewrittenStep::make_pair(select_i128(cond, truthy, falsy));
+            }
+            SIMJIT_MATCH (StepKind::IntCast) {
+                switch (data.kind) {
+                case IntCastKind::Trunc: {
+                    if (data.arg->dtype != ScalarDataType::I128) break;
+                    I128Pair pair = rewrite_pair_child(data.arg, step);
+                    Step *result = pair.low;
+                    if (step->dtype != ScalarDataType::I64) {
+                        result = sm.int_cast({IntCastKind::Trunc, result}, step->dtype);
+                    }
+                    return RewrittenStep::make_scalar(result);
+                }
+                case IntCastKind::Sext: {
+                    // {x, sra(x, 63)}
+                    if (step->dtype != ScalarDataType::I128) break;
+                    Step *low = rewrite_scalar(data.arg, step);
+                    if (low->dtype != ScalarDataType::I64) {
+                        low = sm.int_cast({IntCastKind::Sext, low}, ScalarDataType::I64);
+                    }
+                    Step *high = sm.arith_bin({ArithBinaryOp::ShiftRightArith, low, get_i64_63()}, ScalarDataType::I64);
+                    return RewrittenStep::make_pair({low, high});
+                }
+                case IntCastKind::Zext: {
+                    // {x, 0}
+                    if (step->dtype != ScalarDataType::I128) break;
+                    Step *low = rewrite_scalar(data.arg, step);
+                    if (low->dtype != ScalarDataType::I64) {
+                        low = sm.int_cast({IntCastKind::Zext, low}, ScalarDataType::I64);
+                    }
+                    Step *high = get_i64_zero();
+                    return RewrittenStep::make_pair({low, high});
+                }
+                }
+                break;
+            }
+            SIMJIT_MATCH (StepKind::ArithUnary) {
+                if (step->dtype != ScalarDataType::I128) break;
+                I128Pair pair = rewrite_pair_child(data.arg, step);
+                switch (data.op) {
+                case ArithUnaryOp::Not: {
+                    ArithUnaryOp op = data.op;
+                    Step *low = sm.arith_un({op, pair.low}, ScalarDataType::I64);
+                    Step *high = sm.arith_un({op, pair.high}, ScalarDataType::I64);
+                    return RewrittenStep::make_pair({low, high});
+                }
+                case ArithUnaryOp::Negate: {
+                    return RewrittenStep::make_pair(negate_i128(pair));
+                }
+                case ArithUnaryOp::Abs: {
+                    // select(ah < 0, neg(a), a)
+                    I128Pair negated = negate_i128(pair);
+                    Step *cond = sm.cmp({CmpOp::Less, pair.high, get_i64_zero()}, ScalarDataType::I1);
+                    I128Pair result = select_i128(cond, negated, pair);
+                    return RewrittenStep::make_pair(result);
+                }
+                case ArithUnaryOp::Popcount: {
+                    ArithUnaryOp op = data.op;
+                    Step *low = sm.arith_un({op, pair.low}, ScalarDataType::I64);
+                    Step *high = sm.arith_un({op, pair.high}, ScalarDataType::I64);
+                    Step *result = sm.arith_bin({ArithBinaryOp::Add, low, high}, ScalarDataType::I64);
+                    return RewrittenStep::make_pair({result, get_i64_zero()});
+                }
+                case ArithUnaryOp::Lzcnt: {
+                    Step *low = sm.arith_un({data.op, pair.low}, ScalarDataType::I64);
+                    Step *high = sm.arith_un({data.op, pair.high}, ScalarDataType::I64);
+                    Step *low_with_high_width =
+                        sm.arith_bin({ArithBinaryOp::Add, low, get_i64_64()}, ScalarDataType::I64);
+                    Step *high_is_zero = sm.cmp({CmpOp::Equal, pair.high, get_i64_zero()}, ScalarDataType::I1);
+                    Step *result = sm.select({high_is_zero, low_with_high_width, high}, ScalarDataType::I64);
+                    return RewrittenStep::make_pair({result, get_i64_zero()});
+                }
+                case ArithUnaryOp::Tzcnt: {
+                    Step *low = sm.arith_un({data.op, pair.low}, ScalarDataType::I64);
+                    Step *high = sm.arith_un({data.op, pair.high}, ScalarDataType::I64);
+                    Step *high_with_low_width =
+                        sm.arith_bin({ArithBinaryOp::Add, high, get_i64_64()}, ScalarDataType::I64);
+                    Step *low_is_zero = sm.cmp({CmpOp::Equal, pair.low, get_i64_zero()}, ScalarDataType::I1);
+                    Step *result = sm.select({low_is_zero, high_with_low_width, low}, ScalarDataType::I64);
+                    return RewrittenStep::make_pair({result, get_i64_zero()});
+                }
+                default: break;
+                }
+                break;
+            }
+            SIMJIT_MATCH (StepKind::Compare) {
+                if (data.left->dtype != ScalarDataType::I128) { break; }
+                I128Pair left = rewrite_pair_child(data.left, step);
+                I128Pair right = rewrite_pair_child(data.right, step);
+                return RewrittenStep::make_scalar(cmp_i128(left, right, data.op, data.is_unsigned));
+            }
             SIMJIT_MATCH (StepKind::Store) {
-                if (step->dtype != ScalarDataType::I128) { break; }
+                if (step->dtype != ScalarDataType::I128) break;
                 mark_i128_argument(data.addr);
                 I128Pair value = rewrite_pair_child(data.what, step);
                 Step *cond = data.cond == nullptr ? nullptr : rewrite_scalar(data.cond, step);
-                result = RewrittenStep::make_scalar(
+                return RewrittenStep::make_scalar(
                     sm.store_interleave({value.low, value.high, data.addr, data.kind, cond}, ScalarDataType::I64));
-                return result;
             }
 
         default: break;
@@ -1340,12 +1561,8 @@ struct I128RewriteState {
                         show_step_kind(step->kind));
         }
 
-        // Ordinary steps retain their identity while their child links are
-        // rewritten in place. Future pair-to-scalar operations belong in the
-        // special cases above.
         step_recurse(step, ScalarChildRewriter{*this, step});
-        result = RewrittenStep::make_scalar(step);
-        return result;
+        return RewrittenStep::make_scalar(step);
     }
 
     void rewrite_roots() {
@@ -1710,13 +1927,14 @@ Predicate FunctionBuilder::load_predicate_splat(Argument argument) {
 
 Value FunctionBuilder::con_internal(ConstData data, ScalarDataType dtype) {
     if (is_float_dtype(dtype)) {
+    } else if (dtype == ScalarDataType::I128) {
     } else if (!(data.as_signed() >= scalar_dtype_min(dtype).as_signed() &&
                  data.as_signed() <= scalar_dtype_max(dtype).as_signed()) &&
                !(data.as_unsigned() <= scalar_dtype_umax(dtype))) {
         invalid_type("Constant value %lld (unsigned %llu) does not fit into allowed range for type %s",
                      (long long)data.as_signed(), (unsigned long long)data.as_unsigned(), show_scalar_dtype(dtype));
     }
-    data = data.retag(dtype);
+    if (dtype != ScalarDataType::I128) { data = data.retag(dtype); }
 
     uint64_t hash = make_hash(StepKind::Const, data.raw_bits(), dtype);
     if (auto *result = impl_->cse<StepKind::Const>(hash, dtype, [data](const auto &x) { return x == data; })) {
@@ -1889,7 +2107,7 @@ Value FunctionBuilder::arith_unary(Value value, ArithUnaryOp op, bool safety_che
     case ArithUnaryOp::Not:
     case ArithUnaryOp::Negate:
     case ArithUnaryOp::Abs:
-        if (!(is_simple_int_dtype(value.dtype()) || is_float_dtype(value.dtype()))) {
+        if (!(is_int_dtype(value.dtype()) || is_float_dtype(value.dtype()))) {
             invalid_type("Invalid unary arithmetic operation %s for type %s", show_arith_unary_op(op),
                          show_scalar_dtype(value.dtype()));
         }
@@ -1897,7 +2115,7 @@ Value FunctionBuilder::arith_unary(Value value, ArithUnaryOp op, bool safety_che
     case ArithUnaryOp::Lzcnt:
     case ArithUnaryOp::Tzcnt:
     case ArithUnaryOp::Popcount:
-        if (!is_simple_int_dtype(value.dtype())) {
+        if (!is_int_dtype(value.dtype())) {
             invalid_type("Invalid unary arithmetic operation %s for type %s", show_arith_unary_op(op),
                          show_scalar_dtype(value.dtype()));
         }
@@ -1952,7 +2170,7 @@ Predicate FunctionBuilder::predicate_not(Predicate value) {
 Value FunctionBuilder::int_cast(Value value, ScalarDataType dtype, IntCastKind kind, bool safety_check) {
     check_value(value);
     if (value.dtype() == dtype) { invalid_type("Invalid cast from type %s to itself", show_scalar_dtype(dtype)); }
-    if (!is_simple_int_dtype(value.dtype()) || !is_simple_int_dtype(dtype)) {
+    if (!is_int_dtype(value.dtype()) || !is_int_dtype(dtype)) {
         invalid_type("Invalid int_cast from %s to %s", show_scalar_dtype(value.dtype()), show_scalar_dtype(dtype));
     }
     {

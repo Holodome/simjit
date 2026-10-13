@@ -784,8 +784,8 @@ struct MirConstructState {
 
     void collect_interleave_lane(Step *lane) {
         const auto &data = lane->step_data<StepKind::LoadDeinterleave>();
-        collect_interleave_pair(data.addr.arg, data.addr.offset, lane->dtype, data.kind, data.lane_count, false, lane,
-                                nullptr);
+        collect_interleave_pair(data.addr.arg, data.addr.offset, lane->dtype, data.kind, data.lane_count, false,
+                                data.lane == 0 ? lane : nullptr, data.lane == 1 ? lane : nullptr);
     }
 
     void collect_interleave_store(Step *root) {

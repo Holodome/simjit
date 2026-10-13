@@ -2436,6 +2436,39 @@ static void add_asmjit_x86_peephole_tests(std::vector<IntegrationTest> &tests) {
 #endif
 }
 
+static void add_asmjit_a64_interleave_tests(std::vector<IntegrationTest> &tests) {
+#if SIMJIT_ASMJIT_BACKEND_ARM
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        ctx.arch = Arch::Arm64_NEON;
+        FunctionBuilder builder{ctx};
+
+        Argument left = builder.arg_interleaved(I64);
+        Argument right = builder.arg_interleaved(I64);
+        Argument dst = builder.arg_interleaved(I64);
+        DeinterleavedPair left_lanes = builder.load2(left);
+        DeinterleavedPair right_lanes = builder.load2(right);
+        builder.store_interleave(dst, builder.xor_(left_lanes.even, right_lanes.even),
+                                 builder.xor_(left_lanes.odd, right_lanes.odd));
+
+        AsmjitCompileResult result{};
+        compile_asmjit(lower_vectorized(builder.build()), AsmjitCompileOptions{false, true, nullptr}, result);
+
+        size_t ld2_count = 0;
+        size_t pos = 0;
+        while ((pos = result.asm_code.find("\nld2 ", pos)) != std::string::npos) {
+            ++ld2_count;
+            pos += 5;
+        }
+        // The vector loop is unrolled twice: one ld2 per input and unrolled body.
+        SIMJIT_ASSERT(ld2_count == 4);
+    });
+#else
+    (void)tests;
+#endif
+}
+
 static std::vector<IntegrationTest> make_integration_tests() {
     std::vector<IntegrationTest> tests;
     add_argument_usage_tests(tests);
@@ -2455,6 +2488,7 @@ static std::vector<IntegrationTest> make_integration_tests() {
 #endif
     add_cpp_emitter_format_tests(tests);
     add_asmjit_x86_peephole_tests(tests);
+    add_asmjit_a64_interleave_tests(tests);
     return tests;
 }
 
