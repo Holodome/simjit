@@ -857,6 +857,65 @@ static void vec_shift_imm(ax86::Compiler &cc, ArithBinaryOp op, VecElemType type
     }
 }
 
+static void vec_funnel_imm(ax86::Compiler &cc, FunnelShiftKind kind, VecElemType type, const VecR &result,
+                           const VecR &left, const VecR &right, const aj::Imm &imm) {
+    switch (type) {
+        INVALID_FLOAT_CASES;
+    case VecElemType::I8: unsupported("Do not support i8 funnel shift");
+    case VecElemType::I16:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldw(result, left, right, imm);
+        } else {
+            cc.vpshrdw(result, left, right, imm);
+        }
+        break;
+    case VecElemType::I32:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldd(result, left, right, imm);
+        } else {
+            cc.vpshrdd(result, left, right, imm);
+        }
+        break;
+    case VecElemType::I64:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldq(result, left, right, imm);
+        } else {
+            cc.vpshrdq(result, left, right, imm);
+        }
+        break;
+    }
+}
+
+template <typename T>
+static void vec_funnel_var(ax86::Compiler &cc, FunnelShiftKind kind, VecElemType type, VecR result, const VecR &right,
+                           const T &amount) {
+    switch (type) {
+        INVALID_FLOAT_CASES;
+    case VecElemType::I8: unsupported("Do not support i8 funnel shift");
+    case VecElemType::I16:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldvw(result, right, amount);
+        } else {
+            cc.vpshrdvw(result, right, amount);
+        }
+        break;
+    case VecElemType::I32:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldvd(result, right, amount);
+        } else {
+            cc.vpshrdvd(result, right, amount);
+        }
+        break;
+    case VecElemType::I64:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldvq(result, right, amount);
+        } else {
+            cc.vpshrdvq(result, right, amount);
+        }
+        break;
+    }
+}
+
 template <typename T>
 static void vec_fma(ax86::Compiler &cc, FmaKind kind, VecElemType type, const VecR &x1, const VecR &x2, const T &x3) {
     bool is_f32 = type == VecElemType::F32;
@@ -2123,6 +2182,41 @@ struct CompileState {
 
                 return result;
             }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                GpR left = int_subexpr(data.left);
+                GpR right = int_subexpr(data.right);
+                GpR result = create_int_reg(sdtype);
+                // shld shifts dst left with src filling from the right (dst is the high half);
+                // shrd shifts dst right with src filling from the left (dst is the low half)
+                if (data.kind == FunnelShiftKind::Left) {
+                    cc.mov(result, left);
+                } else {
+                    cc.mov(result, right);
+                }
+
+                if (SIMJIT_X64_ASMJIT_CONST_OPS && data.amount->is(StepKind::Const)) {
+                    aj::Imm imm = data.amount->step_data<StepKind::Const>().as_unsigned();
+                    if (data.kind == FunnelShiftKind::Left) {
+                        cc.shld(result, right, imm);
+                    } else {
+                        cc.shrd(result, left, imm);
+                    }
+                    return result;
+                }
+                GpR amount = int_subexpr(data.amount);
+                if (sdtype == ScalarDataType::I16) {
+                    GpR masked = cc.new_gp32();
+                    cc.mov(masked, amount.r32());
+                    cc.and_(masked, 15);
+                    amount = masked;
+                }
+                if (data.kind == FunnelShiftKind::Left) {
+                    cc.shld(result, right, amount.r8());
+                } else {
+                    cc.shrd(result, left, amount.r8());
+                }
+                return result;
+            }
             SIMJIT_MATCH (StepKind::FMA) {
                 VecR x1 = float_subexpr(data.x1);
                 VecR x2 = float_subexpr(data.x2);
@@ -3016,6 +3110,31 @@ struct CompileState {
                 vec_arith_binary(vdtype, data.op, result, data.left, data.right, data.right != data.left,
                                  mask_pushdown);
 
+                return result;
+            }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                VecDataType vdtype = step->dtype.as_vec();
+
+                if (SIMJIT_X64_ASMJIT_CONST_OPS && data.amount->is(StepKind::Const)) {
+                    VecR left = vec_subexpr(data.left);
+                    VecR right = vec_subexpr(data.right);
+                    VecR result = create_vec_reg(vdtype);
+                    aj::Imm imm = data.amount->step_data<StepKind::Const>().as_unsigned();
+                    vec_funnel_imm(cc, data.kind, vdtype.elem, result, left, right, imm);
+                    return result;
+                }
+                VecR left = vec_subexpr(data.left);
+                VecR right = vec_subexpr(data.right);
+                VecR result = create_vec_reg(vdtype);
+                cc.vmovdqa64(result, left);
+                if (data.amount->is(StepKind::Load) && should_inline_mem(data.amount)) {
+                    const auto &arg_data = data.amount->step_data<StepKind::Load>();
+                    ax86::Mem mem = vec_load_mem(arg_data.addr, vdtype);
+                    vec_funnel_var(cc, data.kind, vdtype.elem, result, right, mem);
+                    return result;
+                }
+                VecR amount = vec_subexpr(data.amount);
+                vec_funnel_var(cc, data.kind, vdtype.elem, result, right, amount);
                 return result;
             }
             SIMJIT_MATCH (StepKind::FMA) {

@@ -325,6 +325,7 @@ const char *show_arith_agg_kind(ArithBinaryOp op) noexcept;
 const char *show_predicate_agg_kind(PredicateBinaryOp op) noexcept;
 const char *show_int_cast_kind(IntCastKind kind) noexcept;
 const char *show_load_store_kind(LoadStoreKind kind) noexcept;
+const char *show_funnel_shift_kind(FunnelShiftKind kind) noexcept;
 std::string show_fpclass(FpClass flags);
 std::string show_arith_binary_flags(ArithBinaryOpFlags flags);
 

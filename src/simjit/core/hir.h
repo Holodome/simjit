@@ -126,6 +126,13 @@ struct LoadDeinterleaveData {
     uint8_t lane = 0;
 };
 
+struct FunnelShiftData {
+    Step *left{};
+    Step *right{};
+    Step *amount{};
+    FunnelShiftKind kind{};
+};
+
 struct FpclassData {
     FpClass flags{};
     Step *arg{};
@@ -143,6 +150,7 @@ enum class StepKind : uint8_t {
     PredicateBinary,
     PredicateNot,
     Select,
+    FunnelShift,
     Index,
     Permute,
     Fpclass,
@@ -207,6 +215,7 @@ private:
         FloatCastData float_cast;
         PermuteData permute;
         FpclassData fpclass;
+        FunnelShiftData funnel;
         StoreInterleaveData store_interleave;
     };
 };
@@ -229,6 +238,7 @@ private:
     X(predicate_bin, PredicateBinary, pb)                     \
     X(predicate_not, PredicateNot, arg)                       \
     X(select, Select, select)                                 \
+    X(funnel_shift, FunnelShift, funnel)                      \
     X(index, Index, index)                                    \
     X(scatter, Scatter, scatter)                              \
     X(pack, Pack, pack)                                       \
@@ -318,6 +328,7 @@ enum class SpecialOp : uint16_t {
     LargePopcount = 0x800,
     I8ConstantShift = 0x1000,
     SmallDeinterleave = 0x4000,
+    FunnelShift = 0x8000,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(SpecialOp)
 
@@ -436,6 +447,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.cond);
             process(data.truthy);
             process(data.falsy);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::FunnelShift) {
+            process(data.left);
+            process(data.right);
+            process(data.amount);
             break;
         }
         SIMJIT_MATCH (StepKind::Scatter) {

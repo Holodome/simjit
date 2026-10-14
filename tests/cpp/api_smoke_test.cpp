@@ -891,11 +891,71 @@ static void api_smoke_load_deinterleave() {
     }
 }
 
+static void api_smoke_funnel_shift() {
+    using hir::SpecialOp;
+
+    {
+        SpecialOp x86_ops = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+        require_api_smoke(bool(x86_ops & SpecialOp::FunnelShift), "x86 funnel shift capability");
+        SpecialOp arm_ops = hir::supported_vector_special_ops_for_arch(Arch::Arm64_NEON);
+        require_api_smoke(bool(arm_ops & SpecialOp::FunnelShift), "arm funnel shift capability");
+    }
+
+    // x86 vectorizes funnel shifts through vpshldv, and the special op is recorded.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
+        FunctionBuilder builder{context};
+        Value y = builder.input_arg(I32);
+        Value z = builder.input_arg(I32);
+        Value w = builder.input_arg(I32);
+        builder.store(builder.funnel_shift_left(y, z, w), builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->special_ops & SpecialOp::FunnelShift), "funnel shift op recorded");
+        require_api_smoke(!fn->is_scalar_only(), "x86 funnel shift vectorizes");
+    }
+
+    // Hosts without VBMI2 stage funnel shift functions to scalar.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
+        context.host_supported_vector_special_ops =
+            hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512) & ~SpecialOp::FunnelShift;
+        FunctionBuilder builder{context};
+        Value y = builder.input_arg(I32);
+        Value z = builder.input_arg(I32);
+        Value w = builder.input_arg(I32);
+        builder.store(builder.funnel_shift_left(y, z, w), builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->is_scalar_only(), "funnel shift stages to scalar without VBMI2");
+        require_api_smoke(bool(fn->unsupported_vector_special_ops() & SpecialOp::FunnelShift),
+                          "funnel shift unsupported without VBMI2");
+    }
+
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.funnel_shift_left(builder.i8(1), builder.i8(2), builder.i8(3));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i8 funnel shift is rejected");
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.funnel_shift_right(builder.i64(1), builder.i32(2), builder.i64(3));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "mixed funnel shift types are rejected");
+}
+
 static void run_public_api_smoke_tests() {
 #if SIMJIT_ASMJIT_BACKEND
     api_smoke_sum();
     api_smoke_special_op_capabilities();
     api_smoke_load_deinterleave();
+    api_smoke_funnel_shift();
     api_smoke_raw_build_callbacks();
     api_smoke_try_compile_and_debug();
     api_smoke_serialized_debug_stage();

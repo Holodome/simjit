@@ -7132,4 +7132,86 @@ def func(n, x, idx, dst):
         b.store(b.trunc_checked(y, I16), b.arg(I16));
         b.store(b.trunc_checked(y, I8), b.arg(I8));
     }},
+    // funnel shift left with constant amounts, including values that normalize modulo the width
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I64);
+             Value y = b.input_arg(I64);
+             Value z = b.input_arg(I64);
+             Value r1 = b.funnel_shift_left(y, z, b.i64(12));
+             Value r2 = b.funnel_shift_right(r1, y, b.i64(52));
+             Value r3 = b.funnel_shift_left(r2, r1, b.i64(0));
+             Value r4 = b.funnel_shift_right(r3, r2, b.i64(64));
+             b.store(b.funnel_shift_left(r4, r3, b.i64(71)), x);
+         },
+         PASS_ALL},
+    // funnel shift right with constant amounts
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I64);
+             Value y = b.input_arg(I64);
+             Value z = b.input_arg(I64);
+             Value r1 = b.funnel_shift_right(y, z, b.i64(7));
+             Value r2 = b.funnel_shift_left(r1, z, b.i64(57));
+             Value r3 = b.funnel_shift_right(r2, r1, b.i64(63));
+             Value r4 = b.funnel_shift_left(r3, r2, b.i64(64));
+             b.store(b.funnel_shift_right(r4, r3, b.i64(128)), x);
+         },
+         PASS_ALL},
+    // i32 and i16 funnel shifts with constant amounts
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I32);
+             Value y = b.input_arg(I32);
+             Value z = b.input_arg(I32);
+             Value r1 = b.funnel_shift_left(y, z, b.i32(9));
+             Value r2 = b.funnel_shift_right(r1, z, b.i32(23));
+             Value r3 = b.funnel_shift_left(r2, r1, b.i32(32));
+             b.store(b.funnel_shift_right(r3, r2, b.i32(40)), x);
+         },
+         PASS_ALL},
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I16);
+             Value y = b.input_arg(I16);
+             Value z = b.input_arg(I16);
+             Value r1 = b.funnel_shift_left(y, z, b.i16(5));
+             Value r2 = b.funnel_shift_right(r1, z, b.i16(11));
+             Value r3 = b.funnel_shift_left(r2, r1, b.i16(16));
+             b.store(b.funnel_shift_right(r3, r2, b.i16(19)), x);
+         },
+         PASS_ALL},
+    // funnel shifts with variable amounts, wraparound semantics included
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I64);
+             Argument y = b.arg(I64);
+             Argument z = b.arg(I64);
+             Argument w = b.arg(I64);
+             Value amount1 = b.load(w, LoadStoreKind::Unaligned);
+             Value amount2 = b.add(amount1, b.i64(64));
+             b.store(b.funnel_shift_left(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned),
+                                         amount2),
+                     x);
+         },
+         PASS_ALL},
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I32);
+             Argument y = b.arg(I32);
+             Argument z = b.arg(I32);
+             Argument w = b.arg(I32);
+             Value amount1 = b.load(w, LoadStoreKind::Unaligned);
+             Value amount2 = b.mul(amount1, b.i32(7));
+             b.store(b.funnel_shift_right(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned),
+                                          amount2),
+                     x);
+         },
+         PASS_ALL},
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I16);
+             Argument y = b.arg(I16);
+             Argument z = b.arg(I16);
+             Argument w = b.arg(I16);
+             Value amount1 = b.load(w, LoadStoreKind::Unaligned);
+             Value amount2 = b.xor_(amount1, b.i16(0x1f));
+             b.store(b.funnel_shift_left(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned),
+                                         amount2),
+                     x);
+         },
+         PASS_ALL},
 };

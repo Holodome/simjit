@@ -173,6 +173,14 @@ const char *show_load_store_kind(LoadStoreKind kind) noexcept {
     SIMJIT_UNREACHABLE();
 }
 
+const char *show_funnel_shift_kind(FunnelShiftKind kind) noexcept {
+    switch (kind) {
+    case FunnelShiftKind::Left: return "left";
+    case FunnelShiftKind::Right: return "right";
+    }
+    SIMJIT_UNREACHABLE();
+}
+
 ConstData scalar_dtype_max(ScalarDataType dt) {
     switch (dt) {
     case ScalarDataType::I128: messed_up("invalid dtype for scalar_dtype_max");

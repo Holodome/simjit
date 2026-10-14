@@ -1838,6 +1838,12 @@ __m128i reduced128_1_%u = _mm_xor_si128(%s, shifted64_%u);
                 return cpp_var_decl(step) +
                        unsafe_intrin_call(intrin, data.a, data.b, data.c, std::to_string(data.fun));
             }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                const auto &intrin = (data.kind == FunnelShiftKind::Left ? x86::funnel_left_map
+                                                                        : x86::funnel_right_map)
+                                         .lookup(step->dtype.as_vec());
+                return call_intrin_var(intrin, step, data.left, data.right, data.amount);
+            }
             SIMJIT_MATCH (StepKind::VecConst) {
                 VecDataType vdtype = step->dtype.as_vec();
                 size_t idx = step->id;

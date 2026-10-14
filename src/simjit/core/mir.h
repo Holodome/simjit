@@ -169,6 +169,13 @@ struct FloatCastData {
     bool is_unsigned;
 };
 
+struct FunnelShiftData {
+    Step *left;
+    Step *right;
+    Step *amount;
+    FunnelShiftKind kind;
+};
+
 struct VecPermuteData {
     bool is_bit;
     Step *arg;
@@ -290,6 +297,7 @@ enum class StepKind : uint8_t {
     VecNarrowCombine,
     VecFloatNarrowCombine,
     ConstDiv,
+    FunnelShift,
     StoreInterleave
 };
 
@@ -346,6 +354,7 @@ private:
         VecNarrowCombineData narrow_combine;
         VecFloatNarrowCombineData float_narrow_combine;
         ConstDivData const_div;
+        FunnelShiftData funnel;
         StoreInterleaveData store_interleave;
     };
 };
@@ -403,6 +412,7 @@ enum class AllowedDataTypes : uint8_t {
     X(vec_narrow_combine, VecNarrowCombine, narrow_combine, Vec)                  \
     X(vec_float_narrow_combine, VecFloatNarrowCombine, float_narrow_combine, Vec) \
     X(const_div, ConstDiv, const_div, Scalar)                                     \
+    X(funnel_shift, FunnelShift, funnel, ScalarOrVec)                             \
     X(store_interleave, StoreInterleave, store_interleave, ScalarOrVec)
 
 #define ASSOC_STEP_DATA(_0, _kind, _field, _2)       \
@@ -569,6 +579,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.left);
             process(data.right);
             if (data.mask) { process(data.mask); }
+            break;
+        }
+        SIMJIT_MATCH (StepKind::FunnelShift) {
+            process(data.left);
+            process(data.right);
+            process(data.amount);
             break;
         }
         SIMJIT_MATCH (StepKind::VecPermute) {
@@ -768,6 +784,7 @@ constexpr bool is_scalar_step(StepKind kind) noexcept {
     case StepKind::Pack:
     case StepKind::CondStore:
     case StepKind::ScalarArithBinaryOverflow:
+    case StepKind::FunnelShift:
     case StepKind::ScalarPermute:
     case StepKind::StoreSum128:
     case StepKind::CondScatter:

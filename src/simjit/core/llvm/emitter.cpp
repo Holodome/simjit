@@ -655,6 +655,16 @@ struct LLVMBuilder {
                 if (is_float_dtype(step->dtype.as_scalar())) return float_arith_binary(data.op, left, right);
                 return arith_binary(step->dtype.as_scalar(), data.op, left, right);
             }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                V *left = step_to_llvm(data.left);
+                V *right = step_to_llvm(data.right);
+                V *amount = step_to_llvm(data.amount);
+                llvm::Type *type = left->getType();
+                if (data.kind == FunnelShiftKind::Left) {
+                    return b->CreateIntrinsic(llvm::Intrinsic::fshl, {type}, {left, right, amount});
+                }
+                return b->CreateIntrinsic(llvm::Intrinsic::fshr, {type}, {left, right, amount});
+            }
             SIMJIT_MATCH (StepKind::FMA) { return fma_to_llvm(step, data); }
             SIMJIT_MATCH (StepKind::ConstDiv) {
                 return arith_binary(step->dtype.as_scalar(), data.op, step_to_llvm(data.numerator),
@@ -998,6 +1008,16 @@ struct LLVMBuilder {
                 V *right = step_to_llvm(data.right);
                 if (step->dtype.as_vec().is_float()) return float_arith_binary(data.op, left, right);
                 return arith_binary(step->dtype.as_vec().to_scalar(), data.op, left, right);
+            }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                V *left = step_to_llvm(data.left);
+                V *right = step_to_llvm(data.right);
+                V *amount = step_to_llvm(data.amount);
+                llvm::Type *type = left->getType();
+                if (data.kind == FunnelShiftKind::Left) {
+                    return b->CreateIntrinsic(llvm::Intrinsic::fshl, {type}, {left, right, amount});
+                }
+                return b->CreateIntrinsic(llvm::Intrinsic::fshr, {type}, {left, right, amount});
             }
             SIMJIT_MATCH (StepKind::FMA) { return fma_to_llvm(step, data); }
             SIMJIT_MATCH (StepKind::ArithUnary) {

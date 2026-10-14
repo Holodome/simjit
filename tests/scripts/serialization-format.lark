@@ -41,6 +41,7 @@ step: const_step
     | countif_step
     | predicate_not_step
     | select_step
+    | funnel_shift_step
     | store_step
     | store_interleave_step
     | scatter_step
@@ -70,6 +71,9 @@ predicate_binary_step: "(" "step" step_id "predicate-binary" scalar_dtype predic
 countif_step: "(" "step" step_id "countif" "i64" step_ref acc_ref ")"
 predicate_not_step: "(" "step" step_id "predicate-not" scalar_dtype step_ref ")"
 select_step: "(" "step" step_id "select" scalar_dtype step_ref step_ref step_ref ")"
+funnel_shift_step: "(" "step" step_id "funnel-shift" scalar_dtype step_ref step_ref step_ref funnel_shift_kind ")"
+
+funnel_shift_kind: "left" | "right"
 
 store_step: "(" "step" step_id "store" scalar_dtype step_ref arg_ref load_store_kind step_ref? ")"
 store_interleave_step: "(" "step" step_id "store-interleave" scalar_dtype step_ref step_ref arg_ref load_store_kind step_ref? ")"

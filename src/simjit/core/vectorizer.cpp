@@ -1446,6 +1446,7 @@ struct AlgebraicVectorizer {
         case StepKind::ArithBinary:
         case StepKind::CheckedOp:
         case StepKind::ArithUnary:
+        case StepKind::FunnelShift:
         case StepKind::IntCast:
         case StepKind::FloatCast:
         case StepKind::Load:
@@ -1607,6 +1608,10 @@ struct AlgebraicVectorizer {
         case StepKind::Select:
             if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }
             if (!graph_validate_same_width(node, node->children[1], node->children[2])) { return false; }
+            break;
+        case StepKind::FunnelShift:
+            if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }
+            if (!graph_validate_same_width(node, node->children[0], node->children[2])) { return false; }
             break;
         case StepKind::Scatter:
             if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }

@@ -687,6 +687,10 @@ struct FunctionBuilderImpl {
         return sm.permute({arg, permute, true}, arg->dtype);
     }
 
+    Step *funnel_shift(Step *left, Step *right, Step *amount, FunnelShiftKind kind) {
+        return sm.funnel_shift({left, right, amount, kind}, left->dtype);
+    }
+
     Step *int_mul_peephole(Step *left, Step *right) {
         ScalarDataType dtype = left->dtype;
 
@@ -2376,6 +2380,32 @@ Value FunctionBuilder::index(ScalarDataType dtype) {
 
 static void check_permute_idx(uint8_t x) {
     if (x >= 8) { invalid_input("Permute byte index can't be larger or equal 8"); }
+}
+
+Value FunctionBuilder::funnel_shift(Value left, Value right, Value amount, FunnelShiftKind kind) {
+    check_value(left);
+    check_value(right);
+    check_value(amount);
+
+    if (left.dtype() != right.dtype() || left.dtype() != amount.dtype()) {
+        invalid_type("Funnel shift arguments should have same type, got %s, %s, %s", show_scalar_dtype(left.dtype()),
+                     show_scalar_dtype(right.dtype()), show_scalar_dtype(amount.dtype()));
+    }
+    if (left.dtype() != ScalarDataType::I16 && left.dtype() != ScalarDataType::I32 &&
+        left.dtype() != ScalarDataType::I64) {
+        invalid_type("Funnel shift supports i16, i32 and i64 arguments, got %s", show_scalar_dtype(left.dtype()));
+    }
+
+    impl_->special_ops |= SpecialOp::FunnelShift;
+
+    uint64_t hash = make_hash(StepKind::FunnelShift, left.step_, right.step_, amount.step_, kind);
+    if (auto *result = impl_->cse<StepKind::FunnelShift>(hash, [left, right, amount, kind](const auto &x) {
+            return x.left == left.step_ && x.right == right.step_ && x.amount == amount.step_ && x.kind == kind;
+        })) {
+        return result;
+    }
+    Step *s = impl_->funnel_shift(left.step_, right.step_, amount.step_, kind);
+    return impl_->remember_expr(hash, s);
 }
 
 Value FunctionBuilder::permute(Value value, uint64_t permute_idxs, bool is_bit) {

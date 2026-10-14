@@ -2198,6 +2198,51 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             unsupported("Do not support ARM C++ vector %s of %s", show_arith_binary_op(data.op),
                         show_vec_dtype(step->dtype.as_vec()));
         }
+        case StepKind::FunnelShift: {
+            const auto &data = step->step_data<StepKind::FunnelShift>();
+            if (!step->dtype.is_vec()) { return unexpected_step_dtype(step, "vector"); }
+            VecDataType dtype = step->dtype.as_vec();
+            std::string left = show(data.left);
+            std::string right = show(data.right);
+            std::string funnel;
+            if (data.amount->is(StepKind::Const)) {
+                uint64_t amount = data.amount->step_data<StepKind::Const>().as_unsigned();
+                uint64_t complement = dtype.element_size_bits() - amount;
+                if (data.kind == FunnelShiftKind::Left) {
+                    std::string lhs =
+                        format("%s(%s, %llu)", arm_shift_imm_intrin_name("shl", dtype).c_str(), left.c_str(),
+                               (unsigned long long)amount);
+                    std::string rhs = logical_shift_right_imm_expr(dtype, right.c_str(), complement);
+                    funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
+                } else {
+                    std::string lhs =
+                        format("%s(%s, %llu)", arm_shift_imm_intrin_name("shl", dtype).c_str(), left.c_str(),
+                               (unsigned long long)complement);
+                    std::string rhs = logical_shift_right_imm_expr(dtype, right.c_str(), amount);
+                    funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
+                }
+            } else {
+                std::string amount = show(data.amount);
+                std::string bits =
+                    format("%s(%zu)", arm_dup_intrin_name(dtype).c_str(), dtype.element_size_bits());
+                std::string complement =
+                    format("%s(%s, %s)", arm_intrin_name("sub", dtype).c_str(), bits.c_str(), amount.c_str());
+                if (data.kind == FunnelShiftKind::Left) {
+                    std::string lhs = variable_shift_expr(dtype, ArithBinaryOp::ShiftLeftLogical, left.c_str(),
+                                                          amount.c_str());
+                    std::string rhs = variable_shift_expr(dtype, ArithBinaryOp::ShiftRightLogical, right.c_str(),
+                                                          complement.c_str());
+                    funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
+                } else {
+                    std::string lhs = variable_shift_expr(dtype, ArithBinaryOp::ShiftRightLogical, right.c_str(),
+                                                          amount.c_str());
+                    std::string rhs = variable_shift_expr(dtype, ArithBinaryOp::ShiftLeftLogical, left.c_str(),
+                                                          complement.c_str());
+                    funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
+                }
+            }
+            return cpp_var_decl(step) + funnel;
+        }
         case StepKind::ArithUnary: {
             const auto &data = step->step_data<StepKind::ArithUnary>();
             if (!step->dtype.is_vec()) { return unexpected_step_dtype(step, "vector"); }

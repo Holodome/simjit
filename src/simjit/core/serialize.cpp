@@ -42,6 +42,7 @@ DEFAULT_TO_LIST(simjit::CmpOp, simjit::show_cmp_op);
 DEFAULT_TO_LIST(simjit::IntCastKind, simjit::show_int_cast_kind);
 DEFAULT_TO_LIST(simjit::PredicateBinaryOp, simjit::show_predicate_binary_op);
 DEFAULT_TO_LIST(simjit::LoadStoreKind, simjit::show_load_store_kind);
+DEFAULT_TO_LIST(simjit::FunnelShiftKind, simjit::show_funnel_shift_kind);
 DEFAULT_TO_LIST(simjit::hir::StepKind, simjit::hir::show_step_kind);
 INT_TO_FROM_LIST(size_t);
 
@@ -230,6 +231,15 @@ template <> struct hl::from_list<simjit::LoadStoreKind> {
     }
 };
 
+template <> struct hl::from_list<simjit::FunnelShiftKind> {
+    simjit::FunnelShiftKind operator()(hl::value x) {
+        std::string_view s = x.as_string_view();
+        if (s == "left") return simjit::FunnelShiftKind::Left;
+        if (s == "right") return simjit::FunnelShiftKind::Right;
+        serialization_error("Invalid FunnelShiftKind value %.*s", SV(s));
+    }
+};
+
 template <> struct hl::from_list<simjit::hir::StepKind> {
     simjit::hir::StepKind operator()(hl::value x) {
         std::string_view s = x.as_string_view();
@@ -252,6 +262,7 @@ template <> struct hl::from_list<simjit::hir::StepKind> {
         if (s == "countif") return simjit::hir::StepKind::Countif;
         if (s == "predicate-not") return simjit::hir::StepKind::PredicateNot;
         if (s == "select") return simjit::hir::StepKind::Select;
+        if (s == "funnel-shift") return simjit::hir::StepKind::FunnelShift;
         if (s == "index") return simjit::hir::StepKind::Index;
         if (s == "scatter") return simjit::hir::StepKind::Scatter;
         if (s == "pack") return simjit::hir::StepKind::Pack;
@@ -500,6 +511,10 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             payload = hl::list(ref(data.cond), ref(data.truthy), ref(data.falsy));
             break;
         }
+        SIMJIT_MATCH (StepKind::FunnelShift) {
+            payload = hl::list(ref(data.left), ref(data.right), ref(data.amount), data.kind);
+            break;
+        }
         SIMJIT_MATCH (StepKind::Scatter) {
             payload = hl::list_dot(ref(data.arg), ref(data.idx), serialize_arg_ref(data.dst),
                                    data.cond ? hl::list(ref(data.cond)) : nullptr);
@@ -688,6 +703,14 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
     }
     case StepKind::Index: {
         return builder.index(dtype);
+    }
+    case StepKind::FunnelShift: {
+        auto [left, right, amount, kind] = bind_step(hl::cap, hl::cap, hl::cap, hl::cap_as<FunnelShiftKind>);
+        Value l = ref_value(left);
+        Value r = ref_value(right);
+        Value a = ref_value(amount);
+        return kind == FunnelShiftKind::Left ? builder.funnel_shift_left(l, r, a)
+                                             : builder.funnel_shift_right(l, r, a);
     }
     case StepKind::Permute: {
         auto [arg, perm, bit] = bind_step(hl::cap, hl::cap, hl::cap_as<bool>);

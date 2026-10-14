@@ -54,6 +54,7 @@ enum : uint64_t {
     Zero8One8,       // [0 x8, 1 x8], used in Load M16
     I32_32,          // (i32)32
     I64_64,          // (i64)64
+    I16_16,          // (i16)16
     F32_Inf,         // (f32)0x7F800000
     F64_Inf,         // (f64)0x7FF0000000000000
     F32_Mant,        // (f32)0x007FFFFF
@@ -1459,6 +1460,96 @@ struct CompileState {
 
                 return result;
             }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                GpR left = int_subexpr(data.left);
+                GpR right = int_subexpr(data.right);
+                GpR result = create_int_reg(sdtype);
+                uint64_t bits = scalar_dtype_bits(sdtype);
+
+                if (SIMJIT_A64_ASMJIT_CONST_OPS && data.amount->is(StepKind::Const)) {
+                    uint64_t imm = data.amount->step_data<StepKind::Const>().as_unsigned();
+                    if (sdtype == ScalarDataType::I64) {
+                        GpR tmp = cc.new_gp64();
+                        if (data.kind == FunnelShiftKind::Left) {
+                            cc.lsl(result, left, imm);
+                            cc.lsr(tmp, right, bits - imm);
+                        } else {
+                            cc.lsr(result, right, imm);
+                            cc.lsl(tmp, left, bits - imm);
+                        }
+                        cc.orr(result, result, tmp);
+                        return result;
+                    }
+                    if (sdtype == ScalarDataType::I32) {
+                        GpR concat = cc.new_gp64();
+                        cc.mov(concat.w(), right);
+                        cc.orr(concat.x(), concat.x(), left.x(), aja64::lsl(32));
+                        cc.lsr(result.x(), concat.x(),
+                               data.kind == FunnelShiftKind::Left ? bits - imm : imm);
+                        return result;
+                    }
+                    GpR concat = cc.new_gp32();
+                    cc.and_(concat, right.w(), 0xffff);
+                    cc.orr(concat, concat, left.w(), aja64::lsl(16));
+                    cc.lsr(result, concat, data.kind == FunnelShiftKind::Left ? bits - imm : imm);
+                    cc.sxth(result, result);
+                    return result;
+                }
+
+                GpR amount = int_subexpr(data.amount);
+                if (sdtype == ScalarDataType::I64) {
+                    GpR masked = cc.new_gp64();
+                    cc.and_(masked, amount, bits - 1);
+                    GpR tmp = cc.new_gp64();
+                    if (data.kind == FunnelShiftKind::Left) {
+                        cc.lsl(result, left, masked);
+                        cc.mov(tmp, 63);
+                        cc.sub(tmp, tmp, masked);
+                        cc.lsr(tmp, right, tmp);
+                        cc.lsr(tmp, tmp, 1);
+                    } else {
+                        cc.lsr(result, right, masked);
+                        cc.mov(tmp, 63);
+                        cc.sub(tmp, tmp, masked);
+                        cc.lsl(tmp, left, tmp);
+                        cc.lsl(tmp, tmp, 1);
+                    }
+                    cc.orr(result, result, tmp);
+                    return result;
+                }
+                if (sdtype == ScalarDataType::I32) {
+                    GpR masked = cc.new_gp64();
+                    cc.mov(masked.w(), amount);
+                    cc.and_(masked, masked, bits - 1);
+                    GpR concat = cc.new_gp64();
+                    cc.mov(concat.w(), right);
+                    cc.orr(concat.x(), concat.x(), left.x(), aja64::lsl(32));
+                    if (data.kind == FunnelShiftKind::Left) {
+                        GpR inv = cc.new_gp64();
+                        cc.mov(inv, bits);
+                        cc.sub(inv, inv, masked);
+                        cc.lsr(result.x(), concat.x(), inv);
+                    } else {
+                        cc.lsr(result.x(), concat.x(), masked);
+                    }
+                    return result;
+                }
+                GpR masked = cc.new_gp32();
+                cc.and_(masked, amount.w(), bits - 1);
+                GpR concat = cc.new_gp32();
+                cc.and_(concat, right.w(), 0xffff);
+                cc.orr(concat, concat, left.w(), aja64::lsl(16));
+                if (data.kind == FunnelShiftKind::Left) {
+                    GpR inv = cc.new_gp32();
+                    cc.mov(inv, bits);
+                    cc.sub(inv, inv, masked);
+                    cc.lsr(result, concat, inv);
+                } else {
+                    cc.lsr(result, concat, masked);
+                }
+                cc.sxth(result, result);
+                return result;
+            }
             SIMJIT_MATCH (StepKind::ConstDiv) {
                 GpR numerator = int_subexpr(data.numerator);
                 GpR result = create_int_reg(sdtype);
@@ -2781,6 +2872,44 @@ struct CompileState {
                 }
                 return result;
             }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                VecDataType vdtype = step->dtype.as_vec();
+                VecR left = vec_subexpr(data.left);
+                VecR right = vec_subexpr(data.right);
+                VecR result = create_vec_reg(vdtype);
+
+                if (SIMJIT_A64_ASMJIT_CONST_OPS && data.amount->is(StepKind::Const)) {
+                    uint64_t imm = data.amount->step_data<StepKind::Const>().as_unsigned();
+                    if (data.kind == FunnelShiftKind::Left) {
+                        cc.shl(result, left, imm);
+                        cc.sri(result, right, vdtype.element_size_bits() - imm);
+                    } else {
+                        cc.shl(result, left, vdtype.element_size_bits() - imm);
+                        cc.sri(result, right, imm);
+                    }
+                    return result;
+                }
+                VecR amount = vec_subexpr(data.amount);
+                auto width = vdtype.elem == VecElemType::I16   ? SpecialConstant::I16_16
+                             : vdtype.elem == VecElemType::I32 ? SpecialConstant::I32_32
+                                                               : SpecialConstant::I64_64;
+                if (data.kind == FunnelShiftKind::Left) {
+                    cc.ushl(result, left, amount);
+                    VecR tmp = create_vec_reg(vdtype);
+                    cc.sub(tmp, amount, vec_special_const(width));
+                    cc.ushl(tmp, right, tmp);
+                    cc.orr(result.b16(), result.b16(), tmp.b16());
+                } else {
+                    VecR tmp1 = create_vec_reg(vdtype);
+                    cc.neg(tmp1, amount);
+                    cc.ushl(result, right, tmp1);
+                    VecR tmp2 = create_vec_reg(vdtype);
+                    cc.sub(tmp2, vec_special_const(width), amount);
+                    cc.ushl(tmp2, left, tmp2);
+                    cc.orr(result.b16(), result.b16(), tmp2.b16());
+                }
+                return result;
+            }
             SIMJIT_MATCH (StepKind::ArithUnary) {
                 VecDataType vdtype = step->dtype.as_vec();
                 VecR arg = float_subexpr(data.arg);
@@ -4097,6 +4226,16 @@ struct CompileState {
                     }
                 }
             }
+            if (s->is(StepKind::FunnelShift) && s->dtype.is_vec()) {
+                VecDataType vdtype = s->dtype.as_vec();
+                if (vdtype.elem == VecElemType::I16) {
+                    need_special_constants |= 1ull << SpecialConstant::I16_16;
+                } else if (vdtype.elem == VecElemType::I32) {
+                    need_special_constants |= 1ull << SpecialConstant::I32_32;
+                } else if (vdtype.elem == VecElemType::I64) {
+                    need_special_constants |= 1ull << SpecialConstant::I64_64;
+                }
+            }
             if (s->is(StepKind::ArithUnary) && s->dtype.is_vec()) {
                 VecDataType vdtype = s->dtype.as_vec();
                 auto op = s->step_data<StepKind::ArithUnary>().op;
@@ -4160,6 +4299,11 @@ struct CompileState {
             VecR reg = cc.new_vec128();
             cc.movi(reg.s4(), 32);
             special_constants[SpecialConstant::I32_32] = reg.s4();
+        }
+        if ((need_special_constants & (1ull << SpecialConstant::I16_16)) != 0) {
+            VecR reg = cc.new_vec128();
+            cc.movi(reg.h8(), 16);
+            special_constants[SpecialConstant::I16_16] = reg.h8();
         }
         if ((need_special_constants & (1ull << SpecialConstant::I64_64)) != 0) {
             GpR gp = cc.new_gp64();

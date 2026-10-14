@@ -31,6 +31,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::AccPredicateBinary: return "acc-predicate-bin";
     case StepKind::PredicateNot: return "predicate-not";
     case StepKind::Select: return "select";
+    case StepKind::FunnelShift: return "funnel-shift";
     case StepKind::Index: return "index";
     case StepKind::Scatter: return "scatter";
     case StepKind::Pack: return "pack";
@@ -64,6 +65,7 @@ std::string show_special_ops(SpecialOp ops) {
     append(SpecialOp::LargePopcount, "large-popcount");
     append(SpecialOp::I8ConstantShift, "i8-constant-shift");
     append(SpecialOp::SmallDeinterleave, "small-deinterleave");
+    append(SpecialOp::FunnelShift, "funnel-shift");
     return result;
 }
 
@@ -75,10 +77,11 @@ SpecialOp supported_vector_special_ops_for_arch(Arch arch) noexcept {
         // 'reduced ice lake', where some special ops will be removed from supported list.
         return SpecialOp::I64Mul | SpecialOp::Gather | SpecialOp::Scatter | SpecialOp::CondScatter |
                SpecialOp::SmallPack | SpecialOp::ArbitraryBitPermute | SpecialOp::SmallPopcount |
-               SpecialOp::LargePopcount | SpecialOp::I8ConstantShift | SpecialOp::SmallDeinterleave;
+               SpecialOp::LargePopcount | SpecialOp::I8ConstantShift | SpecialOp::SmallDeinterleave |
+               SpecialOp::FunnelShift;
     case Arch::Arm64_NEON:
         return SpecialOp::Gather | SpecialOp::SmallPack | SpecialOp::SmallPopcount | SpecialOp::LargePopcount |
-               SpecialOp::I8ConstantShift | SpecialOp::Scatter | SpecialOp::SmallDeinterleave;
+               SpecialOp::I8ConstantShift | SpecialOp::Scatter | SpecialOp::SmallDeinterleave | SpecialOp::FunnelShift;
     }
     SIMJIT_UNREACHABLE();
 }
@@ -267,6 +270,9 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
             wr("op=%s acc=$%zu arg=%%%u", show_predicate_binary_op(data.op), data.acc, ref(data.arg));
         SIMJIT_MATCH (StepKind::Select)
             wr("cond=%%%u truthy=%%%u falsy=%%%u", ref(data.cond), ref(data.truthy), ref(data.falsy));
+        SIMJIT_MATCH (StepKind::FunnelShift)
+            wr("left=%%%u right=%%%u amount=%%%u kind=%s", ref(data.left), ref(data.right), ref(data.amount),
+               show_funnel_shift_kind(data.kind));
         SIMJIT_MATCH (StepKind::Pack)
             wr("arg=%%%u cond=%%%u dst=@%zu dst_size=$%zu", ref(data.arg), ref(data.cond), data.dst, data.dst_size_acc);
         SIMJIT_MATCH (StepKind::Permute)

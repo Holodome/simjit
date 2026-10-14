@@ -847,6 +847,23 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
             return cpp_var_decl(step) + scalar_arith_binary_expr(sdtype, data, show_scalar_operand(data.left),
                                                                  show_scalar_operand(data.right));
         }
+        SIMJIT_MATCH (StepKind::FunnelShift) {
+            const char *left = show_scalar_operand(data.left);
+            const char *right = show_scalar_operand(data.right);
+            const char *amount = show_scalar_operand(data.amount);
+            size_t bits = scalar_dtype_bits(sdtype);
+            const char *utype = scalar_dtype_to_cpp_unsigned(sdtype);
+            if (data.kind == FunnelShiftKind::Left) {
+                return cpp_var_decl(step) +
+                       format("(%s & %zu) == 0 ? %s : (%s)(((%s)%s << (%s & %zu)) | ((%s)%s >> (%zu - (%s & %zu))))",
+                              amount, bits - 1, left, scalar_dtype_to_cpp(sdtype), utype, left, amount, bits - 1, utype, right,
+                              bits, amount, bits - 1);
+            }
+            return cpp_var_decl(step) +
+                   format("(%s & %zu) == 0 ? %s : (%s)(((%s)%s >> (%s & %zu)) | ((%s)%s << (%zu - (%s & %zu))))",
+                          amount, bits - 1, right, scalar_dtype_to_cpp(sdtype), utype, right, amount, bits - 1, utype, left,
+                          bits, amount, bits - 1);
+        }
         SIMJIT_MATCH (StepKind::FMA) {
             const char *function = sdtype == ScalarDataType::F32 ? "fmaf" : "fma";
             std::string x1 = show_scalar_operand(data.x1);

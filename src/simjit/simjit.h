@@ -396,6 +396,11 @@ enum class LoadStoreKind : uint8_t {
     Unaligned,
 };
 
+enum class FunnelShiftKind : uint8_t {
+    Left,
+    Right,
+};
+
 enum class CodeTransformations : uint32_t {
     No = 0x0,
     // Allow use of 32x32 -> 64 bit multiply
@@ -802,6 +807,16 @@ public:
     Value rotr(Value left, Value right) {
         return arith_binary(left, right, ArithBinaryOp::RotateRight, ArithBinaryOpFlags::ShiftWraparound);
     }
+
+    // Concatenate left (high) and right (low), shift by amount taken modulo the element bit width.
+    // Supported for i16, i32 and i64.
+    Value funnel_shift_left(Value left, Value right, Value amount) {
+        return funnel_shift(left, right, amount, FunnelShiftKind::Left);
+    }
+    Value funnel_shift_right(Value left, Value right, Value amount) {
+        return funnel_shift(left, right, amount, FunnelShiftKind::Right);
+    }
+    Value funnel_shift(Value left, Value right, Value amount, FunnelShiftKind kind);
 
     //
     // Checked binary

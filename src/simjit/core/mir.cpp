@@ -292,6 +292,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::CondStore: return "cond-store";
     case StepKind::ScalarArithBinaryOverflow: return "ab-overflow";
     case StepKind::VecConst: return "vec-const";
+    case StepKind::FunnelShift: return "funnel-shift";
     case StepKind::VecPermute: return "vec-permute";
     case StepKind::ScalarPermute: return "scalar-permute";
     case StepKind::StoreSum128: return "store-sum128";
@@ -455,6 +456,9 @@ struct ExprShowState {
             SIMJIT_MATCH (StepKind::Ternarylogic)
                 wr("a=%%%u b=%%%u c=%%%u fn=%x", ref(data.a), ref(data.b), ref(data.c), data.fun);
             SIMJIT_MATCH (StepKind::VecConst) return;
+            SIMJIT_MATCH (StepKind::FunnelShift)
+                wr("left=%%%u right=%%%u amount=%%%u kind=%s", ref(data.left), ref(data.right), ref(data.amount),
+                   show_funnel_shift_kind(data.kind));
             SIMJIT_MATCH (StepKind::VecPermute)
                 wr("arg=%%%u permute_idxs=%%%u is_bit=%s", ref(data.arg), ref(data.permute_idxs),
                    data.is_bit ? "true" : "false");
@@ -571,6 +575,11 @@ static ArchTraits get_arch_traits(Arch arch) {
         return traits;
     }
     messed_up("unsupported arch %x", (unsigned)arch);
+}
+
+// x86 funnel shifts take the count modulo 64 regardless of element width, so i64 needs no count fixup
+static bool vec_funnel_needs_count_mask(Arch arch, VecDataType vdtype) {
+    return !(is_x86_arch(arch) && vdtype.elem == VecElemType::I64);
 }
 
 namespace {
@@ -2470,6 +2479,32 @@ struct MirConstructState {
                 }
                 messed_up("Unsupported checked op step kind %s", hir::show_step_kind(operation->kind));
             }
+            SIMJIT_MATCH (hir::StepKind::FunnelShift) {
+                VecDataType vdtype = node->dtype.as_vec();
+                Step *left = ref_nth(0);
+                Step *right = ref_nth(1);
+                Step *amount = ref_nth(2);
+                invariant_same_vec_type(left, right);
+                invariant_same_vec_type(left, amount);
+                invariant_same_vec_type(node, left);
+                switch (vdtype.elem) {
+                case VecElemType::I16:
+                case VecElemType::I32:
+                case VecElemType::I64: break;
+                default: messed_up("Invalid funnel shift dtype %s", show_vec_dtype(vdtype));
+                }
+                if (amount->is(StepKind::Const)) {
+                    uint64_t normalized =
+                        amount->step_data<StepKind::Const>().retag(vdtype.to_scalar()).as_unsigned() %
+                        vdtype.element_size_bits();
+                    if (normalized == 0) { return data.kind == FunnelShiftKind::Left ? left : right; }
+                    amount = make_const(normalized, vdtype);
+                } else if (vec_funnel_needs_count_mask(hir->ctx->arch, vdtype)) {
+                    amount = sm.arith_bin(
+                        {make_const(vdtype.element_size_bits() - 1, vdtype), amount, ArithBinaryOp::And}, vdtype);
+                }
+                return sm.funnel_shift({left, right, amount, data.kind}, vdtype);
+            }
             SIMJIT_MATCH (hir::StepKind::ArithBinary) {
                 VecDataType vdtype = node->dtype.as_vec();
                 if (bool(hir->ctx->transformations & CodeTransformations::TernarylogicInst) &&
@@ -3035,6 +3070,27 @@ struct MirConstructState {
             SIMJIT_MATCH (hir::StepKind::Const) {
                 ScalarDataType dt = sdtype == ScalarDataType::I1 ? ScalarDataType::I8 : sdtype;
                 return make_const(data, dt);
+            }
+            SIMJIT_MATCH (hir::StepKind::FunnelShift) {
+                Step *left = ref(data.left);
+                Step *right = ref(data.right);
+                Step *amount = ref(data.amount);
+                invariant_same_scalar_type(left, right);
+                invariant_same_scalar_type(left, amount);
+                invariant_same_scalar_type(left, step);
+                switch (sdtype) {
+                case ScalarDataType::I16:
+                case ScalarDataType::I32:
+                case ScalarDataType::I64: break;
+                default: messed_up("Invalid funnel shift dtype %s", show_scalar_dtype(sdtype));
+                }
+                if (amount->is(StepKind::Const)) {
+                    uint64_t normalized = amount->step_data<StepKind::Const>().retag(sdtype).as_unsigned() %
+                                          scalar_dtype_bits(sdtype);
+                    if (normalized == 0) { return data.kind == FunnelShiftKind::Left ? left : right; }
+                    amount = make_const(normalized, sdtype);
+                }
+                return sm.funnel_shift({left, right, amount, data.kind}, sdtype);
             }
             SIMJIT_MATCH (hir::StepKind::ArithBinary) {
                 Step *l = ref(data.left);
