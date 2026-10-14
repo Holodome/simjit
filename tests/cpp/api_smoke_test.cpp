@@ -880,6 +880,63 @@ static void api_smoke_load_deinterleave() {
     }
     {
         MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I128);
+        builder.store(builder.rotl(builder.load(src), builder.con(64, I128)), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        size_t arith_count = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "i128 rotate rewrite leaves no i128 step");
+                if (step->is(hir::StepKind::ArithBinary)) { ++arith_count; }
+            });
+        }
+        require_api_smoke(arith_count == 0, "i128 rotate by 64 only swaps pair halves");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I128);
+        Argument count = builder.arg(I128);
+        builder.store(builder.sll(builder.load(src), builder.load(count)), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        size_t i64_funnels = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "variable i128 shift rewrite leaves no i128 step");
+                if (step->is(hir::StepKind::FunnelShift)) { ++i64_funnels; }
+            });
+        }
+        require_api_smoke(i64_funnels == 1, "variable i128 shift uses one i64 funnel shift");
+        require_api_smoke(bool(fn->special_ops & SpecialOp::FunnelShift), "i128 shift records funnel shift use");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument left = builder.arg(I128);
+        Argument right = builder.arg(I128);
+        builder.store(builder.mul(builder.load(left), builder.load(right)), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        size_t mul32_count = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "i128 multiply rewrite leaves no i128 step");
+                if (step->is(hir::StepKind::ArithBinary) &&
+                    step->step_data<hir::StepKind::ArithBinary>().op == ArithBinaryOp::Mul64ZE) {
+                    ++mul32_count;
+                }
+            });
+        }
+        require_api_smoke(mul32_count == 10, "i128 multiply uses ten 32x32 partial products");
+    }
+    {
+        MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::I128Rewrite, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
         Argument src = builder.arg(I128);

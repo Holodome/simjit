@@ -1244,8 +1244,10 @@ struct I128RewriteState {
     Step *zero = nullptr;
     Step *one = nullptr;
     Step *ones = nullptr;
+    Step *mask32 = nullptr;
     Step *sixty3 = nullptr;
     Step *sixty4 = nullptr;
+    Step *sixty127 = nullptr;
 
     I128RewriteState(FunctionBuilderImpl *impl, Function *func)
         : func(func), sm(impl->sm), original_step_count(sm.max_id()), rewritten(original_step_count),
@@ -1273,8 +1275,7 @@ struct I128RewriteState {
     Step *rewrite_scalar(Step *child, const Step *consumer) {
         RewrittenStep rewritten_child = rewrite(child);
         if (rewritten_child.is_pair()) {
-            unsupported("i128 rewrite supports only load, store, and unflagged add; got %s",
-                        show_step_kind(consumer->kind));
+            unsupported("i128 value is not supported by %s", show_step_kind(consumer->kind));
         }
         return rewritten_child.scalar;
     }
@@ -1297,6 +1298,10 @@ struct I128RewriteState {
         });
     }
 
+    Step *get_i64_mask32() {
+        return cached_step(&mask32, [this] { return sm.con(ConstData::u64(0xffffffffull), ScalarDataType::I64); });
+    }
+
     Step *get_i64_zero() {
         return cached_step(&zero, [this] { return sm.con(ConstData::i64(0), ScalarDataType::I64); });
     }
@@ -1307,6 +1312,10 @@ struct I128RewriteState {
 
     Step *get_i64_64() {
         return cached_step(&sixty4, [this] { return sm.con(ConstData::i64(64), ScalarDataType::I64); });
+    }
+
+    Step *get_i64_127() {
+        return cached_step(&sixty127, [this] { return sm.con(ConstData::i64(127), ScalarDataType::I64); });
     }
 
     RewrittenStep rewrite(Step *step) {
@@ -1327,6 +1336,215 @@ struct I128RewriteState {
             ScalarDataType::I64);
         high = sm.arith_bin({ArithBinaryOp::Add, high, carry_i64}, ScalarDataType::I64);
         return {low, high};
+    }
+
+    struct ShiftCount {
+        Step *within_word;
+        Step *at_least_word;
+    };
+
+    ShiftCount normalize_shift_count(Step *count) {
+        Step *normalized = sm.arith_bin({ArithBinaryOp::And, count, get_i64_127()}, ScalarDataType::I64);
+        Step *within_word = sm.arith_bin({ArithBinaryOp::And, normalized, get_i64_63()}, ScalarDataType::I64);
+        Step *at_least_word = sm.cmp({CmpOp::GreaterEqual, normalized, get_i64_64(), true}, ScalarDataType::I1);
+        return {within_word, at_least_word};
+    }
+
+    I128Pair shift_i128(ArithBinaryOp op, I128Pair arg, Step *count) {
+        func->special_ops |= SpecialOp::FunnelShift;
+        ShiftCount normalized = normalize_shift_count(count);
+        Step *k = normalized.within_word;
+        I128Pair below{};
+        I128Pair above{};
+        switch (op) {
+        case ArithBinaryOp::ShiftLeftLogical:
+            below = {sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg.low, k}, ScalarDataType::I64),
+                     sm.funnel_shift({arg.high, arg.low, k, FunnelShiftKind::Left}, ScalarDataType::I64)};
+            above = {get_i64_zero(), sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg.low, k}, ScalarDataType::I64)};
+            break;
+        case ArithBinaryOp::ShiftRightLogical:
+            below = {sm.funnel_shift({arg.high, arg.low, k, FunnelShiftKind::Right}, ScalarDataType::I64),
+                     sm.arith_bin({ArithBinaryOp::ShiftRightLogical, arg.high, k}, ScalarDataType::I64)};
+            above = {sm.arith_bin({ArithBinaryOp::ShiftRightLogical, arg.high, k}, ScalarDataType::I64),
+                     get_i64_zero()};
+            break;
+        case ArithBinaryOp::ShiftRightArith:
+            below = {sm.funnel_shift({arg.high, arg.low, k, FunnelShiftKind::Right}, ScalarDataType::I64),
+                     sm.arith_bin({ArithBinaryOp::ShiftRightArith, arg.high, k}, ScalarDataType::I64)};
+            above = {sm.arith_bin({ArithBinaryOp::ShiftRightArith, arg.high, k}, ScalarDataType::I64),
+                     sm.arith_bin({ArithBinaryOp::ShiftRightArith, arg.high, get_i64_63()}, ScalarDataType::I64)};
+            break;
+        case ArithBinaryOp::RotateLeft:
+            below = {sm.funnel_shift({arg.low, arg.high, k, FunnelShiftKind::Left}, ScalarDataType::I64),
+                     sm.funnel_shift({arg.high, arg.low, k, FunnelShiftKind::Left}, ScalarDataType::I64)};
+            above = {sm.funnel_shift({arg.high, arg.low, k, FunnelShiftKind::Left}, ScalarDataType::I64),
+                     sm.funnel_shift({arg.low, arg.high, k, FunnelShiftKind::Left}, ScalarDataType::I64)};
+            break;
+        case ArithBinaryOp::RotateRight:
+            below = {sm.funnel_shift({arg.high, arg.low, k, FunnelShiftKind::Right}, ScalarDataType::I64),
+                     sm.funnel_shift({arg.low, arg.high, k, FunnelShiftKind::Right}, ScalarDataType::I64)};
+            above = {sm.funnel_shift({arg.low, arg.high, k, FunnelShiftKind::Right}, ScalarDataType::I64),
+                     sm.funnel_shift({arg.high, arg.low, k, FunnelShiftKind::Right}, ScalarDataType::I64)};
+            break;
+        default: SIMJIT_UNREACHABLE();
+        }
+        return select_i128(normalized.at_least_word, above, below);
+    }
+
+    I128Pair shift_i128_const(ArithBinaryOp op, I128Pair arg, size_t count) {
+        count &= 127;
+        if (count == 0) { return arg; }
+        size_t k = count & 63;
+        switch (op) {
+        case ArithBinaryOp::ShiftLeftLogical: {
+            if (count < 64) {
+                func->special_ops |= SpecialOp::FunnelShift;
+                Step *k_step = sm.con(ConstData::i64((int64_t)k), ScalarDataType::I64);
+                return {sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg.low, k_step}, ScalarDataType::I64),
+                        sm.funnel_shift({arg.high, arg.low, k_step, FunnelShiftKind::Left}, ScalarDataType::I64)};
+            }
+            if (k == 0) { return {get_i64_zero(), arg.low}; }
+            return {get_i64_zero(), sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg.low,
+                                                  sm.con(ConstData::i64((int64_t)k), ScalarDataType::I64)},
+                                                 ScalarDataType::I64)};
+        }
+        case ArithBinaryOp::ShiftRightLogical: {
+            if (count < 64) {
+                func->special_ops |= SpecialOp::FunnelShift;
+                Step *k_step = sm.con(ConstData::i64((int64_t)k), ScalarDataType::I64);
+                return {sm.funnel_shift({arg.high, arg.low, k_step, FunnelShiftKind::Right}, ScalarDataType::I64),
+                        sm.arith_bin({ArithBinaryOp::ShiftRightLogical, arg.high, k_step}, ScalarDataType::I64)};
+            }
+            if (k == 0) { return {arg.high, get_i64_zero()}; }
+            return {sm.arith_bin({ArithBinaryOp::ShiftRightLogical, arg.high,
+                                  sm.con(ConstData::i64((int64_t)k), ScalarDataType::I64)},
+                                 ScalarDataType::I64),
+                    get_i64_zero()};
+        }
+        case ArithBinaryOp::ShiftRightArith: {
+            if (count < 64) {
+                func->special_ops |= SpecialOp::FunnelShift;
+                Step *k_step = sm.con(ConstData::i64((int64_t)k), ScalarDataType::I64);
+                return {sm.funnel_shift({arg.high, arg.low, k_step, FunnelShiftKind::Right}, ScalarDataType::I64),
+                        sm.arith_bin({ArithBinaryOp::ShiftRightArith, arg.high, k_step}, ScalarDataType::I64)};
+            }
+            Step *sign = sm.arith_bin({ArithBinaryOp::ShiftRightArith, arg.high, get_i64_63()}, ScalarDataType::I64);
+            if (k == 0) { return {arg.high, sign}; }
+            return {sm.arith_bin({ArithBinaryOp::ShiftRightArith, arg.high,
+                                  sm.con(ConstData::i64((int64_t)k), ScalarDataType::I64)},
+                                 ScalarDataType::I64),
+                    sign};
+        }
+        case ArithBinaryOp::RotateLeft: {
+            if (count == 64) { return {arg.high, arg.low}; }
+            func->special_ops |= SpecialOp::FunnelShift;
+            Step *k_step = sm.con(ConstData::i64((int64_t)k), ScalarDataType::I64);
+            if (count < 64) {
+                return {sm.funnel_shift({arg.low, arg.high, k_step, FunnelShiftKind::Left}, ScalarDataType::I64),
+                        sm.funnel_shift({arg.high, arg.low, k_step, FunnelShiftKind::Left}, ScalarDataType::I64)};
+            }
+            return {sm.funnel_shift({arg.high, arg.low, k_step, FunnelShiftKind::Left}, ScalarDataType::I64),
+                    sm.funnel_shift({arg.low, arg.high, k_step, FunnelShiftKind::Left}, ScalarDataType::I64)};
+        }
+        case ArithBinaryOp::RotateRight: {
+            if (count == 64) { return {arg.high, arg.low}; }
+            func->special_ops |= SpecialOp::FunnelShift;
+            Step *k_step = sm.con(ConstData::i64((int64_t)k), ScalarDataType::I64);
+            if (count < 64) {
+                return {sm.funnel_shift({arg.high, arg.low, k_step, FunnelShiftKind::Right}, ScalarDataType::I64),
+                        sm.funnel_shift({arg.low, arg.high, k_step, FunnelShiftKind::Right}, ScalarDataType::I64)};
+            }
+            return {sm.funnel_shift({arg.low, arg.high, k_step, FunnelShiftKind::Right}, ScalarDataType::I64),
+                    sm.funnel_shift({arg.high, arg.low, k_step, FunnelShiftKind::Right}, ScalarDataType::I64)};
+        }
+        default: SIMJIT_UNREACHABLE();
+        }
+        SIMJIT_UNREACHABLE();
+    }
+
+    I128Pair umul64_wide(Step *left, Step *right) {
+        Step *left_lo = sm.arith_bin({ArithBinaryOp::And, left, get_i64_mask32()}, ScalarDataType::I64);
+        Step *left_hi =
+            sm.arith_bin({ArithBinaryOp::ShiftRightLogical, left, sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                         ScalarDataType::I64);
+        Step *right_lo = sm.arith_bin({ArithBinaryOp::And, right, get_i64_mask32()}, ScalarDataType::I64);
+        Step *right_hi =
+            sm.arith_bin({ArithBinaryOp::ShiftRightLogical, right, sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                         ScalarDataType::I64);
+        Step *x0y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_lo, right_lo}, ScalarDataType::I64);
+        Step *x0y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_lo, right_hi}, ScalarDataType::I64);
+        Step *x1y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_hi, right_lo}, ScalarDataType::I64);
+        Step *x1y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_hi, right_hi}, ScalarDataType::I64);
+        Step *middle =
+            sm.arith_bin({ArithBinaryOp::ShiftRightLogical, x0y0, sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                         ScalarDataType::I64);
+        middle = sm.arith_bin({ArithBinaryOp::Add, middle,
+                               sm.arith_bin({ArithBinaryOp::And, x0y1, get_i64_mask32()}, ScalarDataType::I64)},
+                              ScalarDataType::I64);
+        middle = sm.arith_bin({ArithBinaryOp::Add, middle,
+                               sm.arith_bin({ArithBinaryOp::And, x1y0, get_i64_mask32()}, ScalarDataType::I64)},
+                              ScalarDataType::I64);
+        Step *low = sm.arith_bin(
+            {ArithBinaryOp::Or, sm.arith_bin({ArithBinaryOp::And, x0y0, get_i64_mask32()}, ScalarDataType::I64),
+             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical,
+                           sm.arith_bin({ArithBinaryOp::And, middle, get_i64_mask32()}, ScalarDataType::I64),
+                           sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                          ScalarDataType::I64)},
+            ScalarDataType::I64);
+        Step *high = sm.arith_bin(
+            {ArithBinaryOp::Add, x1y1,
+             sm.arith_bin({ArithBinaryOp::ShiftRightLogical, x0y1, sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                          ScalarDataType::I64)},
+            ScalarDataType::I64);
+        high = sm.arith_bin(
+            {ArithBinaryOp::Add, high,
+             sm.arith_bin({ArithBinaryOp::ShiftRightLogical, x1y0, sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                          ScalarDataType::I64)},
+            ScalarDataType::I64);
+        high = sm.arith_bin(
+            {ArithBinaryOp::Add, high,
+             sm.arith_bin({ArithBinaryOp::ShiftRightLogical, middle, sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                          ScalarDataType::I64)},
+            ScalarDataType::I64);
+        return {low, high};
+    }
+
+    Step *umul64_low(Step *left, Step *right) {
+        Step *left_lo = sm.arith_bin({ArithBinaryOp::And, left, get_i64_mask32()}, ScalarDataType::I64);
+        Step *left_hi =
+            sm.arith_bin({ArithBinaryOp::ShiftRightLogical, left, sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                         ScalarDataType::I64);
+        Step *right_lo = sm.arith_bin({ArithBinaryOp::And, right, get_i64_mask32()}, ScalarDataType::I64);
+        Step *right_hi =
+            sm.arith_bin({ArithBinaryOp::ShiftRightLogical, right, sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                         ScalarDataType::I64);
+        Step *x0y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_lo, right_lo}, ScalarDataType::I64);
+        Step *x0y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_lo, right_hi}, ScalarDataType::I64);
+        Step *x1y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_hi, right_lo}, ScalarDataType::I64);
+        Step *middle =
+            sm.arith_bin({ArithBinaryOp::ShiftRightLogical, x0y0, sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                         ScalarDataType::I64);
+        middle = sm.arith_bin({ArithBinaryOp::Add, middle,
+                               sm.arith_bin({ArithBinaryOp::And, x0y1, get_i64_mask32()}, ScalarDataType::I64)},
+                              ScalarDataType::I64);
+        middle = sm.arith_bin({ArithBinaryOp::Add, middle,
+                               sm.arith_bin({ArithBinaryOp::And, x1y0, get_i64_mask32()}, ScalarDataType::I64)},
+                              ScalarDataType::I64);
+        return sm.arith_bin(
+            {ArithBinaryOp::Or, sm.arith_bin({ArithBinaryOp::And, x0y0, get_i64_mask32()}, ScalarDataType::I64),
+             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical,
+                           sm.arith_bin({ArithBinaryOp::And, middle, get_i64_mask32()}, ScalarDataType::I64),
+                           sm.con(ConstData::i64(32), ScalarDataType::I64)},
+                          ScalarDataType::I64)},
+            ScalarDataType::I64);
+    }
+
+    I128Pair multiply_i128(I128Pair left, I128Pair right) {
+        I128Pair low_product = umul64_wide(left.low, right.low);
+        Step *high =
+            sm.arith_bin({ArithBinaryOp::Add, low_product.high, umul64_low(left.low, right.high)}, ScalarDataType::I64);
+        high = sm.arith_bin({ArithBinaryOp::Add, high, umul64_low(left.high, right.low)}, ScalarDataType::I64);
+        return {low_product.low, high};
     }
 
     I128Pair select_i128(Step *cond, I128Pair truthy, I128Pair falsy) {
@@ -1398,11 +1616,20 @@ struct I128RewriteState {
 
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 if (step->dtype != ScalarDataType::I128) break;
-                if (data.flags != ArithBinaryOpFlags::No) {
-                    unsupported("i128 rewrite supports only load, store, and unflagged add; got %s",
-                                show_step_kind(step->kind));
+                bool is_shift = data.op == ArithBinaryOp::ShiftRightArith ||
+                                data.op == ArithBinaryOp::ShiftRightLogical ||
+                                data.op == ArithBinaryOp::ShiftLeftLogical || data.op == ArithBinaryOp::RotateLeft ||
+                                data.op == ArithBinaryOp::RotateRight;
+                if ((is_shift && data.flags != ArithBinaryOpFlags::ShiftWraparound) ||
+                    (!is_shift && data.flags != ArithBinaryOpFlags::No)) {
+                    unsupported("i128 rewrite does not support flags for %s", show_arith_binary_op(data.op));
                 }
                 I128Pair left = rewrite_pair_child(data.left, step);
+                if (is_shift && data.right->is(StepKind::Const)) {
+                    const ConstData &count = data.right->step_data<StepKind::Const>();
+                    SIMJIT_ASSERT(data.right->dtype == ScalarDataType::I128);
+                    return RewrittenStep::make_pair(shift_i128_const(data.op, left, count.as_unsigned()));
+                }
                 I128Pair right = rewrite_pair_child(data.right, step);
                 switch (data.op) {
                 case ArithBinaryOp::Add: {
@@ -1423,6 +1650,12 @@ struct I128RewriteState {
                     high = sm.arith_bin({ArithBinaryOp::Sub, high, borrow_i64}, ScalarDataType::I64);
                     return RewrittenStep::make_pair({low, high});
                 }
+                case ArithBinaryOp::Mul: return RewrittenStep::make_pair(multiply_i128(left, right));
+                case ArithBinaryOp::ShiftRightArith:
+                case ArithBinaryOp::ShiftRightLogical:
+                case ArithBinaryOp::ShiftLeftLogical:
+                case ArithBinaryOp::RotateLeft:
+                case ArithBinaryOp::RotateRight: return RewrittenStep::make_pair(shift_i128(data.op, left, right.low));
                 case ArithBinaryOp::And:
                 case ArithBinaryOp::Or:
                 case ArithBinaryOp::Xor:
@@ -1561,8 +1794,7 @@ struct I128RewriteState {
         }
 
         if (step->dtype == ScalarDataType::I128 && !step->is(StepKind::AccSum128)) {
-            unsupported("i128 rewrite supports only load, store, and unflagged add; got %s",
-                        show_step_kind(step->kind));
+            unsupported("i128 rewrite does not support %s", show_step_kind(step->kind));
         }
 
         step_recurse(step, ScalarChildRewriter{*this, step});

@@ -228,9 +228,22 @@ static void add_low_level_api_tests(std::vector<Test> &tests) {
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.cmp_ugt(b.input_arg(F32), b.input_arg(F32))); });
     add_unsupported(tests, [](FunctionBuilder &b) { b.sum(b.input_arg(I32), b.arg(I128)); });
     add_unsupported(tests, [](FunctionBuilder &b) { b.product(b.input_arg(I64), b.arg(I128)); });
-    add_unsupported(tests, [](FunctionBuilder &b) {
+    add_valid(tests, [](FunctionBuilder &b) {
         Argument src = b.arg(I128);
         b.store(b.mul(b.load(src), b.load(src)), b.arg(I128));
+    });
+    add_unsupported(tests, [](FunctionBuilder &b) {
+        Argument src = b.arg(I128);
+        b.store(b.mul_checked(b.load(src), b.load(src)), b.arg(I128));
+    });
+    add_unsupported(tests, [](FunctionBuilder &b) {
+        Argument src = b.arg(I128);
+        b.store(b.sll_checked(b.load(src), b.load(src)), b.arg(I128));
+    });
+    add_unsupported(tests, [](FunctionBuilder &b) {
+        Argument value = b.arg(I128);
+        Argument count = b.arg(I128);
+        b.store(b.arith_binary(b.load(value), b.load(count), ArithBinaryOp::ShiftLeftLogical), b.arg(I128));
     });
     add_unsupported(tests, [](FunctionBuilder &b) { b.store(b.load_splat(b.arg(I128)), b.arg(I128)); });
 }

@@ -449,6 +449,7 @@ def func(n, src, dst):
                          PASS_ALL})
     i128_bop(add);
     i128_bop(sub);
+    i128_bop(mul);
     i128_bop(xor_);
     i128_bop(and_);
     i128_bop(or_);
@@ -457,6 +458,36 @@ def func(n, src, dst):
     i128_bop(umin);
     i128_bop(max);
     i128_bop(umax);
+
+#define i128_shift(op)                                                         \
+    tests.push_back(Test{[](FunctionBuilder &b) {                              \
+                             Argument value = b.arg(I128);                     \
+                             Argument count = b.arg(I128);                     \
+                             Argument dst = b.arg(I128);                       \
+                             b.store(b.op(b.load(value), b.load(count)), dst); \
+                         },                                                    \
+                         PASS_ALL})
+    i128_shift(sll);
+    i128_shift(srl);
+    i128_shift(sra);
+    i128_shift(rotl);
+    i128_shift(rotr);
+
+    for (int64_t count : {0, 1, 63, 64, 65, 127, 128, 129, -1}) {
+        tests.push_back(Test{[count](FunctionBuilder &b) {
+                                 Argument value = b.arg(I128);
+                                 b.store(b.rotl(b.load(value), b.con(count, I128)), b.arg(I128));
+                             },
+                             PASS_ALL});
+    }
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument value = b.arg(I128);
+                             Argument count = b.arg(I128);
+                             Argument dst = b.arg(I128);
+                             b.cond_store(b.rotr(b.load(value), b.load(count)), b.input_predicate_arg(), dst,
+                                          LoadStoreKind::Unaligned);
+                         },
+                         PASS_ALL});
 
 #define i128_uop(op)                                          \
     tests.push_back(Test{[](FunctionBuilder &b) {             \

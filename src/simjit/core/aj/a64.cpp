@@ -551,8 +551,8 @@ struct CompileState {
 
     // Address of an interleaved pair. The argument's carrier defines the record
     // stride; dtype is the type of each half.
-    aja64::Mem vec_deinterleave_mem(const ArgumentAddress &addr, VecDataType dtype) {
-        return row_address(addr, scalar_dtype_size_log2(args[addr.arg].arg->dtype), 0, dtype.nelems());
+    aja64::Mem vec_deinterleave_mem(const ArgumentAddress &addr, VecDataType dtype, bool change_post_idx = true) {
+        return row_address(addr, scalar_dtype_size_log2(args[addr.arg].arg->dtype), 0, dtype.nelems(), change_post_idx);
     }
 
     aja64::Mem scalar_mem(const ArgumentAddress &addr, ScalarDataType sdtype) {
@@ -2662,7 +2662,7 @@ struct CompileState {
                 if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
                 if (vdtype.size_bytes() != 16)
                     messed_up("Invalid store-interleave of dtype %s", show_vec_dtype(vdtype));
-                aja64::Mem mem = vec_deinterleave_mem(data.dst, vdtype);
+                aja64::Mem mem = vec_deinterleave_mem(data.dst, vdtype, data.cond == nullptr);
                 VecR even = vec_subexpr(data.even);
                 VecR odd = vec_subexpr(data.odd);
                 if (data.cond != nullptr) {
@@ -3908,6 +3908,7 @@ struct CompileState {
         if (step->is(StepKind::StoreInterleave)) {
             if (!step->dtype.is_vec()) { return {}; }
             auto data = step->step_data<StepKind::StoreInterleave>();
+            if (data.cond != nullptr) { return {}; }
             return std::pair{data.dst, step->dtype.as_vec().nelems()};
         }
 

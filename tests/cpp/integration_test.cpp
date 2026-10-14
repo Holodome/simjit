@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <functional>
@@ -503,6 +504,114 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
         jit::call_fn_ptr(fn, count, args);
         SIMJIT_ASSERT(actual_f64 == expected_f64);
         SIMJIT_ASSERT(actual_i128 == expected_i128);
+    });
+
+    tests.emplace_back([] {
+        using U128 = unsigned __int128;
+        constexpr size_t count = 9;
+        constexpr U128 all_ones = ~U128{0};
+        const U128 values[count] = {0,
+                                    1,
+                                    all_ones,
+                                    U128{1} << 63,
+                                    U128{1} << 64,
+                                    U128{1} << 127,
+                                    (U128{0x0123456789abcdefull} << 64) | 0xfedcba9876543210ull,
+                                    (U128{0x8000000000000000ull} << 64) | 7,
+                                    (U128{0x7fffffffffffffffull} << 64) | all_ones};
+        const uint64_t low_counts[count] = {0, 1, 63, 64, 65, 127, 128, 129, uint64_t(-1)};
+        U128 counts[count]{};
+        for (size_t i = 0; i < count; ++i) {
+            counts[i] = (U128{0x9e3779b97f4a7c15ull + i} << 64) | low_counts[i];
+        }
+
+        enum class Op : uint8_t {
+            ShiftLeft,
+            ShiftRightLogical,
+            ShiftRightArith,
+            RotateLeft,
+            RotateRight,
+            Multiply,
+        };
+        auto expected = [](Op op, U128 value, U128 count_value) {
+            size_t shift = (size_t)(count_value & 127);
+            switch (op) {
+            case Op::ShiftLeft: return value << shift;
+            case Op::ShiftRightLogical: return value >> shift;
+            case Op::ShiftRightArith: {
+                if (shift == 0) { return value; }
+                U128 result = value >> shift;
+                if ((value >> 127) != 0) { result |= all_ones << (128 - shift); }
+                return result;
+            }
+            case Op::RotateLeft: return shift == 0 ? value : (value << shift) | (value >> (128 - shift));
+            case Op::RotateRight: return shift == 0 ? value : (value >> shift) | (value << (128 - shift));
+            case Op::Multiply: return value * count_value;
+            }
+            SIMJIT_UNREACHABLE();
+        };
+
+        for (Op op : {Op::ShiftLeft, Op::ShiftRightLogical, Op::ShiftRightArith, Op::RotateLeft, Op::RotateRight,
+                      Op::Multiply}) {
+            MemoryArena arena;
+            Context ctx{arena, "i128_rewrite_execution", CodeTransformations::All, Arch::Native};
+            FunctionBuilder builder{ctx};
+            Argument value_arg = builder.arg(I128);
+            Argument count_arg = builder.arg(I128);
+            Value value = builder.load(value_arg);
+            Value rhs = builder.load(count_arg);
+            Argument dst_arg = builder.arg(I128);
+            switch (op) {
+            case Op::ShiftLeft: builder.store(builder.sll(value, rhs), dst_arg); break;
+            case Op::ShiftRightLogical: builder.store(builder.srl(value, rhs), dst_arg); break;
+            case Op::ShiftRightArith: builder.store(builder.sra(value, rhs), dst_arg); break;
+            case Op::RotateLeft: builder.store(builder.rotl(value, rhs), dst_arg); break;
+            case Op::RotateRight: builder.store(builder.rotr(value, rhs), dst_arg); break;
+            case Op::Multiply: builder.store(builder.mul(value, rhs), dst_arg); break;
+            }
+
+            U128 output[count]{};
+            void *args[] = {const_cast<U128 *>(values), counts, output};
+            llvm_backend::LLVMSession session{Arch::Native, LLVMOptLevel::O1};
+            void *fn = llvm_backend::compile_hir(builder.build(), session, jit::CompilePolicy::Vectorized);
+            jit::call_fn_ptr(fn, count, args);
+            for (size_t i = 0; i < count; ++i) {
+                SIMJIT_ASSERT(output[i] == expected(op, values[i], counts[i]));
+            }
+        }
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_shift_scalar_lowering", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument value_arg = builder.arg(I128);
+        Argument dst_arg = builder.arg(I128);
+        builder.store(builder.sll(builder.load(value_arg), builder.con(13, I128)), dst_arg);
+        mir::Function *fixed = lower_scalar(builder.build());
+        bool saw_fixed_funnel = false;
+        bool fixed_counts_are_valid = true;
+        mir_has_step(fixed, [&](mir::Step *step) {
+            if (!step->is(mir::StepKind::FunnelShift)) { return false; }
+            const auto &data = step->step_data<mir::StepKind::FunnelShift>();
+            saw_fixed_funnel = true;
+            fixed_counts_are_valid &= data.amount->is(mir::StepKind::Const) &&
+                                      data.amount->step_data<mir::StepKind::Const>().as_unsigned() < 64;
+            return false;
+        });
+        SIMJIT_ASSERT(saw_fixed_funnel && fixed_counts_are_valid);
+
+        MemoryArena variable_arena;
+        Context variable_ctx{variable_arena, "i128_shift_scalar_lowering", CodeTransformations::All, Arch::Native};
+        FunctionBuilder variable_builder{variable_ctx};
+        Argument variable_value = variable_builder.arg(I128);
+        Argument variable_count = variable_builder.arg(I128);
+        variable_builder.store(
+            variable_builder.sll(variable_builder.load(variable_value), variable_builder.load(variable_count)),
+            variable_builder.arg(I128));
+        mir::Function *variable = lower_scalar(variable_builder.build());
+        SIMJIT_ASSERT(mir_has_arith_op(variable, ArithBinaryOp::ShiftLeftLogical));
+        SIMJIT_ASSERT(mir_has_step(variable, [](mir::Step *step) { return step->is(mir::StepKind::FunnelShift); }));
     });
 
     tests.emplace_back([] {
@@ -2463,6 +2572,44 @@ static void add_asmjit_a64_interleave_tests(std::vector<IntegrationTest> &tests)
         }
         // The vector loop is unrolled twice: one ld2 per input and unrolled body.
         SIMJIT_ASSERT(ld2_count == 4);
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        ctx.arch = Arch::Arm64_NEON;
+        FunctionBuilder builder{ctx};
+
+        Argument dst = builder.arg_interleaved(I64);
+        Predicate cond = builder.input_predicate_arg();
+        builder.cond_store_interleave(builder.i64(1), builder.i64(2), cond, dst, LoadStoreKind::Unaligned);
+
+        AsmjitCompileResult result{};
+        compile_asmjit(lower_vectorized(builder.build()), AsmjitCompileOptions{false, true, nullptr}, result);
+
+        size_t pair_loads = 0;
+        size_t pair_stores = 0;
+        size_t pos = 0;
+        while (pos < result.asm_code.size()) {
+            size_t end = result.asm_code.find('\n', pos);
+            if (end == std::string::npos) { end = result.asm_code.size(); }
+            std::string_view line{result.asm_code.data() + pos, end - pos};
+            bool is_load = line.substr(0, 4) == "ld2 ";
+            bool is_store = line.substr(0, 4) == "st2 ";
+            if (is_load || is_store) {
+                SIMJIT_ASSERT(line.find("],") == std::string_view::npos);
+                if (is_load) {
+                    ++pair_loads;
+                } else {
+                    ++pair_stores;
+                }
+            }
+            pos = end + 1;
+        }
+        // A conditional pair store reads the old pair and writes the blended pair
+        // through the same address. Neither operation may post-index the cursor.
+        SIMJIT_ASSERT(pair_loads != 0);
+        SIMJIT_ASSERT(pair_stores == pair_loads);
     });
 #else
     (void)tests;
