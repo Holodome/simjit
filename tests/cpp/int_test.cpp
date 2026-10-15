@@ -456,6 +456,33 @@ def func(n, x, y, z):
     for i in range(n):
         x[i] = y[i] * z[i]
         )FOO"},
+    // Mul64* must ignore upper input bits, not merely rely on the builder's widening-multiply peephole.
+    Test{[](FunctionBuilder &b) {
+             Argument dst = b.arg(I64);
+             Value left = b.input_arg(I64);
+             Value right = b.input_arg(I64);
+             b.store(b.arith_binary(left, right, ArithBinaryOp::Mul64ZE), dst);
+         },
+         PASS_ALL,
+         R"FOO(
+def func(n, dst, left, right):
+    for i in range(n):
+        dst[i] = (left[i] & 0xffffffff) * (right[i] & 0xffffffff)
+        )FOO"},
+    Test{[](FunctionBuilder &b) {
+             Argument dst = b.arg(I64);
+             Value left = b.input_arg(I64);
+             Value right = b.input_arg(I64);
+             b.store(b.arith_binary(left, right, ArithBinaryOp::Mul64SE), dst);
+         },
+         PASS_ALL,
+         R"FOO(
+def func(n, dst, left, right):
+    for i in range(n):
+        lhs = ((left[i] & 0xffffffff) ^ 0x80000000) - 0x80000000
+        rhs = ((right[i] & 0xffffffff) ^ 0x80000000) - 0x80000000
+        dst[i] = lhs * rhs
+        )FOO"},
     // div
     Test{[](FunctionBuilder &b) {
              Argument x = b.arg(I8);
@@ -7185,9 +7212,9 @@ def func(n, x, idx, dst):
              Argument w = b.arg(I64);
              Value amount1 = b.load(w, LoadStoreKind::Unaligned);
              Value amount2 = b.add(amount1, b.i64(64));
-             b.store(b.funnel_shift_left(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned),
-                                         amount2),
-                     x);
+             b.store(
+                 b.funnel_shift_left(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned), amount2),
+                 x);
          },
          PASS_ALL},
     Test{[](FunctionBuilder &b) {
@@ -7209,9 +7236,9 @@ def func(n, x, idx, dst):
              Argument w = b.arg(I16);
              Value amount1 = b.load(w, LoadStoreKind::Unaligned);
              Value amount2 = b.xor_(amount1, b.i16(0x1f));
-             b.store(b.funnel_shift_left(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned),
-                                         amount2),
-                     x);
+             b.store(
+                 b.funnel_shift_left(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned), amount2),
+                 x);
          },
          PASS_ALL},
 };

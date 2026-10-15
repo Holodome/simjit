@@ -325,9 +325,9 @@ enum class ArithBinaryOp : uint8_t {
     Add,
     Sub,
     Mul,
-    // Multiply lower 32 bits sign-extended to 64. Input must be already 64 bits. This compiles down to VPMULDQ.
+    // Multiply the low 32 bits of each operand after sign-extending them to 64. This compiles down to VPMULDQ.
     Mul64SE,
-    // Multiply lower 32 bits zero-extended to 64. Input must be already 64 bits. This compiles down to VPMULUDQ.
+    // Multiply the low 32 bits of each operand after zero-extending them to 64. This compiles down to VPMULUDQ.
     Mul64ZE,
     Div,
     UDiv,

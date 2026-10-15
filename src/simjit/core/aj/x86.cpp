@@ -1772,9 +1772,28 @@ struct CompileState {
         switch (op) {
         case ArithBinaryOp::Add: cc.add(left, right); break;
         case ArithBinaryOp::Sub: cc.sub(left, right); break;
-        case ArithBinaryOp::Mul:
-        case ArithBinaryOp::Mul64SE:
-        case ArithBinaryOp::Mul64ZE: cc.imul(left, right); break;
+        case ArithBinaryOp::Mul: cc.imul(left, right); break;
+        case ArithBinaryOp::Mul64SE: {
+            SIMJIT_ASSERT(sdtype == ScalarDataType::I64);
+            GpR left_extended = cc.new_gp64();
+            GpR right_extended = cc.new_gp64();
+            cc.movsxd(left_extended, left.r32());
+            cc.movsxd(right_extended, right.r32());
+            cc.imul(left_extended, right_extended);
+            cc.mov(left, left_extended);
+            break;
+        }
+        case ArithBinaryOp::Mul64ZE: {
+            SIMJIT_ASSERT(sdtype == ScalarDataType::I64);
+            GpR left_extended = cc.new_gp64();
+            GpR right_extended = cc.new_gp64();
+            // Writing a 32-bit register zero-extends it to 64 bits.
+            cc.mov(left_extended.r32(), left.r32());
+            cc.mov(right_extended.r32(), right.r32());
+            cc.imul(left_extended, right_extended);
+            cc.mov(left, left_extended);
+            break;
+        }
         case ArithBinaryOp::Div: {
             GpR tmp = create_int_reg(sdtype);
             // Asmjit uses unconventional syntax for idiv instruction (and cwd for that matter)

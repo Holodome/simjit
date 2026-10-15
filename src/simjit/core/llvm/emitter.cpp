@@ -290,12 +290,25 @@ struct LLVMBuilder {
         SIMJIT_UNREACHABLE();
     }
     V *arith_binary(ScalarDataType dtype, ArithBinaryOp op, V *left, V *right) {
+        auto widen_mul64_operand = [&](V *value, bool is_unsigned) -> V * {
+            Ty *narrow_type = nullptr;
+            if (value->getType()->isVectorTy()) {
+                auto *vector_type = llvm::cast<llvm::VectorType>(value->getType());
+                narrow_type = llvm::VectorType::get(b->getInt32Ty(), vector_type->getElementCount());
+            } else {
+                narrow_type = b->getInt32Ty();
+            }
+            V *narrow = b->CreateTrunc(value, narrow_type);
+            return is_unsigned ? b->CreateZExt(narrow, value->getType()) : b->CreateSExt(narrow, value->getType());
+        };
         switch (op) {
         case ArithBinaryOp::Add: return b->CreateAdd(left, right);
         case ArithBinaryOp::Sub: return b->CreateSub(left, right);
-        case ArithBinaryOp::Mul:
+        case ArithBinaryOp::Mul: return b->CreateMul(left, right);
         case ArithBinaryOp::Mul64SE:
-        case ArithBinaryOp::Mul64ZE: return b->CreateMul(left, right);
+            return b->CreateMul(widen_mul64_operand(left, false), widen_mul64_operand(right, false));
+        case ArithBinaryOp::Mul64ZE:
+            return b->CreateMul(widen_mul64_operand(left, true), widen_mul64_operand(right, true));
         case ArithBinaryOp::Div: return b->CreateSDiv(left, right);
         case ArithBinaryOp::UDiv: return b->CreateUDiv(left, right);
         case ArithBinaryOp::Mod: return b->CreateSRem(left, right);

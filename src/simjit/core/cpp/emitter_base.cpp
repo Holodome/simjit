@@ -107,13 +107,14 @@ std::string format_scalar_arith_binary_expr(ScalarDataType result_dtype, ArithBi
     case ArithBinaryOp::Add:
     case ArithBinaryOp::Sub:
     case ArithBinaryOp::Mul:
-    case ArithBinaryOp::Mul64SE:
-    case ArithBinaryOp::Mul64ZE:
     case ArithBinaryOp::Div:
     case ArithBinaryOp::Mod:
     case ArithBinaryOp::And:
     case ArithBinaryOp::Or:
     case ArithBinaryOp::Xor: return format("%s %s %s", left, arith_binary_op_to_cpp(op), right);
+    case ArithBinaryOp::Mul64SE: return format("(int64_t)(int32_t)%s * (int64_t)(int32_t)%s", left, right);
+    case ArithBinaryOp::Mul64ZE:
+        return format("bit_cast<int64_t>((uint64_t)(uint32_t)%s * (uint64_t)(uint32_t)%s)", left, right);
     case ArithBinaryOp::UDiv:
         return format("(%s)%s / (%s)%s", scalar_dtype_to_cpp_unsigned(left_dtype), left,
                       scalar_dtype_to_cpp_unsigned(left_dtype), right);
@@ -856,13 +857,13 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
             if (data.kind == FunnelShiftKind::Left) {
                 return cpp_var_decl(step) +
                        format("(%s & %zu) == 0 ? %s : (%s)(((%s)%s << (%s & %zu)) | ((%s)%s >> (%zu - (%s & %zu))))",
-                              amount, bits - 1, left, scalar_dtype_to_cpp(sdtype), utype, left, amount, bits - 1, utype, right,
-                              bits, amount, bits - 1);
+                              amount, bits - 1, left, scalar_dtype_to_cpp(sdtype), utype, left, amount, bits - 1, utype,
+                              right, bits, amount, bits - 1);
             }
             return cpp_var_decl(step) +
                    format("(%s & %zu) == 0 ? %s : (%s)(((%s)%s >> (%s & %zu)) | ((%s)%s << (%zu - (%s & %zu))))",
-                          amount, bits - 1, right, scalar_dtype_to_cpp(sdtype), utype, right, amount, bits - 1, utype, left,
-                          bits, amount, bits - 1);
+                          amount, bits - 1, right, scalar_dtype_to_cpp(sdtype), utype, right, amount, bits - 1, utype,
+                          left, bits, amount, bits - 1);
         }
         SIMJIT_MATCH (StepKind::FMA) {
             const char *function = sdtype == ScalarDataType::F32 ? "fmaf" : "fma";
