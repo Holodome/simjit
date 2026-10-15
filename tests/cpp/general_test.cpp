@@ -3308,7 +3308,7 @@ std::vector<Test> general_tests{
     {[](FunctionBuilder &b) {
         // Deep tree of logical operations with arithmetic leaves
         Value a = b.input_arg(I32);
-        Value b_arg = b.input_arg(I32);
+        Value b_arg = b.input_arg(I32); 
         Value c = b.input_arg(I32);
         Value d = b.input_arg(I32);
         Value e = b.input_arg(I32);
@@ -4098,6 +4098,76 @@ std::vector<Test> general_tests{
         b.sum_if(b.sext(selected, I64), cond, b.arg(I64));
         b.countif(cond, b.arg(I64));
         b.cond_store(b.bitcast(b.bitcast(base_f64, I64), F64), cond, b.arg(F64));
+    }},
+
+    // Complex I128 arithmetic expressions
+    {[](FunctionBuilder &b) {
+        Value a = b.input_arg(I128);
+        Value b_arg = b.input_arg(I128);
+        Value c = b.input_arg(I128);
+        Value d = b.input_arg(I128);
+
+        Value expr1 = b.add(a, b_arg);
+        Value expr2 = b.sub(c, d);
+        Value expr3 = b.mul(expr1, expr2);
+
+        Value expr4 = b.add(a, c);
+        Value expr5 = b.add(b_arg, b.con(7, I128));
+        Value expr6 = b.sub(expr4, expr5);
+
+        Value temp1 = b.add(expr3, expr6);
+        Value temp2 = b.sub(b.mul(expr1, expr5), expr2);
+        Value temp3 = b.negate(temp2);
+
+        Value temp4 = b.mul(temp1, b.con(13, I128));
+        Value temp5 = b.add(temp3, b.con(987654321, I128));
+        Value result_val = b.sub(temp4, temp5);
+
+        Argument result = b.arg(I128);
+        b.store(result_val, result);
+    }},
+
+    // Complex I128 arithmetic and logical operations
+    {[](FunctionBuilder &b) {
+        Value a = b.input_arg(I128);
+        Value b_arg = b.input_arg(I128);
+        Value c = b.input_arg(I128);
+        Value d = b.input_arg(I128);
+        Value e = b.input_arg(I128);
+
+        Value sum = b.add(a, b_arg);
+        Value diff = b.sub(c, d);
+        Value product = b.mul(sum, diff);
+        Value shifted_left = b.sll(a, b.con(17, I128));
+        Value shifted_right = b.sra(c, b.con(9, I128));
+
+        Predicate cmp1 = b.cmp_gt(sum, diff);
+        Predicate cmp2 = b.cmp_ult(a, b_arg);
+        Predicate cmp3 = b.cmp_eq(product, b.con(0, I128));
+        Predicate cmp4 = b.cmp_ge(c, d);
+        Predicate cmp5 = b.cmp_uge(e, a);
+
+        Predicate and1 = b.and_(cmp1, cmp2);
+        Predicate or1 = b.or_(cmp3, cmp4);
+        Predicate xor1 = b.xor_(and1, or1);
+        Predicate andnot1 = b.andnot(cmp5, xor1);
+        Predicate final_cond = b.xnor(andnot1, cmp1);
+
+        Value expr1 = b.add(product, shifted_left);
+        Value expr2 = b.sub(shifted_right, b.mul(b_arg, e));
+        Value expr3 = b.xor_(a, c);
+        Value expr4 = b.and_(b_arg, d);
+
+        Value temp1 = b.select(cmp1, expr1, expr2);
+        Value temp2 = b.select(cmp2, expr3, expr4);
+        Value temp3 = b.select(final_cond, temp1, temp2);
+
+        Value temp4 = b.add(temp3, e);
+        Value temp5 = b.sub(b.mul(temp4, b.con(3, I128)), b.con(42, I128));
+        Value result_val = b.select(cmp3, b.sub(b.con(0, I128), temp5), temp5);
+
+        Argument result = b.arg(I128);
+        b.store(result_val, result);
     }}
     //
 };
