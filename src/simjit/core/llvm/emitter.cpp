@@ -727,7 +727,10 @@ struct LLVMBuilder {
                 b->CreateStore(arg, info.data_ptr);
                 return nullptr;
             }
-            SIMJIT_MATCH (StepKind::StoreSum128) {
+            SIMJIT_MATCH (StepKind::StoreI128Agg) {
+                if (data.op != ArithBinaryOp::Add) {
+                    messed_up("LLVM i128 aggregate store does not support %s", show_arith_binary_op(data.op));
+                }
                 V *high = step_to_llvm(data.hi_combined);
                 V *combined = b->CreateShl(b->CreateZExt(high, b->getInt128Ty()), 64);
                 for (Step *lo_step : data.low_steps) {
@@ -887,7 +890,7 @@ struct LLVMBuilder {
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
-        case StepKind::StoreSum128:
+        case StepKind::StoreI128Agg:
         case StepKind::ConstDiv:
             SIMJIT_ASSERT(0);
             messed_up("Unexpected instruction %s", show_step_kind(step->kind));

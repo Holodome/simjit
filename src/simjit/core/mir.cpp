@@ -191,7 +191,7 @@ enum class AccKind : uint8_t {
     Pack,
     Overflow,
     OverflowMul,
-    Sum128
+    I128
 };
 
 struct AccRemap {
@@ -202,7 +202,7 @@ class AccGroup {
 public:
     AccGroup(AccKind k, ScalarDataType ty, AccIdx hir, const hir::Step *agg, ArgumentIdx dst) noexcept
         : kind(k), dst_dtype(ty), hir_idx(hir), agg_expr(agg), dst_arg(dst),
-          slots_per_copy(kind == AccKind::Sum128 ? 2 : 1) {}
+          slots_per_copy(kind == AccKind::I128 ? 2 : 1) {}
 
     // Fixed group description. These values are established with the HIR group and never change during lowering.
     const AccKind kind;
@@ -295,7 +295,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::FunnelShift: return "funnel-shift";
     case StepKind::VecPermute: return "vec-permute";
     case StepKind::ScalarPermute: return "scalar-permute";
-    case StepKind::StoreSum128: return "store-sum128";
+    case StepKind::StoreI128Agg: return "store-i128-agg";
     case StepKind::CondScatter: return "cond-scatter";
     case StepKind::FMA: return "fma";
     case StepKind::BitCast: return "bitcast";
@@ -316,7 +316,7 @@ constexpr bool is_root_step(StepKind kind) noexcept {
     case StepKind::Scatter:
     case StepKind::Pack:
     case StepKind::CondStore:
-    case StepKind::StoreSum128:
+    case StepKind::StoreI128Agg:
     case StepKind::CondScatter:
     case StepKind::StoreInterleave: return true;
     default: break;
@@ -465,7 +465,7 @@ struct ExprShowState {
             SIMJIT_MATCH (StepKind::ScalarPermute)
                 wr("arg=%%%u permute_idxs=%llx is_bit=%s", ref(data.arg), (unsigned long long)data.permute,
                    data.is_bit ? "true" : "false");
-            SIMJIT_MATCH (StepKind::StoreSum128) wr("dst=%zu", data.dst);
+            SIMJIT_MATCH (StepKind::StoreI128Agg) wr("op=%s dst=%zu", show_arith_binary_op(data.op), data.dst);
             SIMJIT_MATCH (StepKind::FMA)
                 wr("kind=%s x1=%%%u x2=%%%u x3=%%%u", show_fma_kind(data.kind), ref(data.x1), ref(data.x2),
                    ref(data.x3));
@@ -727,7 +727,7 @@ private:
         switch (node->step->kind) {
         case hir::StepKind::AccArithBinary:
         case hir::StepKind::AccPredicateBinary:
-        case hir::StepKind::AccSum128:
+        case hir::StepKind::AccI128:
         case hir::StepKind::Countif: return true;
         case hir::StepKind::CheckedOp: return true;
         default: return false;
@@ -1340,36 +1340,49 @@ struct MirConstructState {
         epilogue_roots.push_back(sm.agg_result({result, arg.idx}, dt));
     }
 
+    ArithBinaryOp i128_agg_op(const AccGroup &group) {
+        SIMJIT_ASSERT(group.kind == AccKind::I128);
+        return group.agg_expr->step_data<hir::StepKind::AccI128>().op;
+    }
+
+    void gen_i128_agg_result(const AccGroup &group) {
+        switch (i128_agg_op(group)) {
+        case ArithBinaryOp::Add: break;
+        default: messed_up("i128 aggregate result does not support %s", show_arith_binary_op(i128_agg_op(group)));
+        }
+
+        Step *hi = nullptr;
+        if (group.main_count() != 0) {
+            VecDataType vdtype = vect_result->acc_dtypes[group.hir_idx].as_vec();
+            hi = fold_arith_accs(group, group.main_count(), 1, vdtype, ArithBinaryOp::Add);
+            hi = sm.vec_reduce({hi, ArithBinaryOp::Add}, ScalarDataType::I64);
+        }
+        Step *tmp = sm.acc_load(group.remainder(1), ScalarDataType::I64);
+        if (hi != nullptr) {
+            hi = sm.arith_bin({hi, tmp, ArithBinaryOp::Add}, ScalarDataType::I64);
+        } else {
+            hi = tmp;
+        }
+        std::vector<Step *> all_low{};
+        for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
+            Step *s = sm.acc_load(group.main(copy, 0), vect_result->acc_dtypes[group.hir_idx]);
+            all_low.push_back(s);
+        }
+        Step *s = sm.acc_load(group.remainder(0), ScalarDataType::I64);
+        all_low.push_back(s);
+        MemoryArena *arena = hir->ctx->arena;
+        ArenaArray<Step *> all_low_arr = arena->copy_array<Step *>(all_low);
+        Step *combined = sm.i128_agg({ArithBinaryOp::Add, all_low_arr, hi, group.dst_arg}, ScalarDataType::I128);
+        epilogue_roots.push_back(combined);
+    }
+
     // This functions is used to construct code to output aggregate results. Since we might have several instances that
     // belong to one aggregate due to unrolling and remaineder code, we 'collapse' them first.
     void gen_agg_results() {
         for (const AccGroup &group : acc_groups) {
             const hir::Step *agg_expr = group.agg_expr;
-            if (group.kind == AccKind::Sum128) {
-                Step *hi = nullptr;
-                if (group.main_count() != 0) {
-                    VecDataType vdtype = vect_result->acc_dtypes[group.hir_idx].as_vec();
-                    hi = fold_arith_accs(group, group.main_count(), 1, vdtype, ArithBinaryOp::Add);
-                    hi = sm.vec_reduce({hi, ArithBinaryOp::Add}, ScalarDataType::I64);
-                }
-                Step *tmp = sm.acc_load(group.remainder(1), ScalarDataType::I64);
-                if (hi != nullptr) {
-                    hi = sm.arith_bin({hi, tmp, ArithBinaryOp::Add}, ScalarDataType::I64);
-                } else {
-                    hi = tmp;
-                }
-                std::vector<Step *> all_low{};
-                for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
-                    Step *s = sm.acc_load(group.main(copy, 0), vect_result->acc_dtypes[group.hir_idx]);
-                    all_low.push_back(s);
-                }
-                Step *s = sm.acc_load(group.remainder(0), ScalarDataType::I64);
-                all_low.push_back(s);
-                MemoryArena *arena = hir->ctx->arena;
-                ArenaArray<Step *> all_low_arr = arena->copy_array<Step *>(all_low);
-
-                Step *combined = sm.sum128({all_low_arr, hi, group.dst_arg}, ScalarDataType::I128);
-                epilogue_roots.push_back(combined);
+            if (group.kind == AccKind::I128) {
+                gen_i128_agg_result(group);
             } else if (agg_expr == nullptr) {
             } else if (agg_expr->is(hir::StepKind::AccArithBinary)) {
                 ArithBinaryOp op = agg_expr->step_data<hir::StepKind::AccArithBinary>().op;
@@ -1500,10 +1513,49 @@ struct MirConstructState {
         return step;
     }
 
+    struct I128AggState {
+        Step *low;
+        Step *high;
+    };
+
+    I128AggState i128_agg_init(ArithBinaryOp op, DataType dtype) {
+        switch (op) {
+        case ArithBinaryOp::Add: return {make_const(0, dtype), make_const(0, dtype)};
+        default: messed_up("i128 aggregate initialization does not support %s", show_arith_binary_op(op));
+        }
+        SIMJIT_UNREACHABLE();
+    }
+
+    I128AggState i128_agg_transition(ArithBinaryOp op, I128AggState acc, Step *arg, Step *cond, DataType dtype) {
+        switch (op) {
+        case ArithBinaryOp::Add: {
+            auto bin = [&](Step *left, Step *right, ArithBinaryOp bin_op) {
+                if (dtype.is_vec()) { return sm.arith_bin({left, right, bin_op}, dtype.as_vec()); }
+                return sm.arith_bin({left, right, bin_op}, dtype.as_scalar());
+            };
+            Step *hi = bin(arg, make_const(63, dtype), ArithBinaryOp::ShiftRightArith);
+            Step *low = bin(arg, acc.low, ArithBinaryOp::Add);
+            hi = bin(hi, acc.high, ArithBinaryOp::Add);
+            Step *overflow = dtype.is_vec()
+                                 ? sm.cmp({low, acc.low, CmpOp::Less, true}, dtype.as_vec().mask())
+                                 : sm.cmp({low, acc.low, CmpOp::Less, true}, ScalarDataType::I1);
+            Step *added = bin(hi, make_const(1, dtype), ArithBinaryOp::Add);
+            hi = sm.select({overflow, added, hi}, dtype);
+            if (cond != nullptr) {
+                low = sm.select({cond, low, acc.low}, dtype);
+                hi = sm.select({cond, hi, acc.high}, dtype);
+            }
+            return {low, hi};
+        }
+        default: messed_up("i128 aggregate transition does not support %s", show_arith_binary_op(op));
+        }
+        SIMJIT_UNREACHABLE();
+    }
+
     Step *acc_init_value(AccKind kind, DataType dtype, const hir::Step *step) {
         switch (kind) {
         case AccKind::Agg: return agg_acc_init_value(dtype, step);
-        case AccKind::Sum128:
+        case AccKind::I128: messed_up("i128 aggregate initialization must use i128_agg_init");
         case AccKind::Overflow:
         case AccKind::Pack: return make_const(0, dtype);
         case AccKind::OverflowMul: {
@@ -1527,9 +1579,23 @@ struct MirConstructState {
 
     void gen_acc_inits() {
         for (const AccGroup &group : acc_groups) {
-            ScalarDataType remainder_dtype = group.kind == AccKind::Sum128           ? ScalarDataType::I64
-                                             : group.dst_dtype == ScalarDataType::I1 ? ScalarDataType::I8
-                                                                                     : group.dst_dtype;
+            if (group.kind == AccKind::I128) {
+                ArithBinaryOp op = i128_agg_op(group);
+                I128AggState remainder_init = i128_agg_init(op, ScalarDataType::I64);
+                prologue_roots.push_back(sm.acc_store({group.remainder(0), remainder_init.low}, ScalarDataType::I64));
+                prologue_roots.push_back(sm.acc_store({group.remainder(1), remainder_init.high}, ScalarDataType::I64));
+                if (group.main_count() != 0) {
+                    DataType dtype = vect_result->acc_dtypes[group.hir_idx];
+                    I128AggState init = i128_agg_init(op, dtype);
+                    for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
+                        prologue_roots.push_back(sm.acc_store({group.main(copy, 0), init.low}, dtype));
+                        prologue_roots.push_back(sm.acc_store({group.main(copy, 1), init.high}, dtype));
+                    }
+                }
+                continue;
+            }
+            ScalarDataType remainder_dtype =
+                group.dst_dtype == ScalarDataType::I1 ? ScalarDataType::I8 : group.dst_dtype;
             Step *remainder_init = acc_init_value(group.kind, remainder_dtype, group.agg_expr);
             for (uint32_t slot = 0; slot < group.slots_per_copy; ++slot) {
                 prologue_roots.push_back(sm.acc_store({group.remainder(slot), remainder_init}, remainder_dtype));
@@ -2346,21 +2412,15 @@ struct MirConstructState {
                 main_loop_roots.push_back(sm.pack({data.dst, arg, cond, acc}, node->dtype));
                 return;
             }
-            SIMJIT_MATCH (hir::StepKind::AccSum128) {
+            SIMJIT_MATCH (hir::StepKind::AccI128) {
                 VecDataType vdtype = node->dtype.as_vec();
-                MaskDataType mdtype = vdtype.mask();
                 auto [low_acc, high_acc] = acc_groups[data.acc].alloc_main_pair(ctx.remap);
-                Step *acc_lo = sm.acc_load(low_acc, vdtype);
-                Step *acc_hi = sm.acc_load(high_acc, vdtype);
-                Step *lo = ref_arg();
-                Step *hi = sm.arith_bin({lo, make_const(63, vdtype), ArithBinaryOp::ShiftRightArith}, vdtype);
-                Step *new_lo = sm.arith_bin({lo, acc_lo, ArithBinaryOp::Add}, vdtype);
-                Step *new_hi = sm.arith_bin({hi, acc_hi, ArithBinaryOp::Add}, vdtype);
-                Step *overflow = sm.cmp({new_lo, acc_lo, CmpOp::Less, true}, mdtype);
-                Step *added = sm.arith_bin({new_hi, make_const(1, vdtype), ArithBinaryOp::Add}, vdtype);
-                new_hi = sm.select({overflow, added, new_hi}, vdtype);
-                main_loop_roots.push_back(sm.acc_store({high_acc, new_hi}, vdtype));
-                main_loop_roots.push_back(sm.acc_store({low_acc, new_lo}, vdtype));
+                I128AggState acc{sm.acc_load(low_acc, vdtype), sm.acc_load(high_acc, vdtype)};
+                Step *arg = data.cond == nullptr ? ref_arg() : ref_left();
+                I128AggState updated = i128_agg_transition(data.op, acc, arg,
+                                                            data.cond == nullptr ? nullptr : ref_right(), vdtype);
+                main_loop_roots.push_back(sm.acc_store({high_acc, updated.high}, vdtype));
+                main_loop_roots.push_back(sm.acc_store({low_acc, updated.low}, vdtype));
                 return;
             }
         case hir::StepKind::Const:
@@ -2405,7 +2465,7 @@ struct MirConstructState {
         case hir::StepKind::Scatter:
         case hir::StepKind::AccArithBinary:
         case hir::StepKind::AccPredicateBinary:
-        case hir::StepKind::AccSum128:
+        case hir::StepKind::AccI128:
         case hir::StepKind::Countif:
         case hir::StepKind::StoreInterleave:
             SIMJIT_UNREACHABLE();
@@ -3000,22 +3060,14 @@ struct MirConstructState {
                 Step *updated = sm.arith_bin({acc, count, data.op}, step->dtype);
                 return remainder_roots.push_back(sm.acc_store({acc_idx, updated}, step->dtype));
             }
-            SIMJIT_MATCH (hir::StepKind::AccSum128) {
+            SIMJIT_MATCH (hir::StepKind::AccI128) {
                 ScalarDataType dtype = ScalarDataType::I64;
                 auto [low_acc, high_acc] = acc_groups[data.acc].alloc_remainder_pair();
-                // TODO: This can be computed more efficiently using add with carry, right now it does the same as
-                // vector version
-                Step *acc_lo = sm.acc_load(low_acc, dtype);
-                Step *acc_hi = sm.acc_load(high_acc, dtype);
-                Step *lo = ref(data.arg);
-                Step *hi = sm.arith_bin({lo, make_const(63, dtype), ArithBinaryOp::ShiftRightArith}, dtype);
-                Step *new_lo = sm.arith_bin({lo, acc_lo, ArithBinaryOp::Add}, dtype);
-                Step *new_hi = sm.arith_bin({hi, acc_hi, ArithBinaryOp::Add}, dtype);
-                Step *overflow = sm.cmp({new_lo, acc_lo, CmpOp::Less, true}, ScalarDataType::I1);
-                Step *added = sm.arith_bin({new_hi, make_const(1, dtype), ArithBinaryOp::Add}, dtype);
-                new_hi = sm.select({overflow, added, new_hi}, dtype);
-                Step *store_lo = sm.acc_store({low_acc, new_lo}, dtype);
-                Step *store_hi = sm.acc_store({high_acc, new_hi}, dtype);
+                I128AggState acc{sm.acc_load(low_acc, dtype), sm.acc_load(high_acc, dtype)};
+                I128AggState updated = i128_agg_transition(data.op, acc, ref(data.arg),
+                                                            data.cond == nullptr ? nullptr : ref(data.cond), dtype);
+                Step *store_lo = sm.acc_store({low_acc, updated.low}, dtype);
+                Step *store_hi = sm.acc_store({high_acc, updated.high}, dtype);
                 // Note the order of operations - high part goes first. This is needed to process safety check
                 // correctly, otherwise we can't guarantee that accumulator will not be updated before it is read
                 remainder_roots.push_back(store_hi);
@@ -3063,7 +3115,7 @@ struct MirConstructState {
         case hir::StepKind::Scatter:
         case hir::StepKind::AccArithBinary:
         case hir::StepKind::AccPredicateBinary:
-        case hir::StepKind::AccSum128:
+        case hir::StepKind::AccI128:
         case hir::StepKind::Countif:
         case hir::StepKind::StoreInterleave:
             SIMJIT_UNREACHABLE();
@@ -3515,7 +3567,7 @@ struct MirConstructState {
     void create_acc_groups() {
         acc_groups.reserve(hir->accs.size());
         for (const hir::Accumulator &acc : hir->accs) {
-            AccKind kind = acc.agg_expr->dtype == ScalarDataType::I128 ? AccKind::Sum128
+            AccKind kind = acc.agg_expr->is(hir::StepKind::AccI128) ? AccKind::I128
                            : acc.agg_expr->kind == hir::StepKind::Pack ? AccKind::Pack
                                                                        : AccKind::Agg;
             acc_groups.emplace_back(kind, acc.dtype, acc.idx, acc.agg_expr, acc.dst_arg);

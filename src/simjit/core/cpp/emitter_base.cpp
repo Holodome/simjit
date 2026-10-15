@@ -425,7 +425,7 @@ CppEmitterBase::StepNameKind CppEmitterBase::classify_step_name(const Step *step
     case StepKind::Pack:
     case StepKind::AccStore:
     case StepKind::AggResult:
-    case StepKind::StoreSum128: return StepNameKind::None;
+    case StepKind::StoreI128Agg: return StepNameKind::None;
     default: return StepNameKind::Temp;
     }
 }
@@ -1029,7 +1029,7 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
             return format("*arg%zu = %s", data.dst, arg.c_str());
         }
 
-        SIMJIT_MATCH (StepKind::StoreSum128) { return store_sum128_to_cpp(data); }
+        SIMJIT_MATCH (StepKind::StoreI128Agg) { return store_i128_agg_to_cpp(data); }
         SIMJIT_MATCH (StepKind::PredicateNot) { return cpp_var_decl(step) + format("!%s", show_scalar_operand(data)); }
         SIMJIT_MATCH (StepKind::Select) {
             if (auto expr = scalar_select_bool_expr(data)) { return cpp_var_decl(step) + *expr; }
@@ -1118,7 +1118,9 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
 
 std::string CppEmitterBase::step_to_cpp(const Step *step, const MaskPushdownInfo *mask_pushdown) {
     if (mask_pushdown != nullptr) { return backend_step_to_cpp(step, mask_pushdown); }
-    if (step->kind == StepKind::StoreSum128) { return store_sum128_to_cpp(step->step_data<StepKind::StoreSum128>()); }
+    if (step->kind == StepKind::StoreI128Agg) {
+        return store_i128_agg_to_cpp(step->step_data<StepKind::StoreI128Agg>());
+    }
     if (step->dtype.is_scalar() && is_scalar_step(step->kind)) { return backend_step_to_cpp(step, nullptr); }
     return backend_step_to_cpp(step, nullptr);
 }

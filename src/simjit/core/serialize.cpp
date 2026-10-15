@@ -266,7 +266,7 @@ template <> struct hl::from_list<simjit::hir::StepKind> {
         if (s == "index") return simjit::hir::StepKind::Index;
         if (s == "scatter") return simjit::hir::StepKind::Scatter;
         if (s == "pack") return simjit::hir::StepKind::Pack;
-        if (s == "sum128") return simjit::hir::StepKind::AccSum128;
+        if (s == "sum128") return simjit::hir::StepKind::AccI128;
         if (s == "permute") return simjit::hir::StepKind::Permute;
         if (s == "bitcast") return simjit::hir::StepKind::BitCast;
         if (s == "fpclass") return simjit::hir::StepKind::Fpclass;
@@ -499,7 +499,7 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             payload = hl::list(data.op, ref(data.arg), serialize_acc_ref(data.acc));
             break;
         }
-        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccSum128) {
+        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccI128) {
             payload = hl::list_dot(data.op, ref(data.arg), serialize_acc_ref(data.acc),
                                    data.cond ? hl::list(ref(data.cond)) : nullptr);
             break;
@@ -797,7 +797,7 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         return {};
     }
     case StepKind::AccArithBinary:
-    case StepKind::AccSum128: {
+    case StepKind::AccI128: {
         auto [op, arg, acc, cond] = bind_step(hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap, hl::maybe);
         if (cond) {
             builder.cond_arith_agg(ref_value(arg), ref_predicate(cond.value()), op, acc_arg_map.at(parse_acc_ref(acc)));

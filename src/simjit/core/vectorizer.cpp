@@ -304,7 +304,7 @@ static bool is_aggregate_step(const Step *step) noexcept {
     switch (step->kind) {
     case StepKind::AccArithBinary:
     case StepKind::AccPredicateBinary:
-    case StepKind::AccSum128:
+    case StepKind::AccI128:
     case StepKind::Countif: return true;
     default: return false;
     }
@@ -644,7 +644,7 @@ struct AlgebraicVectorizer {
                     break;
                 case StepKind::AccPredicateBinary: accumulate(graph_unify_carriers(node, node->arg())); break;
                 case StepKind::AccArithBinary:
-                case StepKind::AccSum128:
+                case StepKind::AccI128:
                     accumulate(graph_unify_carriers(node, node->children[0]));
                     if (node->child_count == 2) {
                         accumulate(graph_unify_carriers(node->children[0], node->children[1]));
@@ -1477,9 +1477,9 @@ struct AlgebraicVectorizer {
             acc_dtypes[data.acc] = node->dtype;
             break;
         }
-        case StepKind::AccSum128: {
-            auto data = step->step_data<StepKind::AccSum128>();
-            node->dtype = node->arg()->dtype;
+        case StepKind::AccI128: {
+            auto data = step->step_data<StepKind::AccI128>();
+            node->dtype = node->children[0]->dtype;
             acc_dtypes[data.acc] = node->dtype;
             break;
         }
@@ -1620,7 +1620,7 @@ struct AlgebraicVectorizer {
             }
             break;
         case StepKind::AccArithBinary:
-        case StepKind::AccSum128:
+        case StepKind::AccI128:
             if (node->child_count == 2 && !graph_validate_same_width(node, node->left(), node->right())) {
                 return false;
             }

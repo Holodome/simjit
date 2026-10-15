@@ -2028,7 +2028,10 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
                                            show(data.arg), (unsigned)std::underlying_type_t<FpClass>(data.flags));
     }
 
-    std::string store_sum128_to_cpp(const StoreSum128Data &data) override {
+    std::string store_i128_agg_to_cpp(const StoreI128AggData &data) override {
+        if (data.op != ArithBinaryOp::Add) {
+            messed_up("C++ i128 aggregate store does not support %s", show_arith_binary_op(data.op));
+        }
         std::string result = "{\n"
                              "uint64_t sum128_low = 0;\n"
                              "uint64_t sum128_carry = 0;\n"
@@ -2082,7 +2085,7 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
         if (mask_pushdown != nullptr) {
             messed_up("ARM C++ emitter does not support mask pushdown for %s", show_step_kind(step->kind));
         }
-        if (step->kind != StepKind::StoreSum128 && step->dtype.is_scalar() && is_scalar_step(step->kind)) {
+        if (step->kind != StepKind::StoreI128Agg && step->dtype.is_scalar() && is_scalar_step(step->kind)) {
             if (step->is(StepKind::ArithUnary)) {
                 const auto &data = step->step_data<StepKind::ArithUnary>();
                 if (auto code = scalar_refined_reciprocal_to_cpp(step, data)) { return *code; }
@@ -2319,7 +2322,7 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             return float_narrow_combine_to_cpp(step, step->step_data<StepKind::VecFloatNarrowCombine>());
         case StepKind::VecPermute: return vec_permute_to_cpp(step, step->step_data<StepKind::VecPermute>());
         case StepKind::Fpclass: return fpclass_to_cpp(step, step->step_data<StepKind::Fpclass>());
-        case StepKind::StoreSum128: return store_sum128_to_cpp(step->step_data<StepKind::StoreSum128>());
+        case StepKind::StoreI128Agg: return store_i128_agg_to_cpp(step->step_data<StepKind::StoreI128Agg>());
         }
         SIMJIT_UNREACHABLE();
     }

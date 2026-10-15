@@ -507,6 +507,26 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
     });
 
     tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_aggregate_shape", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        builder.sum_if(builder.input_arg(I64), builder.input_predicate_arg(), builder.arg(I128));
+
+        hir::Function *hir = builder.build();
+        SIMJIT_ASSERT(hir->accs.size() == 1);
+        SIMJIT_ASSERT(hir->accs[0].agg_expr->is(hir::StepKind::AccI128));
+        SIMJIT_ASSERT(hir->accs[0].agg_expr->step_data<hir::StepKind::AccI128>().op == ArithBinaryOp::Add);
+
+        mir::Function *mir = lower_scalar(hir);
+        SIMJIT_ASSERT(mir->accs.group_offsets.size() == 2);
+        SIMJIT_ASSERT(mir->accs.group_offsets[1] == 2);
+        SIMJIT_ASSERT(mir_has_step(mir, [](mir::Step *step) {
+            return step->is(mir::StepKind::StoreI128Agg) &&
+                   step->step_data<mir::StepKind::StoreI128Agg>().op == ArithBinaryOp::Add;
+        }));
+    });
+
+    tests.emplace_back([] {
         using U128 = unsigned __int128;
         constexpr size_t count = 9;
         constexpr U128 all_ones = ~U128{0};

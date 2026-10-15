@@ -171,7 +171,7 @@ enum class StepKind : uint8_t {
     // Accumulator
     AccArithBinary,
     AccPredicateBinary,
-    AccSum128,
+    AccI128,
     Countif
 };
 
@@ -243,7 +243,7 @@ private:
     X(index, Index, index)                                    \
     X(scatter, Scatter, scatter)                              \
     X(pack, Pack, pack)                                       \
-    X(sum128, AccSum128, acc_ab)                              \
+    X(i128_agg, AccI128, acc_ab)                              \
     X(permute, Permute, permute)                              \
     X(bitcast, BitCast, arg)                                  \
     X(fpclass, Fpclass, fpclass)                              \
@@ -435,7 +435,7 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.arg);
             break;
         }
-        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccSum128) {
+        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccI128) {
             process(data.arg);
             if (data.cond) process(data.cond);
             break;
@@ -495,7 +495,7 @@ constexpr bool is_root_step(StepKind kind) {
     case StepKind::Scatter:
     case StepKind::AccArithBinary:
     case StepKind::AccPredicateBinary:
-    case StepKind::AccSum128:
+    case StepKind::AccI128:
     case StepKind::Countif:
     case StepKind::StoreInterleave: return true;
     default: break;

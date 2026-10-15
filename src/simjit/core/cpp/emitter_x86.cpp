@@ -1027,7 +1027,10 @@ struct X86CppEmitter : CppEmitterBase {
         return std::nullopt;
     }
 
-    std::string store_sum128_to_cpp(const StoreSum128Data &data) override {
+    std::string store_i128_agg_to_cpp(const StoreI128AggData &data) override {
+        if (data.op != ArithBinaryOp::Add) {
+            messed_up("C++ i128 aggregate store does not support %s", show_arith_binary_op(data.op));
+        }
         std::string result = "{\n"
                              "uint64_t sum128_low = 0;\n"
                              "uint64_t sum128_carry = 0;\n"
@@ -1080,7 +1083,7 @@ struct X86CppEmitter : CppEmitterBase {
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
-        case StepKind::StoreSum128:
+        case StepKind::StoreI128Agg:
         case StepKind::ConstDiv:
             messed_up("this is scalar instruction");
             SIMJIT_MATCH (StepKind::LoadSplat) {

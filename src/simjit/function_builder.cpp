@@ -352,7 +352,7 @@ struct FunctionBuilderImpl {
         ScalarDataType dtype = acc.dtype;
         if (dtype == I128) {
             SIMJIT_ASSERT(arg->dtype == I64);
-            return sm.sum128({op, arg, acc.idx, cond}, dtype);
+            return sm.i128_agg({op, arg, acc.idx, cond}, dtype);
         }
         SIMJIT_ASSERT(arg->dtype == dtype);
         return sm.acc_arith_bin({op, arg, acc.idx, cond}, dtype);
@@ -1852,7 +1852,7 @@ struct I128RewriteState {
         default: break;
         }
 
-        if (step->dtype == I128 && !step->is(StepKind::AccSum128)) {
+        if (step->dtype == I128 && !step->is(StepKind::AccI128)) {
             unsupported("i128 rewrite does not support %s", show_step_kind(step->kind));
         }
 
@@ -1884,7 +1884,12 @@ static void validate_i128_hir(const Function *func) {
     std::vector<uint8_t> state(func->step_id_count, 0);
     for (Step *root : func->step_roots) {
         traverse_steps_postorder_unique(root, state, [&](Step *step) {
-            if (step->dtype == I128 && !step->is(StepKind::AccSum128)) {
+            if (step->is(StepKind::AccI128)) {
+                ArithBinaryOp op = step->step_data<StepKind::AccI128>().op;
+                if (op != ArithBinaryOp::Add) {
+                    unsupported("i128 aggregation does not support %s", show_arith_binary_op(op));
+                }
+            } else if (step->dtype == I128) {
                 unsupported("unlowered i128 %s in finalized HIR; enable I128Rewrite", show_step_kind(step->kind));
             }
         });

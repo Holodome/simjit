@@ -9,6 +9,12 @@ using namespace simjit;
 using namespace simjit::types;
 
 std::vector<Test> agg_tests{
+    // Signed i64 widening into i128 preserves both the predicate and carries
+    // from the low half while accumulating negative values.
+    Test{[](FunctionBuilder &b) {
+        Value value = b.or_(b.input_arg(I64), b.i64(INT64_MIN));
+        b.sum_if(value, b.input_predicate_arg(), b.arg(I128));
+    }, PASS_ALL},
     // I32 grouped
     Test{[](FunctionBuilder &b) {
              Argument ht = b.arg(I32);

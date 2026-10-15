@@ -35,7 +35,8 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::Index: return "index";
     case StepKind::Scatter: return "scatter";
     case StepKind::Pack: return "pack";
-    case StepKind::AccSum128: return "sum128";
+    // Keep the serialized spelling stable while the internal node has the generic name.
+    case StepKind::AccI128: return "sum128";
     case StepKind::Permute: return "permute";
     case StepKind::BitCast: return "bitcast";
     case StepKind::Fpclass: return "fpclass";
@@ -259,7 +260,7 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
         SIMJIT_MATCH (StepKind::Compare)
             wr("op=%s left=%%%u right=%%%u is_unsigned=%s", show_cmp_op(data.op), ref(data.left), ref(data.right),
                data.is_unsigned ? "true" : "false");
-        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccSum128) {
+        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccI128) {
             wr_("op=%s acc=$%zu arg=%%%u", show_arith_binary_op(data.op), data.acc, ref(data.arg));
             if (data.cond != nullptr) wr_(" cond=%%%u", ref(data.cond));
             return;
