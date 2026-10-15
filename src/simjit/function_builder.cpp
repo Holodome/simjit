@@ -404,7 +404,10 @@ struct FunctionBuilderImpl {
 
     Step *con(ConstData data, ScalarDataType dtype) { return sm.con(data, dtype); }
 
-    Step *load_splat(const ArgumentDecl &arg) { return sm.load_splat({arg.idx, LoadStoreKind::Unaligned}, arg.dtype); }
+    Step *load_splat(const ArgumentDecl &arg, ScalarDataType dtype, size_t byte_offset = 0) {
+        SIMJIT_ASSERT(dtype == arg.dtype || (arg.interleaved && dtype == arg.interleaved_half_dtype));
+        return sm.load_splat({arg.idx, LoadStoreKind::Unaligned, byte_offset}, dtype);
+    }
 
     Step *zero_const(ScalarDataType dtype) {
         switch (dtype) {
@@ -1672,6 +1675,16 @@ struct I128RewriteState {
                 return RewrittenStep::make_pair({sm.load_deinterleave({data.idx, data.kind, 2, 0}, I64),
                                                  sm.load_deinterleave({data.idx, data.kind, 2, 1}, I64)});
             }
+            SIMJIT_MATCH (StepKind::LoadSplat) {
+                if (step->dtype != I128) break;
+                if (data.byte_offset > std::numeric_limits<size_t>::max() - sizeof(uint64_t)) {
+                    invalid_input("i128 load_splat byte offset overflows");
+                }
+                mark_i128_argument(data.idx);
+                return RewrittenStep::make_pair(
+                    {sm.load_splat({data.idx, data.kind, data.byte_offset}, I64),
+                     sm.load_splat({data.idx, data.kind, data.byte_offset + sizeof(uint64_t)}, I64)});
+            }
 
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 if (step->dtype != I128) break;
@@ -2173,16 +2186,25 @@ Value FunctionBuilder::gather(Value idx, Argument argument) {
     return impl_->remember_expr(hash, s);
 }
 
-Value FunctionBuilder::load_splat(Argument argument) {
+Value FunctionBuilder::load_splat(Argument argument, size_t byte_offset) {
     const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
-    if (func_arg.dtype == I1) { invalid_type("load should not be used with i1 type"); }
+    return load_splat(argument, func_arg.dtype, byte_offset);
+}
 
-    uint64_t hash = make_hash(StepKind::LoadSplat, argument);
-    if (auto *result =
-            impl_->cse<StepKind::LoadSplat>(hash, [argument](const auto &x) { return x.idx == argument.idx_; })) {
+Value FunctionBuilder::load_splat(Argument argument, ScalarDataType dtype, size_t byte_offset) {
+    const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
+    if (dtype == I1) { invalid_type("load should not be used with i1 type"); }
+    if (dtype != func_arg.dtype && (!func_arg.interleaved || dtype != func_arg.interleaved_half_dtype)) {
+        invalid_type("load_splat type does not match argument");
+    }
+
+    uint64_t hash = make_hash(StepKind::LoadSplat, argument, dtype, byte_offset);
+    if (auto *result = impl_->cse<StepKind::LoadSplat>(hash, dtype, [argument, byte_offset](const auto &x) {
+            return x.idx == argument.idx_ && x.byte_offset == byte_offset;
+        })) {
         return result;
     }
-    Step *s = impl_->load_splat(func_arg);
+    Step *s = impl_->load_splat(func_arg, dtype, byte_offset);
     return impl_->remember_expr(hash, s);
 }
 
@@ -2195,7 +2217,7 @@ Predicate FunctionBuilder::load_predicate_splat(Argument argument) {
             impl_->cse<StepKind::LoadSplat>(hash, [argument](const auto &x) { return x.idx == argument.idx_; })) {
         return result;
     }
-    Step *s = impl_->load_splat(func_arg);
+    Step *s = impl_->load_splat(func_arg, I1);
     return impl_->remember_expr(hash, s);
 }
 

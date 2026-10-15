@@ -599,7 +599,9 @@ public:
                             LoadStoreKind kind = LoadStoreKind::Unaligned);
 
     Value gather(Value idx, Argument a);
-    Value load_splat(Argument a);
+    Value load_splat(Argument a, size_t byte_offset = 0);
+    // `dtype` may be either the argument carrier type or the half type of a marked interleaved argument.
+    Value load_splat(Argument a, ScalarDataType dtype, size_t byte_offset = 0);
     Predicate load_predicate_splat(Argument a);
     Value con_internal(ConstData data, ScalarDataType dtype);
 
@@ -716,7 +718,9 @@ public:
     Value input_arg(ScalarDataType dtype, LoadStoreKind kind = LoadStoreKind::Unaligned) {
         return load(arg(dtype), kind);
     }
-    Value input_splat_arg(ScalarDataType dtype) { return load_splat(arg(dtype)); }
+    Value input_splat_arg(ScalarDataType dtype, size_t byte_offset = 0) {
+        return load_splat(arg(dtype), byte_offset);
+    }
     Predicate input_predicate_splat_arg() { return load_predicate_splat(arg(ScalarDataType::I1)); }
 
     void output_arg(Value value, LoadStoreKind kind = LoadStoreKind::Unaligned) {

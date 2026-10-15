@@ -55,7 +55,7 @@ step: const_step
 const_step: "(" "step" step_id "const" scalar_dtype HEX_STRING ")"
 load_step: "(" "step" step_id "load" scalar_dtype arg_ref load_store_kind ")"
 load_deinterleave_step: "(" "step" step_id "load-deinterleave" scalar_dtype arg_ref load_store_kind lane_count lane ")"
-load_splat_step: "(" "step" step_id "load-splat" scalar_dtype arg_ref ")"
+load_splat_step: "(" "step" step_id "load-splat" scalar_dtype arg_ref INT? ")"
 index_step: "(" "step" step_id "index" scalar_dtype ")"
 gather_step: "(" "step" step_id "gather" scalar_dtype step_ref arg_ref ")"
 

@@ -676,7 +676,10 @@ std::optional<std::string> CppEmitterBase::inline_scalar_leaf_expr(const Step *s
             return format("*(const %s *)((const char *)arg%zu + (i + %zu) * %zu + %zu)", cpp_dtype(step->dtype),
                           data.addr.arg, data.addr.offset, scalar_dtype_size(arg.dtype), data.lane * half_size);
         }
-        SIMJIT_MATCH (StepKind::LoadSplat) { return format("*arg%zu", data.addr.arg); }
+        SIMJIT_MATCH (StepKind::LoadSplat) {
+            return format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(step->dtype), data.addr.arg,
+                          data.byte_offset);
+        }
         SIMJIT_MATCH (StepKind::Compare) {
             return scalar_compare_expr(data, show_scalar_operand(data.left), show_scalar_operand(data.right));
         }
@@ -803,8 +806,12 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
                                                scalar_dtype_size(arg.dtype), data.lane * half_size);
         }
         SIMJIT_MATCH (StepKind::LoadSplat) {
-            if (sdtype == ScalarDataType::I1) { return cpp_var_decl(step) + format("*arg%zu & 1", data.addr.arg); }
-            return cpp_var_decl(step) + format("*arg%zu", data.addr.arg);
+            if (sdtype == ScalarDataType::I1) {
+                return cpp_var_decl(step) +
+                       format("*(const uint8_t *)((const char *)arg%zu + %zu) & 1", data.addr.arg, data.byte_offset);
+            }
+            return cpp_var_decl(step) + format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(step->dtype),
+                                                data.addr.arg, data.byte_offset);
         }
         SIMJIT_MATCH (StepKind::Gather) {
             return cpp_var_decl(step) + format("arg%zu[%s]", data.data, show_scalar_operand(data.idx));

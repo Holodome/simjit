@@ -561,10 +561,14 @@ struct LLVMBuilder {
             }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 ArgInfo &info = func_args[data.addr.arg];
-                if (step->dtype == ScalarDataType::I1) {
-                    return b->CreateTrunc(b->CreateLoad(b->getInt8Ty(), info.data_ptr), b->getInt1Ty());
+                V *ptr = info.data_ptr;
+                if (data.byte_offset != 0) {
+                    ptr = b->CreateInBoundsGEP(b->getInt8Ty(), ptr, b->getInt64(data.byte_offset));
                 }
-                return b->CreateLoad(info.element_type, info.data_ptr);
+                if (step->dtype == ScalarDataType::I1) {
+                    return b->CreateTrunc(b->CreateLoad(b->getInt8Ty(), ptr), b->getInt1Ty());
+                }
+                return b->CreateLoad(scalar_type_to_llvm(step->dtype.as_scalar()), ptr);
             }
             SIMJIT_MATCH (StepKind::Gather) {
                 ArgInfo &info = func_args[data.data];
@@ -890,12 +894,16 @@ struct LLVMBuilder {
 
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 ArgInfo &info = func_args[data.addr.arg];
+                V *ptr = info.data_ptr;
+                if (data.byte_offset != 0) {
+                    ptr = b->CreateInBoundsGEP(b->getInt8Ty(), ptr, b->getInt64(data.byte_offset));
+                }
                 if (step->dtype.is_mask()) {
-                    V *s = b->CreateLoad(b->getInt8Ty(), info.data_ptr);
+                    V *s = b->CreateLoad(b->getInt8Ty(), ptr);
                     s = b->CreateTrunc(s, b->getInt1Ty());
                     return b->CreateVectorSplat(mask_dtype_bits(step->dtype.as_mask()), s);
                 }
-                V *s = b->CreateLoad(info.element_type, info.data_ptr);
+                V *s = b->CreateLoad(scalar_type_to_llvm(step->dtype.as_vec().to_scalar()), ptr);
                 return b->CreateVectorSplat(step->dtype.as_vec().nelems(), s);
             }
             SIMJIT_MATCH (StepKind::Const) {

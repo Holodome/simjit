@@ -2153,7 +2153,7 @@ struct CompileState {
                 const ArgInfo &arg = args[data.addr.arg];
                 AnyR result = create_scalar_reg(sdtype);
                 if (sdtype == ScalarDataType::I128) { messed_up("can't do i128 LoadSplat"); }
-                ax86::Mem mem = ax86::Mem(arg.gp, 0, scalar_dtype_size(sdtype));
+                ax86::Mem mem = ax86::Mem(arg.gp, (int32_t)data.byte_offset, scalar_dtype_size(sdtype));
                 scalar_mov(cc, result, mem, sdtype == ScalarDataType::I1 ? ScalarDataType::I8 : sdtype);
                 if (sdtype == ScalarDataType::I1) { cc.and_(result.as<GpR>(), 1); }
                 return result;
@@ -2974,7 +2974,7 @@ struct CompileState {
                     MaskDataType mdtype = step->dtype.as_mask();
                     MaskR reg = create_mask_reg(mdtype);
                     GpR gp = cc.new_gp8();
-                    cc.mov(gp, ax86::byte_ptr(arg.gp));
+                    cc.mov(gp, ax86::byte_ptr(arg.gp, (int32_t)data.byte_offset));
                     cc.and_(gp.r64(), 1);
                     cc.neg(gp.r64());
                     switch (mdtype) {
@@ -2997,12 +2997,12 @@ struct CompileState {
                 VecDataType vdtype = step->dtype.as_vec();
                 VecR reg = create_vec_reg(vdtype);
                 switch (vdtype.elem) {
-                case VecElemType::I8: cc.vpbroadcastb(reg, ax86::byte_ptr(arg.gp)); break;
-                case VecElemType::I16: cc.vpbroadcastw(reg, ax86::word_ptr(arg.gp)); break;
-                case VecElemType::I32: cc.vpbroadcastd(reg, ax86::dword_ptr(arg.gp)); break;
-                case VecElemType::I64: cc.vpbroadcastq(reg, ax86::qword_ptr(arg.gp)); break;
-                case VecElemType::F32: cc.vbroadcastss(reg, ax86::dword_ptr(arg.gp)); break;
-                case VecElemType::F64: broadcast_f64(cc, reg, ax86::qword_ptr(arg.gp)); break;
+                case VecElemType::I8: cc.vpbroadcastb(reg, ax86::byte_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::I16: cc.vpbroadcastw(reg, ax86::word_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::I32: cc.vpbroadcastd(reg, ax86::dword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::I64: cc.vpbroadcastq(reg, ax86::qword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::F32: cc.vbroadcastss(reg, ax86::dword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::F64: broadcast_f64(cc, reg, ax86::qword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
                 }
                 return reg;
             }

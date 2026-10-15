@@ -192,6 +192,7 @@ struct ScalarPermuteData {
 struct LoadData {
     ArgumentAddress addr;
     LoadStoreKind kind;
+    size_t byte_offset{};
 };
 
 struct LoadDeinterleaveData {

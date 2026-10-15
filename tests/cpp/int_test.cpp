@@ -139,6 +139,16 @@ def func(n, x, y):
         x[i] = y[0]
         )FOO"},
     Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I32);
+             Argument y = b.arg(I32);
+             b.store(b.add(b.load_splat(y), b.load_splat(y, sizeof(int32_t))), x);
+         },
+         PASS_ALL, R"FOO(
+def func(n, x, y):
+    for i in range(n):
+        x[i] = y[0] + y[1]
+        )FOO"},
+    Test{[](FunctionBuilder &b) {
              Argument x = b.arg(I64);
              Argument y = b.arg(I64);
              b.store(b.load_splat(y), x);

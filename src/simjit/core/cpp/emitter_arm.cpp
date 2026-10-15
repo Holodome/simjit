@@ -937,8 +937,10 @@ struct ArmNeonCppEmitter : CppEmitterBase {
 
     std::string mask_splat_to_cpp(const Step *step, const LoadData &data) const {
         MaskDataType dtype = step->dtype.as_mask();
-        return cpp_var_decl(step) + format("%s((*arg%zu & 1) ? %s : 0)", arm_mask_dup_intrin_name(dtype).c_str(),
-                                           data.addr.arg, arm_mask_lane_all_ones(dtype));
+        return cpp_var_decl(step) +
+               format("%s((*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0)",
+                      arm_mask_dup_intrin_name(dtype).c_str(), data.addr.arg, data.byte_offset,
+                      arm_mask_lane_all_ones(dtype));
     }
 
     bool can_inline_acc_store_arg(const Step *arg) const {
@@ -972,14 +974,19 @@ struct ArmNeonCppEmitter : CppEmitterBase {
 
         if (arg->is(StepKind::LoadSplat)) {
             const auto &data = arg->step_data<StepKind::LoadSplat>();
-            if (arg->dtype.is_scalar()) { return format("*arg%zu", data.addr.arg); }
+            if (arg->dtype.is_scalar()) {
+                return format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(arg->dtype), data.addr.arg,
+                              data.byte_offset);
+            }
             if (arg->dtype.is_mask()) {
                 MaskDataType dtype = arg->dtype.as_mask();
-                return format("%s((*arg%zu & 1) ? %s : 0)", arm_mask_dup_intrin_name(dtype).c_str(), data.addr.arg,
+                return format("%s((*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0)",
+                              arm_mask_dup_intrin_name(dtype).c_str(), data.addr.arg, data.byte_offset,
                               arm_mask_lane_all_ones(dtype));
             }
             VecDataType dtype = arg->dtype.as_vec();
-            return format("%s(*arg%zu)", arm_dup_intrin_name(dtype).c_str(), data.addr.arg);
+            return format("%s(*(const %s *)((const char *)arg%zu + %zu))", arm_dup_intrin_name(dtype).c_str(),
+                          cpp_dtype(dtype.to_scalar()), data.addr.arg, data.byte_offset);
         }
 
         SIMJIT_UNREACHABLE();
@@ -2097,7 +2104,9 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             if (step->dtype.is_mask()) { return mask_splat_to_cpp(step, data); }
             if (!step->dtype.is_vec()) { return unexpected_step_dtype(step, "vector or mask"); }
             VecDataType dtype = step->dtype.as_vec();
-            return cpp_var_decl(step) + format("%s(*arg%zu)", arm_dup_intrin_name(dtype).c_str(), data.addr.arg);
+            return cpp_var_decl(step) +
+                   format("%s(*(const %s *)((const char *)arg%zu + %zu))", arm_dup_intrin_name(dtype).c_str(),
+                          cpp_dtype(dtype.to_scalar()), data.addr.arg, data.byte_offset);
         }
         case StepKind::Const: {
             const auto &data = step->step_data<StepKind::Const>();

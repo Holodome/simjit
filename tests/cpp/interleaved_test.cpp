@@ -439,6 +439,19 @@ def func(n, src, dst):
                              b.store(b.load(src), dst);
                          },
                          PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg(I128);
+                             Argument dst = b.arg(I128);
+                             b.store(b.load_splat(src, sizeof(__int128)), dst);
+                         },
+                         PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg(I128);
+                             Argument dst = b.arg(I128);
+                             Value value = b.add(b.load_splat(src), b.load_splat(src, sizeof(__int128)));
+                             b.cond_store(value, b.input_predicate_arg(), dst, LoadStoreKind::Unaligned);
+                         },
+                         PASS_ALL});
 #define i128_bop(op)                                                          \
     tests.push_back(Test{[](FunctionBuilder &b) {                             \
                              Argument left = b.arg(I128);                     \
@@ -459,7 +472,7 @@ def func(n, src, dst):
     i128_bop(max);
     i128_bop(umax);
 
-    // MulConstPeephole is applied during i128 desugaring, including either operand order.
+    // MulConstPeephole runs before i128 desugaring, including either operand order.
     for (int64_t constant : std::initializer_list<int64_t>{0, 1, -1, 2, 3, 7, 13, 15, -6, INT64_C(1) << 40}) {
         tests.push_back(Test{[constant](FunctionBuilder &b) {
                                  Argument value = b.arg(I128);

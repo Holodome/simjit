@@ -117,6 +117,7 @@ struct PermuteData {
 struct LoadData {
     ArgumentIdx idx{};
     LoadStoreKind kind{};
+    size_t byte_offset{};
 };
 
 struct LoadDeinterleaveData {

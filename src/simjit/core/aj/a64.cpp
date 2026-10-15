@@ -1161,7 +1161,12 @@ struct CompileState {
                 const ArgInfo &arg = args[data.addr.arg];
                 sdtype = sdtype == ScalarDataType::I1 ? ScalarDataType::I8 : sdtype;
                 AnyR result = create_scalar_reg(sdtype);
-                load(cc, result, aja64::ptr(arg.gp), sdtype);
+                GpR base = arg.gp;
+                if (data.byte_offset != 0) {
+                    base = cc.new_gp64();
+                    cc.add(base, arg.gp, data.byte_offset);
+                }
+                load(cc, result, aja64::ptr(base), sdtype);
                 if (step->dtype == ScalarDataType::I1) { cc.and_(result.as<GpR>(), result.as<GpR>(), 1); }
                 return result;
             }
@@ -2589,13 +2594,18 @@ struct CompileState {
             }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 const ArgInfo &arg = args[data.addr.arg];
+                GpR base = arg.gp;
+                if (data.byte_offset != 0) {
+                    base = cc.new_gp64();
+                    cc.add(base, arg.gp, data.byte_offset);
+                }
                 if (step->dtype.is_mask()) {
                     MaskDataType mdtype = step->dtype.as_mask();
                     if (mdtype != MaskDataType::M8 && mdtype != MaskDataType::M16) {
                         messed_up("Invalid mask load of type %s", show_mask_dtype(mdtype));
                     }
                     VecR result = cc.new_vec128();
-                    aja64::Mem mem = aja64::ptr(arg.gp);
+                    aja64::Mem mem = aja64::ptr(base);
                     GpR w = cc.new_gp32();
                     cc.ldrb(w, mem);
                     cc.and_(w, w, 1);
@@ -2612,7 +2622,7 @@ struct CompileState {
                 }
                 VecDataType vdtype = step->dtype.as_vec();
                 VecR reg = create_vec_reg(vdtype);
-                cc.ld1r(reg, aja64::ptr(arg.gp));
+                cc.ld1r(reg, aja64::ptr(base));
                 return reg;
             }
 

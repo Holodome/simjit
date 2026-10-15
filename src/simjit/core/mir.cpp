@@ -2673,7 +2673,7 @@ struct MirConstructState {
             }
             SIMJIT_MATCH (hir::StepKind::LoadSplat) {
                 ArgumentAddress addr{data.idx, 0};
-                return sm.load_splat({addr, data.kind}, node->dtype);
+                return sm.load_splat({addr, data.kind, data.byte_offset}, node->dtype);
             }
             SIMJIT_MATCH (hir::StepKind::IntCast) {
                 Step *arg = ref_arg();
@@ -3314,7 +3314,7 @@ struct MirConstructState {
             }
             SIMJIT_MATCH (hir::StepKind::LoadSplat) {
                 ArgumentAddress addr{data.idx, 0};
-                return sm.load_splat({addr, data.kind}, sdtype);
+                return sm.load_splat({addr, data.kind, data.byte_offset}, sdtype);
             }
             SIMJIT_MATCH (hir::StepKind::Gather) return sm.gather({data.data, ref(data.idx)}, sdtype);
             SIMJIT_MATCH (hir::StepKind::Index) {

@@ -920,14 +920,20 @@ struct X86CppEmitter : CppEmitterBase {
 
         if (arg->is(StepKind::LoadSplat)) {
             const auto &data = arg->step_data<StepKind::LoadSplat>();
-            if (arg->dtype.is_scalar()) { return format("*arg%zu", data.addr.arg); }
+            if (arg->dtype.is_scalar()) {
+                return format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(arg->dtype), data.addr.arg,
+                              data.byte_offset);
+            }
             if (arg->dtype.is_mask()) {
-                return format("(*arg%zu & 1) ? %s : 0", data.addr.arg, mask_all_ones(arg->dtype.as_mask()));
+                return format("(*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0", data.addr.arg,
+                              data.byte_offset, mask_all_ones(arg->dtype.as_mask()));
             }
 
             VecDataType dtype = arg->dtype.as_vec();
             const auto &intrin = x86::set1_map.lookup(dtype);
-            return unsafe_intrin_call(intrin, format("*arg%zu", data.addr.arg));
+            return unsafe_intrin_call(
+                intrin, format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(dtype.to_scalar()),
+                               data.addr.arg, data.byte_offset));
         }
 
         SIMJIT_UNREACHABLE();
@@ -1080,11 +1086,14 @@ struct X86CppEmitter : CppEmitterBase {
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 if (step->dtype.is_mask()) {
                     return cpp_var_decl(step) +
-                           format("(*arg%zu & 1) ? %s : 0", data.addr.arg, mask_all_ones(step->dtype.as_mask()));
+                           format("(*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0", data.addr.arg,
+                                  data.byte_offset, mask_all_ones(step->dtype.as_mask()));
                 }
                 VecDataType dtype = step->dtype.as_vec();
                 const auto &intrin = x86::set1_map.lookup(dtype);
-                return cpp_var_decl(step) + unsafe_intrin_call(intrin, format("*arg%zu", data.addr.arg));
+                return cpp_var_decl(step) +
+                       unsafe_intrin_call(intrin, format("*(const %s *)((const char *)arg%zu + %zu)",
+                                                        cpp_dtype(dtype.to_scalar()), data.addr.arg, data.byte_offset));
             }
             SIMJIT_MATCH (StepKind::Const) {
                 if (step->dtype.is_mask()) {

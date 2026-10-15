@@ -582,6 +582,37 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
     });
 
     tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_splat_rewrite", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument src = builder.arg(I128);
+        builder.store(builder.load_splat(src, 16), builder.arg(I128));
+        hir::Function *function = builder.build();
+
+        SIMJIT_ASSERT(function->args[src.idx_].interleaved);
+        SIMJIT_ASSERT(function->args[src.idx_].interleaved_half_dtype == I64);
+        std::vector<size_t> offsets;
+        std::vector<uint8_t> state(function->step_id_count);
+        for (hir::Step *root : function->step_roots) {
+            hir::traverse_steps_postorder_unique(root, state, [&](hir::Step *step) {
+                SIMJIT_ASSERT(step->dtype != I128);
+                if (!step->is(hir::StepKind::LoadSplat)) { return; }
+                SIMJIT_ASSERT(step->dtype == I64);
+                offsets.push_back(step->step_data<hir::StepKind::LoadSplat>().byte_offset);
+            });
+        }
+        std::sort(offsets.begin(), offsets.end());
+        std::vector<size_t> expected_offsets{16, 24};
+        SIMJIT_ASSERT(offsets == expected_offsets);
+
+#if SIMJIT_ENABLE_SERIALIZATION
+        std::string serialized = serialize(function);
+        SIMJIT_ASSERT(serialized.find("load-splat i64 (arg 0) 16") != std::string::npos);
+        SIMJIT_ASSERT(serialized.find("load-splat i64 (arg 0) 24") != std::string::npos);
+#endif
+    });
+
+    tests.emplace_back([] {
         using U128 = unsigned __int128;
         constexpr size_t count = 7;
         const U128 values[count] = {0,

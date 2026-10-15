@@ -442,7 +442,8 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             break;
         }
         SIMJIT_MATCH (StepKind::LoadSplat) {
-            payload = hl::list(serialize_arg_ref(data.idx));
+            payload = data.byte_offset == 0 ? hl::list(serialize_arg_ref(data.idx))
+                                            : hl::list(serialize_arg_ref(data.idx), data.byte_offset);
             break;
         }
         SIMJIT_MATCH (StepKind::Index) { break; }
@@ -750,9 +751,18 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         return builder.gather(ref_value(idx), parse_arg_ref(func_arg));
     }
     case StepKind::LoadSplat: {
-        auto [func_arg] = bind_step(hl::cap);
-        if (dtype == ScalarDataType::I1) { return builder.load_predicate_splat(parse_arg_ref(func_arg)); }
-        return builder.load_splat(parse_arg_ref(func_arg));
+        auto [func_arg, offset] = bind_step(hl::cap, hl::or_nil);
+        size_t byte_offset = 0;
+        if (!hl::is_nil(offset)) {
+            int parsed_offset = offset.as_int();
+            if (parsed_offset < 0) { serialization_error("load-splat byte offset must not be negative"); }
+            byte_offset = (size_t)parsed_offset;
+        }
+        if (dtype == ScalarDataType::I1) {
+            if (byte_offset != 0) { serialization_error("Predicate load-splat does not support byte offsets"); }
+            return builder.load_predicate_splat(parse_arg_ref(func_arg));
+        }
+        return builder.load_splat(parse_arg_ref(func_arg), dtype, byte_offset);
     }
     case StepKind::Store: {
         auto [arg, func_arg, store_kind, cond] = bind_step(hl::cap, hl::cap, hl::cap_as<LoadStoreKind>, hl::maybe);

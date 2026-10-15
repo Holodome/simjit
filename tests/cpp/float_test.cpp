@@ -178,6 +178,16 @@ def func(n, x, y):
     for i in range(n):
         x[i] = y[0]
         )FOO"},
+    {[](FunctionBuilder &b) {
+         Argument x = b.arg(F64);
+         Argument y = b.arg(F64);
+         b.store(b.load_splat(y, sizeof(double)), x);
+     },
+     PASS_ALL, R"FOO(
+def func(n, x, y):
+    for i in range(n):
+        x[i] = y[1]
+        )FOO"},
     // unaligned load
     {[](FunctionBuilder &b) {
          Argument x = b.arg(F32);

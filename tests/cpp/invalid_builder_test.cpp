@@ -7,6 +7,8 @@
 
 #include "simjit/compiler.h"
 
+#include <limits>
+
 using namespace simjit;
 using namespace simjit::types;
 
@@ -245,7 +247,11 @@ static void add_low_level_api_tests(std::vector<Test> &tests) {
         Argument count = b.arg(I128);
         b.store(b.arith_binary(b.load(value), b.load(count), ArithBinaryOp::ShiftLeftLogical), b.arg(I128));
     });
-    add_unsupported(tests, [](FunctionBuilder &b) { b.store(b.load_splat(b.arg(I128)), b.arg(I128)); });
+    add_valid(tests, [](FunctionBuilder &b) { b.store(b.load_splat(b.arg(I128)), b.arg(I128)); });
+    add_invalid(tests, [](FunctionBuilder &b) {
+        Argument src = b.arg(I128);
+        b.store(b.load_splat(src, std::numeric_limits<size_t>::max()), b.arg(I128));
+    });
 }
 
 static void add_constant_tests(std::vector<Test> &tests) {
