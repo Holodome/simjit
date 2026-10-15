@@ -555,6 +555,29 @@ def func(n, src, dst):
         b.store(b.select(b.input_predicate_arg(), b.load(truthy), b.load(falsy)), b.arg(I128));
     }});
 
+#define i128_float_cast(from, to, is_unsigned, meta)                                   \
+    tests.push_back(Test{[](FunctionBuilder &b) {                                      \
+                             Argument src = b.arg(from);                               \
+                             Argument dst = b.arg(to);                                 \
+                             b.store(b.float_cast(b.load(src), to, is_unsigned), dst); \
+                         },                                                            \
+                         meta})
+    i128_float_cast(
+        I128, F32, false,
+        LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, ErrorSubKind::ConflictingGraphCoefficient));
+    i128_float_cast(I128, F32, true, PASS_ALL);
+    i128_float_cast(I128, F64, false, PASS_ALL);
+    i128_float_cast(I128, F64, true, PASS_ALL);
+    i128_float_cast(
+        F32, I128, false,
+        LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, ErrorSubKind::ConflictingGraphCoefficient));
+    i128_float_cast(
+        F32, I128, true,
+        LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, ErrorSubKind::ConflictingGraphCoefficient));
+    i128_float_cast(F64, I128, false, PASS_ALL);
+    i128_float_cast(F64, I128, true, PASS_ALL);
+#undef i128_float_cast
+
 #define i128_cmp(op, is_unsigned)                                                               \
     tests.push_back(Test{[](FunctionBuilder &b) {                                               \
                              Argument left = b.arg(I128);                                       \

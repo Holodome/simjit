@@ -937,14 +937,60 @@ static void api_smoke_load_deinterleave() {
     }
     {
         MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I128);
+        builder.store(builder.float_cast(builder.load(src), F64, true), builder.arg(F64));
+        hir::Function *fn = builder.build();
+        size_t casts = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "i128 to float rewrite leaves no i128 step");
+                if (!step->is(hir::StepKind::FloatCast)) { return; }
+                const auto &cast = step->step_data<hir::StepKind::FloatCast>();
+                require_api_smoke(cast.arg->dtype == I64 && step->dtype == F64,
+                                  "i128 to float rewrite uses ordinary i64 casts");
+                ++casts;
+            });
+        }
+        require_api_smoke(casts == 2, "i128 to float rewrites both pair halves");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(F32);
+        builder.store(builder.float_cast(builder.load(src), I128), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots[0]->is(hir::StepKind::StoreInterleave),
+                          "float to i128 rewrites to pair store");
+        size_t casts = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "float to i128 rewrite leaves no i128 step");
+                if (!step->is(hir::StepKind::FloatCast)) { return; }
+                const auto &cast = step->step_data<hir::StepKind::FloatCast>();
+                require_api_smoke((cast.arg->dtype == F32 && step->dtype == F64) ||
+                                      (cast.arg->dtype == F64 && step->dtype == F32) ||
+                                      (cast.arg->dtype == F64 && step->dtype == I64) ||
+                                      (cast.arg->dtype == I64 && step->dtype == F64),
+                                  "float to i128 rewrite follows regular cast decomposition");
+                ++casts;
+            });
+        }
+        require_api_smoke(casts == 6, "float to i128 bridges each i64/f32 conversion through f64");
+    }
+    {
+        MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::I128Rewrite, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
         Argument src = builder.arg(I128);
-        Argument dst = builder.arg(I128);
-        builder.store(builder.load(src), dst);
+        builder.store(builder.float_cast(builder.load(src), F64), builder.arg(F64));
         expect_api_smoke_simjit_error([&] { (void)builder.build(); }, ErrorModule::HIR, ErrorKind::Unsupported,
                                       ErrorSubKind::UnsupportedFeature,
-                                      "build rejects unlowered i128 when rewrite is disabled");
+                                      "build rejects unlowered i128 float cast when rewrite is disabled");
     }
 }
 

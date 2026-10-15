@@ -437,7 +437,7 @@ enum class CodeTransformations : uint32_t {
     BinaryIdentityPeephole = 0x2000,
     // Remove constant conditions during HIR construction.
     ConstantConditionPeephole = 0x4000,
-    // Lower ordinary i128 load, store, and add operations to i64 interleaved pairs.
+    // Lower ordinary i128 operations to i64 interleaved pairs before backend lowering.
     I128Rewrite = 0x8000,
 
     All = MuldqInst | MulConstPeephole | LogicalPeephole | BetweenPeephole | Unroll | AccSplit | MaskCombine |

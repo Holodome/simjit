@@ -582,6 +582,125 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
     });
 
     tests.emplace_back([] {
+        using U128 = unsigned __int128;
+        constexpr size_t count = 7;
+        const U128 values[count] = {0,
+                                    1,
+                                    ~U128{0},
+                                    U128{1} << 64,
+                                    U128{1} << 127,
+                                    (U128{1} << 64) - 1,
+                                    (U128{0x123456789abcdef0ull} << 64) | 0xfedcba9876543210ull};
+        float signed_f32[count]{};
+        float unsigned_f32[count]{};
+        double signed_f64[count]{};
+        double unsigned_f64[count]{};
+
+        MemoryArena arena;
+        Context ctx{arena, "i128_float_to_float", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument value_arg = builder.arg(I128);
+        Argument signed_f32_arg = builder.arg(F32);
+        Argument unsigned_f32_arg = builder.arg(F32);
+        Argument signed_f64_arg = builder.arg(F64);
+        Argument unsigned_f64_arg = builder.arg(F64);
+        Value value = builder.load(value_arg);
+        builder.store(builder.float_cast(value, F32), signed_f32_arg);
+        builder.store(builder.float_cast(value, F32, true), unsigned_f32_arg);
+        builder.store(builder.float_cast(value, F64), signed_f64_arg);
+        builder.store(builder.float_cast(value, F64, true), unsigned_f64_arg);
+
+        void *args[] = {const_cast<U128 *>(values), signed_f32, unsigned_f32, signed_f64, unsigned_f64};
+        llvm_backend::LLVMSession session{Arch::Native, LLVMOptLevel::O1};
+        void *fn = llvm_backend::compile_hir(builder.build(), session, jit::CompilePolicy::Scalar);
+        jit::call_fn_ptr(fn, count, args);
+
+        for (size_t i = 0; i < count; ++i) {
+            auto magnitude = [](U128 value) { return (value >> 127) != 0 ? U128{0} - value : value; };
+            auto signed_f32_expected = [magnitude](U128 value) {
+                float result = float(uint64_t(magnitude(value) >> 64)) * 0x1p64f + float(uint64_t(magnitude(value)));
+                return (value >> 127) != 0 ? -result : result;
+            };
+            auto unsigned_f32_expected = [](U128 value) {
+                return float(uint64_t(value >> 64)) * 0x1p64f + float(uint64_t(value));
+            };
+            auto signed_f64_expected = [magnitude](U128 value) {
+                double result = double(uint64_t(magnitude(value) >> 64)) * 0x1p64 + double(uint64_t(magnitude(value)));
+                return (value >> 127) != 0 ? -result : result;
+            };
+            auto unsigned_f64_expected = [](U128 value) {
+                return double(uint64_t(value >> 64)) * 0x1p64 + double(uint64_t(value));
+            };
+            SIMJIT_ASSERT(signed_f32[i] == signed_f32_expected(values[i]));
+            SIMJIT_ASSERT(unsigned_f32[i] == unsigned_f32_expected(values[i]));
+            SIMJIT_ASSERT(signed_f64[i] == signed_f64_expected(values[i]));
+            SIMJIT_ASSERT(unsigned_f64[i] == unsigned_f64_expected(values[i]));
+        }
+    });
+
+    tests.emplace_back([] {
+        using U128 = unsigned __int128;
+        constexpr size_t count = 6;
+        const float signed_f32_values[count] = {0.0f, 1.75f, -1.75f, -0x1p64f, 0x1p64f, -0x1p80f};
+        const float unsigned_f32_values[count] = {0.0f, 1.75f, 0x1p64f, 0x1p80f, 0x1p96f, 0x1p120f};
+        const double signed_f64_values[count] = {0.0, 1.75, -1.75, -0x1p64, 0x1p64, -0x1p80};
+        const double unsigned_f64_values[count] = {0.0, 1.75, 0x1p64, 0x1p80, 0x1p96, 0x1p120};
+        U128 signed_f32[count]{};
+        U128 unsigned_f32[count]{};
+        U128 signed_f64[count]{};
+        U128 unsigned_f64[count]{};
+
+        MemoryArena arena;
+        Context ctx{arena, "float_to_i128", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument signed_f32_input = builder.arg(F32);
+        Argument unsigned_f32_input = builder.arg(F32);
+        Argument signed_f64_input = builder.arg(F64);
+        Argument unsigned_f64_input = builder.arg(F64);
+        Argument signed_f32_output = builder.arg(I128);
+        Argument unsigned_f32_output = builder.arg(I128);
+        Argument signed_f64_output = builder.arg(I128);
+        Argument unsigned_f64_output = builder.arg(I128);
+        builder.store(builder.float_cast(builder.load(signed_f32_input), I128), signed_f32_output);
+        builder.store(builder.float_cast(builder.load(unsigned_f32_input), I128, true), unsigned_f32_output);
+        builder.store(builder.float_cast(builder.load(signed_f64_input), I128), signed_f64_output);
+        builder.store(builder.float_cast(builder.load(unsigned_f64_input), I128, true), unsigned_f64_output);
+
+        void *args[] = {const_cast<float *>(signed_f32_values),
+                        const_cast<float *>(unsigned_f32_values),
+                        const_cast<double *>(signed_f64_values),
+                        const_cast<double *>(unsigned_f64_values),
+                        signed_f32,
+                        unsigned_f32,
+                        signed_f64,
+                        unsigned_f64};
+        llvm_backend::LLVMSession session{Arch::Native, LLVMOptLevel::O1};
+        void *fn = llvm_backend::compile_hir(builder.build(), session, jit::CompilePolicy::Scalar);
+        jit::call_fn_ptr(fn, count, args);
+
+        auto f32_unsigned = [](float value) {
+            uint64_t high = uint64_t(value * 0x1p-64f);
+            uint64_t low = uint64_t(value - float(high) * 0x1p64f);
+            return (U128{high} << 64) | low;
+        };
+        auto f64_unsigned = [](double value) {
+            uint64_t high = uint64_t(value * 0x1p-64);
+            uint64_t low = uint64_t(value - double(high) * 0x1p64);
+            return (U128{high} << 64) | low;
+        };
+        for (size_t i = 0; i < count; ++i) {
+            U128 expected_signed_f32 = signed_f32_values[i] < 0 ? U128{0} - f32_unsigned(-signed_f32_values[i])
+                                                                : f32_unsigned(signed_f32_values[i]);
+            U128 expected_signed_f64 = signed_f64_values[i] < 0 ? U128{0} - f64_unsigned(-signed_f64_values[i])
+                                                                : f64_unsigned(signed_f64_values[i]);
+            SIMJIT_ASSERT(signed_f32[i] == expected_signed_f32);
+            SIMJIT_ASSERT(unsigned_f32[i] == f32_unsigned(unsigned_f32_values[i]));
+            SIMJIT_ASSERT(signed_f64[i] == expected_signed_f64);
+            SIMJIT_ASSERT(unsigned_f64[i] == f64_unsigned(unsigned_f64_values[i]));
+        }
+    });
+
+    tests.emplace_back([] {
         MemoryArena arena;
         Context ctx{arena, "i128_shift_scalar_lowering", CodeTransformations::All, Arch::Native};
         FunctionBuilder builder{ctx};

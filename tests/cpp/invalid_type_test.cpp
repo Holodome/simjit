@@ -105,8 +105,8 @@ static constexpr std::array<ScalarDataType, 8> kAllDtypes{
 };
 
 static bool is_valid_float_cast(ScalarDataType from, ScalarDataType to) {
-    return (is_float_dtype(from) && is_float_dtype(to)) || (is_simple_int_dtype(from) && is_float_dtype(to)) ||
-           (is_simple_int_dtype(to) && is_float_dtype(from));
+    return (is_float_dtype(from) && is_float_dtype(to)) || (is_int_dtype(from) && is_float_dtype(to)) ||
+           (is_int_dtype(to) && is_float_dtype(from));
 }
 
 static bool is_valid_bitcast(ScalarDataType from, ScalarDataType to) {

@@ -1315,11 +1315,11 @@ struct I128RewriteState {
     }
 
     I128Pair negate_i128(I128Pair arg) {
-        // lo = 0-al; hi = ~ah + (al != 0)
+        // lo = 0-al; hi = ~ah + (al == 0)
         Step *low = sm.arith_bin({ArithBinaryOp::Sub, get_i64_zero(), arg.low}, I64);
         Step *high = sm.arith_un({ArithUnaryOp::Not, arg.high}, I64);
         Step *carry_i64 =
-            sm.select({sm.cmp({CmpOp::NotEqual, low, get_i64_zero()}, I1), get_i64_one(), get_i64_zero()}, I64);
+            sm.select({sm.cmp({CmpOp::Equal, arg.low, get_i64_zero()}, I1), get_i64_one(), get_i64_zero()}, I64);
         high = sm.arith_bin({ArithBinaryOp::Add, high, carry_i64}, I64);
         return {low, high};
     }
@@ -1550,6 +1550,63 @@ struct I128RewriteState {
         SIMJIT_UNREACHABLE();
     }
 
+    Step *i64_to_float_for_i128_rewrite(Step *arg, ScalarDataType dtype, bool is_unsigned) {
+        if (dtype == F64) { return sm.float_cast({arg, is_unsigned}, F64); }
+        Step *wide = sm.float_cast({arg, is_unsigned}, F64);
+        return sm.float_cast({wide, false}, F32);
+    }
+
+    Step *float_to_i64_for_i128_rewrite(Step *arg, bool is_unsigned) {
+        if (arg->dtype == F64) { return sm.float_cast({arg, is_unsigned}, I64); }
+        Step *wide = sm.float_cast({arg, false}, F64);
+        return sm.float_cast({wide, is_unsigned}, I64);
+    }
+
+    Step *i128_to_float(I128Pair arg, ScalarDataType dtype, bool is_unsigned) {
+        I128Pair magnitude = arg;
+        Step *negative = nullptr;
+        if (!is_unsigned) {
+            negative = sm.cmp({CmpOp::Less, arg.high, get_i64_zero()}, I1);
+            magnitude = select_i128(negative, negate_i128(arg), arg);
+        }
+
+        Step *scale = dtype == F32 ? sm.con(ConstData::f32(0x1p64f), F32) : sm.con(ConstData::f64(0x1p64), F64);
+        Step *high = i64_to_float_for_i128_rewrite(magnitude.high, dtype, true);
+        Step *low = i64_to_float_for_i128_rewrite(magnitude.low, dtype, true);
+        Step *result =
+            sm.arith_bin({ArithBinaryOp::Add, sm.arith_bin({ArithBinaryOp::Mul, high, scale}, dtype), low}, dtype);
+        if (negative != nullptr) {
+            result = sm.select({negative, sm.arith_un({ArithUnaryOp::Negate, result}, dtype), result}, dtype);
+        }
+        return result;
+    }
+
+    I128Pair float_to_i128(Step *arg, bool is_unsigned) {
+        ScalarDataType dtype = arg->dtype;
+        Step *magnitude = arg;
+        Step *negative = nullptr;
+        if (!is_unsigned) {
+            Step *float_zero = dtype == F32 ? sm.con(ConstData::f32(0.0f), F32) : sm.con(ConstData::f64(0.0), F64);
+            negative = sm.cmp({CmpOp::Less, arg, float_zero}, I1);
+            magnitude = sm.arith_un({ArithUnaryOp::Abs, arg}, dtype);
+        }
+
+        Step *scale = dtype == F32 ? sm.con(ConstData::f32(0x1p64f), F32) : sm.con(ConstData::f64(0x1p64), F64);
+        Step *inverse_scale =
+            dtype == F32 ? sm.con(ConstData::f32(0x1p-64f), F32) : sm.con(ConstData::f64(0x1p-64), F64);
+        Step *high =
+            float_to_i64_for_i128_rewrite(sm.arith_bin({ArithBinaryOp::Mul, magnitude, inverse_scale}, dtype), true);
+        Step *high_as_float = i64_to_float_for_i128_rewrite(high, dtype, true);
+        Step *low = float_to_i64_for_i128_rewrite(
+            sm.arith_bin(
+                {ArithBinaryOp::Sub, magnitude, sm.arith_bin({ArithBinaryOp::Mul, high_as_float, scale}, dtype)},
+                dtype),
+            true);
+        I128Pair result{low, high};
+        if (negative != nullptr) { result = select_i128(negative, negate_i128(result), result); }
+        return result;
+    }
+
     RewrittenStep rewrite_internal(Step *step) {
         SIMJIT_ASSERT(step->id < original_step_count);
 
@@ -1677,6 +1734,17 @@ struct I128RewriteState {
                     Step *high = get_i64_zero();
                     return RewrittenStep::make_pair({low, high});
                 }
+                }
+                break;
+            }
+            SIMJIT_MATCH (StepKind::FloatCast) {
+                if (data.arg->dtype == I128) {
+                    I128Pair arg = rewrite_pair_child(data.arg, step);
+                    return RewrittenStep::make_scalar(i128_to_float(arg, step->dtype, data.is_unsigned));
+                }
+                if (step->dtype == I128) {
+                    Step *arg = rewrite_scalar(data.arg, step);
+                    return RewrittenStep::make_pair(float_to_i128(arg, data.is_unsigned));
                 }
                 break;
             }
@@ -2402,10 +2470,12 @@ Value FunctionBuilder::float_cast(Value value, ScalarDataType dtype, bool is_uns
     bool valid_compact = (is_float_dtype(dtype) && is_float_dtype(value.dtype())) ||
                          (is_compact_float_cast_int_dtype(value.dtype()) && is_float_dtype(dtype)) ||
                          (is_compact_float_cast_int_dtype(dtype) && is_float_dtype(value.dtype()));
+    bool valid_i128 =
+        (value.dtype() == I128 && is_float_dtype(dtype)) || (dtype == I128 && is_float_dtype(value.dtype()));
     bool valid_decomposed = bool(impl_->ctx->transformations & CodeTransformations::CastDecomposition) &&
                             ((is_simple_int_dtype(value.dtype()) && is_float_dtype(dtype)) ||
                              (is_simple_int_dtype(dtype) && is_float_dtype(value.dtype())));
-    if (!valid_compact && !valid_decomposed) {
+    if (!valid_compact && !valid_i128 && !valid_decomposed) {
         invalid_type("Invalid float_cast %s -> %s", show_scalar_dtype(value.dtype()), show_scalar_dtype(dtype));
     }
     uint64_t hash = make_hash(StepKind::FloatCast, value, dtype, is_unsigned);
