@@ -459,6 +459,35 @@ def func(n, src, dst):
     i128_bop(max);
     i128_bop(umax);
 
+    // MulConstPeephole is applied during i128 desugaring, including either operand order.
+    for (int64_t constant : std::initializer_list<int64_t>{0, 1, -1, 2, 3, 7, 13, 15, -6, INT64_C(1) << 40}) {
+        tests.push_back(Test{[constant](FunctionBuilder &b) {
+                                 Argument value = b.arg(I128);
+                                 Value input = b.load(value);
+                                 Value con = b.con(constant, I128);
+                                 b.store(b.mul(input, con), b.arg(I128));
+                             },
+                             PASS_ALL});
+        tests.push_back(Test{[constant](FunctionBuilder &b) {
+                                 Argument value = b.arg(I128);
+                                 Value input = b.load(value);
+                                 Value con = b.con(constant, I128);
+                                 b.store(b.mul(con, input), b.arg(I128));
+                             },
+                             PASS_ALL});
+    }
+
+    // Keep two constant funnel shifts live at once. This exercises the AArch64
+    // register-allocation pressure that previously exposed the AsmJit SRI bug.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument first = b.arg(I128);
+                             Argument second = b.arg(I128);
+                             Value constant = b.con(-6, I128);
+                             b.store(b.mul(b.load(first), constant), b.arg(I128));
+                             b.store(b.mul(b.load(second), constant), b.arg(I128));
+                         },
+                         PASS_ALL});
+
 #define i128_shift(op)                                                         \
     tests.push_back(Test{[](FunctionBuilder &b) {                              \
                              Argument value = b.arg(I128);                     \
