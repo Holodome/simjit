@@ -1445,26 +1445,34 @@ struct I128RewriteState {
         SIMJIT_UNREACHABLE();
     }
 
-    I128Pair umul64_wide(Step *left, Step *right) {
-        Step *left_lo = sm.arith_bin({ArithBinaryOp::And, left, get_i64_mask32()}, I64);
-        Step *left_hi = sm.arith_bin({ArithBinaryOp::ShiftRightLogical, left, sm.con(ConstData::i64(32), I64)}, I64);
-        Step *right_lo = sm.arith_bin({ArithBinaryOp::And, right, get_i64_mask32()}, I64);
-        Step *right_hi = sm.arith_bin({ArithBinaryOp::ShiftRightLogical, right, sm.con(ConstData::i64(32), I64)}, I64);
-        Step *x0y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_lo, right_lo}, I64);
-        Step *x0y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_lo, right_hi}, I64);
-        Step *x1y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_hi, right_lo}, I64);
-        Step *x1y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_hi, right_hi}, I64);
+    struct U64Parts {
+        Step *low;
+        Step *high;
+    };
+
+    U64Parts split_u64(Step *value) {
+        return {value,
+                sm.arith_bin({ArithBinaryOp::ShiftRightLogical, value, sm.con(ConstData::i64(32), I64)}, I64)};
+    }
+
+    I128Pair umul64_wide(U64Parts left, U64Parts right) {
+        // Mul64ZE already selects each input's low 32 bits. Keep the low limbs unmasked so the backend can
+        // lower them directly, and share the shifted high limbs with the cross products below.
+        Step *x0y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.low, right.low}, I64);
+        Step *x0y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.low, right.high}, I64);
+        Step *x1y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.high, right.low}, I64);
+        Step *x1y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.high, right.high}, I64);
         Step *middle = sm.arith_bin({ArithBinaryOp::ShiftRightLogical, x0y0, sm.con(ConstData::i64(32), I64)}, I64);
         middle = sm.arith_bin(
             {ArithBinaryOp::Add, middle, sm.arith_bin({ArithBinaryOp::And, x0y1, get_i64_mask32()}, I64)}, I64);
         middle = sm.arith_bin(
             {ArithBinaryOp::Add, middle, sm.arith_bin({ArithBinaryOp::And, x1y0, get_i64_mask32()}, I64)}, I64);
-        Step *low = sm.arith_bin({ArithBinaryOp::Or, sm.arith_bin({ArithBinaryOp::And, x0y0, get_i64_mask32()}, I64),
-                                  sm.arith_bin({ArithBinaryOp::ShiftLeftLogical,
-                                                sm.arith_bin({ArithBinaryOp::And, middle, get_i64_mask32()}, I64),
-                                                sm.con(ConstData::i64(32), I64)},
-                                               I64)},
-                                 I64);
+        Step *low = sm.arith_bin(
+            {ArithBinaryOp::Add, x0y0,
+             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x0y1, sm.con(ConstData::i64(32), I64)}, I64)}, I64);
+        low = sm.arith_bin(
+            {ArithBinaryOp::Add, low,
+             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x1y0, sm.con(ConstData::i64(32), I64)}, I64)}, I64);
         Step *high =
             sm.arith_bin({ArithBinaryOp::Add, x1y1,
                           sm.arith_bin({ArithBinaryOp::ShiftRightLogical, x0y1, sm.con(ConstData::i64(32), I64)}, I64)},
@@ -1480,31 +1488,26 @@ struct I128RewriteState {
         return {low, high};
     }
 
-    Step *umul64_low(Step *left, Step *right) {
-        Step *left_lo = sm.arith_bin({ArithBinaryOp::And, left, get_i64_mask32()}, I64);
-        Step *left_hi = sm.arith_bin({ArithBinaryOp::ShiftRightLogical, left, sm.con(ConstData::i64(32), I64)}, I64);
-        Step *right_lo = sm.arith_bin({ArithBinaryOp::And, right, get_i64_mask32()}, I64);
-        Step *right_hi = sm.arith_bin({ArithBinaryOp::ShiftRightLogical, right, sm.con(ConstData::i64(32), I64)}, I64);
-        Step *x0y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_lo, right_lo}, I64);
-        Step *x0y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_lo, right_hi}, I64);
-        Step *x1y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left_hi, right_lo}, I64);
-        Step *middle = sm.arith_bin({ArithBinaryOp::ShiftRightLogical, x0y0, sm.con(ConstData::i64(32), I64)}, I64);
-        middle = sm.arith_bin(
-            {ArithBinaryOp::Add, middle, sm.arith_bin({ArithBinaryOp::And, x0y1, get_i64_mask32()}, I64)}, I64);
-        middle = sm.arith_bin(
-            {ArithBinaryOp::Add, middle, sm.arith_bin({ArithBinaryOp::And, x1y0, get_i64_mask32()}, I64)}, I64);
-        return sm.arith_bin({ArithBinaryOp::Or, sm.arith_bin({ArithBinaryOp::And, x0y0, get_i64_mask32()}, I64),
-                             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical,
-                                           sm.arith_bin({ArithBinaryOp::And, middle, get_i64_mask32()}, I64),
-                                           sm.con(ConstData::i64(32), I64)},
-                                          I64)},
-                            I64);
+    Step *umul64_low(U64Parts left, U64Parts right) {
+        Step *x0y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.low, right.low}, I64);
+        Step *x0y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.low, right.high}, I64);
+        Step *x1y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.high, right.low}, I64);
+        Step *low = sm.arith_bin(
+            {ArithBinaryOp::Add, x0y0,
+             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x0y1, sm.con(ConstData::i64(32), I64)}, I64)}, I64);
+        return sm.arith_bin(
+            {ArithBinaryOp::Add, low,
+             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x1y0, sm.con(ConstData::i64(32), I64)}, I64)}, I64);
     }
 
     I128Pair multiply_i128(I128Pair left, I128Pair right) {
-        I128Pair low_product = umul64_wide(left.low, right.low);
-        Step *high = sm.arith_bin({ArithBinaryOp::Add, low_product.high, umul64_low(left.low, right.high)}, I64);
-        high = sm.arith_bin({ArithBinaryOp::Add, high, umul64_low(left.high, right.low)}, I64);
+        U64Parts left_low = split_u64(left.low);
+        U64Parts left_high = split_u64(left.high);
+        U64Parts right_low = split_u64(right.low);
+        U64Parts right_high = split_u64(right.high);
+        I128Pair low_product = umul64_wide(left_low, right_low);
+        Step *high = sm.arith_bin({ArithBinaryOp::Add, low_product.high, umul64_low(left_low, right_high)}, I64);
+        high = sm.arith_bin({ArithBinaryOp::Add, high, umul64_low(left_high, right_low)}, I64);
         return {low_product.low, high};
     }
 

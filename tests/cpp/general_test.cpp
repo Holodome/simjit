@@ -4111,17 +4111,17 @@ std::vector<Test> general_tests{
         Value expr2 = b.sub(c, d);
         Value expr3 = b.mul(expr1, expr2);
 
-        Value expr4 = b.add(a, c);
+        Value expr4 = b.mul(a, c);
         Value expr5 = b.add(b_arg, b.con(7, I128));
         Value expr6 = b.sub(expr4, expr5);
 
         Value temp1 = b.add(expr3, expr6);
         Value temp2 = b.sub(b.mul(expr1, expr5), expr2);
-        Value temp3 = b.negate(temp2);
+        Value temp3 = b.sub(b.con(0, I128), temp2);
 
         Value temp4 = b.mul(temp1, b.con(13, I128));
         Value temp5 = b.add(temp3, b.con(987654321, I128));
-        Value result_val = b.sub(temp4, temp5);
+        Value result_val = b.add(b.sub(temp4, temp5), b.con(123456789, I128));
 
         Argument result = b.arg(I128);
         b.store(result_val, result);
