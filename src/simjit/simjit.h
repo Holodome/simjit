@@ -718,9 +718,7 @@ public:
     Value input_arg(ScalarDataType dtype, LoadStoreKind kind = LoadStoreKind::Unaligned) {
         return load(arg(dtype), kind);
     }
-    Value input_splat_arg(ScalarDataType dtype, size_t byte_offset = 0) {
-        return load_splat(arg(dtype), byte_offset);
-    }
+    Value input_splat_arg(ScalarDataType dtype, size_t byte_offset = 0) { return load_splat(arg(dtype), byte_offset); }
     Predicate input_predicate_splat_arg() { return load_predicate_splat(arg(ScalarDataType::I1)); }
 
     void output_arg(Value value, LoadStoreKind kind = LoadStoreKind::Unaligned) {

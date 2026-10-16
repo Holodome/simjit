@@ -710,8 +710,7 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         Value l = ref_value(left);
         Value r = ref_value(right);
         Value a = ref_value(amount);
-        return kind == FunnelShiftKind::Left ? builder.funnel_shift_left(l, r, a)
-                                             : builder.funnel_shift_right(l, r, a);
+        return kind == FunnelShiftKind::Left ? builder.funnel_shift_left(l, r, a) : builder.funnel_shift_right(l, r, a);
     }
     case StepKind::Permute: {
         auto [arg, perm, bit] = bind_step(hl::cap, hl::cap, hl::cap_as<bool>);

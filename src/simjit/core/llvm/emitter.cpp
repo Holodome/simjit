@@ -724,33 +724,15 @@ struct LLVMBuilder {
             SIMJIT_MATCH (StepKind::AggResult) {
                 V *arg = step_to_llvm(data.arg);
                 ArgInfo &info = func_args[data.dst];
-                b->CreateStore(arg, info.data_ptr);
+                V *ptr = info.data_ptr;
+                if (data.byte_offset != 0) {
+                    ptr = b->CreateInBoundsGEP(b->getInt8Ty(), ptr, b->getInt64(data.byte_offset));
+                }
+                b->CreateStore(arg, ptr);
                 return nullptr;
             }
-            SIMJIT_MATCH (StepKind::StoreI128Agg) {
-                if (data.op != ArithBinaryOp::Add) {
-                    messed_up("LLVM i128 aggregate store does not support %s", show_arith_binary_op(data.op));
-                }
-                V *high = step_to_llvm(data.hi_combined);
-                V *combined = b->CreateShl(b->CreateZExt(high, b->getInt128Ty()), 64);
-                for (Step *lo_step : data.low_steps) {
-                    V *lo_val = step_to_llvm(lo_step);
-                    if (lo_step->dtype.is_scalar()) {
-                        lo_val = b->CreateZExt(lo_val, b->getInt128Ty());
-                        combined = b->CreateAdd(combined, lo_val);
-                    } else {
-                        VecDataType vdtype = lo_step->dtype.as_vec();
-                        for (size_t i = 0; i < vdtype.nelems(); ++i) {
-                            V *it = b->CreateExtractElement(lo_val, b->getInt64(i));
-                            it = b->CreateZExt(it, b->getInt128Ty());
-                            combined = b->CreateAdd(combined, it);
-                        }
-                    }
-                }
-
-                ArgInfo &info = func_args[data.dst];
-                b->CreateStore(combined, info.data_ptr);
-                return nullptr;
+            SIMJIT_MATCH (StepKind::VecExtract) {
+                return b->CreateExtractElement(step_to_llvm(data.arg), b->getInt64(data.lane));
             }
             SIMJIT_MATCH (StepKind::PredicateNot) {
                 V *arg = step_to_llvm(data);
@@ -890,7 +872,7 @@ struct LLVMBuilder {
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
-        case StepKind::StoreI128Agg:
+        case StepKind::VecExtract:
         case StepKind::ConstDiv:
             SIMJIT_ASSERT(0);
             messed_up("Unexpected instruction %s", show_step_kind(step->kind));

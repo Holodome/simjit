@@ -3308,7 +3308,7 @@ std::vector<Test> general_tests{
     {[](FunctionBuilder &b) {
         // Deep tree of logical operations with arithmetic leaves
         Value a = b.input_arg(I32);
-        Value b_arg = b.input_arg(I32); 
+        Value b_arg = b.input_arg(I32);
         Value c = b.input_arg(I32);
         Value d = b.input_arg(I32);
         Value e = b.input_arg(I32);

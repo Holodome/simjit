@@ -937,10 +937,9 @@ struct ArmNeonCppEmitter : CppEmitterBase {
 
     std::string mask_splat_to_cpp(const Step *step, const LoadData &data) const {
         MaskDataType dtype = step->dtype.as_mask();
-        return cpp_var_decl(step) +
-               format("%s((*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0)",
-                      arm_mask_dup_intrin_name(dtype).c_str(), data.addr.arg, data.byte_offset,
-                      arm_mask_lane_all_ones(dtype));
+        return cpp_var_decl(step) + format("%s((*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0)",
+                                           arm_mask_dup_intrin_name(dtype).c_str(), data.addr.arg, data.byte_offset,
+                                           arm_mask_lane_all_ones(dtype));
     }
 
     bool can_inline_acc_store_arg(const Step *arg) const {
@@ -2028,64 +2027,20 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
                                            show(data.arg), (unsigned)std::underlying_type_t<FpClass>(data.flags));
     }
 
-    std::string store_i128_agg_to_cpp(const StoreI128AggData &data) override {
-        if (data.op != ArithBinaryOp::Add) {
-            messed_up("C++ i128 aggregate store does not support %s", show_arith_binary_op(data.op));
-        }
-        std::string result = "{\n"
-                             "uint64_t sum128_low = 0;\n"
-                             "uint64_t sum128_carry = 0;\n"
-                             "uint64_t sum128_prev = 0;\n";
-        size_t low_idx = 0;
-        for (auto *low : data.low_steps) {
-            if (low->dtype.is_vec()) {
-                VecDataType dtype = low->dtype.as_vec();
-                std::string values = format("sum128_values_%zu", low_idx++);
-                format_to(result,
-                          "alignas(16) uint64_t %s[%zu];\n"
-                          "%s(("
-                          "%s *)"
-                          "%s, "
-                          "%s);\n",
-                          values.c_str(), dtype.nelems(),         //
-                          arm_intrin_name("st1", dtype).c_str(),  //
-                          scalar_dtype_to_cpp(dtype.to_scalar()), //
-                          values.c_str(),                         //
-                          show(low));
-                format_to(result,
-                          "for (size_t sum128_i = 0; "
-                          "sum128_i < %zu; "
-                          "++sum128_i) {\n"
-                          "sum128_prev = sum128_low;\n"
-                          "sum128_low += %s[sum128_i];\n"
-                          "sum128_carry += (sum128_low < sum128_prev);\n"
-                          "}\n",
-                          dtype.nelems(), //
-                          values.c_str());
-                continue;
-            }
-            format_to(result,
-                      "sum128_prev = sum128_low;\n"
-                      "sum128_low += (uint64_t)%s;\n"
-                      "sum128_carry += (sum128_low < sum128_prev);\n",
-                      show_scalar_operand(low));
-        }
-        format_to(result,
-                  "__int128 sum128_hi = (__int128)%s + "
-                  "(__int128)sum128_carry;\n"
-                  "*arg%zu = (sum128_hi << 64) + "
-                  "(unsigned __int128)sum128_low;\n",
-                  show_scalar_operand(data.hi_combined), //
-                  data.dst);
-        result += '}';
-        return result;
+    std::string vec_extract_to_cpp(const Step *step, const VecExtractData &data) {
+        VecDataType dtype = data.arg->dtype.as_vec();
+        SIMJIT_ASSERT(dtype.elem == VecElemType::I64 && data.lane < dtype.nelems());
+        return cpp_var_decl(step) + format("vgetq_lane_s64(%s, %u)", show(data.arg), data.lane);
     }
 
     std::string backend_step_to_cpp(const Step *step, const MaskPushdownInfo *mask_pushdown) override {
         if (mask_pushdown != nullptr) {
             messed_up("ARM C++ emitter does not support mask pushdown for %s", show_step_kind(step->kind));
         }
-        if (step->kind != StepKind::StoreI128Agg && step->dtype.is_scalar() && is_scalar_step(step->kind)) {
+        if (step->is(StepKind::VecExtract)) {
+            return vec_extract_to_cpp(step, step->step_data<StepKind::VecExtract>());
+        }
+        if (step->dtype.is_scalar() && is_scalar_step(step->kind)) {
             if (step->is(StepKind::ArithUnary)) {
                 const auto &data = step->step_data<StepKind::ArithUnary>();
                 if (auto code = scalar_refined_reciprocal_to_cpp(step, data)) { return *code; }
@@ -2098,6 +2053,7 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
+        case StepKind::VecExtract:
         case StepKind::ConstDiv:
             messed_up("Unexpected ARM C++ instruction %s", show_step_kind(step->kind));
             SIMJIT_UNREACHABLE();
@@ -2107,9 +2063,9 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             if (step->dtype.is_mask()) { return mask_splat_to_cpp(step, data); }
             if (!step->dtype.is_vec()) { return unexpected_step_dtype(step, "vector or mask"); }
             VecDataType dtype = step->dtype.as_vec();
-            return cpp_var_decl(step) +
-                   format("%s(*(const %s *)((const char *)arg%zu + %zu))", arm_dup_intrin_name(dtype).c_str(),
-                          cpp_dtype(dtype.to_scalar()), data.addr.arg, data.byte_offset);
+            return cpp_var_decl(step) + format("%s(*(const %s *)((const char *)arg%zu + %zu))",
+                                               arm_dup_intrin_name(dtype).c_str(), cpp_dtype(dtype.to_scalar()),
+                                               data.addr.arg, data.byte_offset);
         }
         case StepKind::Const: {
             const auto &data = step->step_data<StepKind::Const>();
@@ -2221,35 +2177,32 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
                 uint64_t amount = data.amount->step_data<StepKind::Const>().as_unsigned();
                 uint64_t complement = dtype.element_size_bits() - amount;
                 if (data.kind == FunnelShiftKind::Left) {
-                    std::string lhs =
-                        format("%s(%s, %llu)", arm_shift_imm_intrin_name("shl", dtype).c_str(), left.c_str(),
-                               (unsigned long long)amount);
+                    std::string lhs = format("%s(%s, %llu)", arm_shift_imm_intrin_name("shl", dtype).c_str(),
+                                             left.c_str(), (unsigned long long)amount);
                     std::string rhs = logical_shift_right_imm_expr(dtype, right.c_str(), complement);
                     funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
                 } else {
-                    std::string lhs =
-                        format("%s(%s, %llu)", arm_shift_imm_intrin_name("shl", dtype).c_str(), left.c_str(),
-                               (unsigned long long)complement);
+                    std::string lhs = format("%s(%s, %llu)", arm_shift_imm_intrin_name("shl", dtype).c_str(),
+                                             left.c_str(), (unsigned long long)complement);
                     std::string rhs = logical_shift_right_imm_expr(dtype, right.c_str(), amount);
                     funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
                 }
             } else {
                 std::string amount = show(data.amount);
-                std::string bits =
-                    format("%s(%zu)", arm_dup_intrin_name(dtype).c_str(), dtype.element_size_bits());
+                std::string bits = format("%s(%zu)", arm_dup_intrin_name(dtype).c_str(), dtype.element_size_bits());
                 std::string complement =
                     format("%s(%s, %s)", arm_intrin_name("sub", dtype).c_str(), bits.c_str(), amount.c_str());
                 if (data.kind == FunnelShiftKind::Left) {
-                    std::string lhs = variable_shift_expr(dtype, ArithBinaryOp::ShiftLeftLogical, left.c_str(),
-                                                          amount.c_str());
-                    std::string rhs = variable_shift_expr(dtype, ArithBinaryOp::ShiftRightLogical, right.c_str(),
-                                                          complement.c_str());
+                    std::string lhs =
+                        variable_shift_expr(dtype, ArithBinaryOp::ShiftLeftLogical, left.c_str(), amount.c_str());
+                    std::string rhs =
+                        variable_shift_expr(dtype, ArithBinaryOp::ShiftRightLogical, right.c_str(), complement.c_str());
                     funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
                 } else {
-                    std::string lhs = variable_shift_expr(dtype, ArithBinaryOp::ShiftRightLogical, right.c_str(),
-                                                          amount.c_str());
-                    std::string rhs = variable_shift_expr(dtype, ArithBinaryOp::ShiftLeftLogical, left.c_str(),
-                                                          complement.c_str());
+                    std::string lhs =
+                        variable_shift_expr(dtype, ArithBinaryOp::ShiftRightLogical, right.c_str(), amount.c_str());
+                    std::string rhs =
+                        variable_shift_expr(dtype, ArithBinaryOp::ShiftLeftLogical, left.c_str(), complement.c_str());
                     funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
                 }
             }
@@ -2322,7 +2275,6 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             return float_narrow_combine_to_cpp(step, step->step_data<StepKind::VecFloatNarrowCombine>());
         case StepKind::VecPermute: return vec_permute_to_cpp(step, step->step_data<StepKind::VecPermute>());
         case StepKind::Fpclass: return fpclass_to_cpp(step, step->step_data<StepKind::Fpclass>());
-        case StepKind::StoreI128Agg: return store_i128_agg_to_cpp(step->step_data<StepKind::StoreI128Agg>());
         }
         SIMJIT_UNREACHABLE();
     }

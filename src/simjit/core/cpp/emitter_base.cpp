@@ -424,8 +424,7 @@ CppEmitterBase::StepNameKind CppEmitterBase::classify_step_name(const Step *step
     case StepKind::CondScatter:
     case StepKind::Pack:
     case StepKind::AccStore:
-    case StepKind::AggResult:
-    case StepKind::StoreI128Agg: return StepNameKind::None;
+    case StepKind::AggResult: return StepNameKind::None;
     default: return StepNameKind::Temp;
     }
 }
@@ -811,7 +810,7 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
                        format("*(const uint8_t *)((const char *)arg%zu + %zu) & 1", data.addr.arg, data.byte_offset);
             }
             return cpp_var_decl(step) + format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(step->dtype),
-                                                data.addr.arg, data.byte_offset);
+                                               data.addr.arg, data.byte_offset);
         }
         SIMJIT_MATCH (StepKind::Gather) {
             return cpp_var_decl(step) + format("arg%zu[%s]", data.data, show_scalar_operand(data.idx));
@@ -1026,10 +1025,10 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
         }
         SIMJIT_MATCH (StepKind::AggResult) {
             std::string arg = agg_result_arg_expr(data.arg);
-            return format("*arg%zu = %s", data.dst, arg.c_str());
+            return format("*(%s *)((char *)arg%zu + %zu) = %s", cpp_dtype(step->dtype), data.dst, data.byte_offset,
+                          arg.c_str());
         }
 
-        SIMJIT_MATCH (StepKind::StoreI128Agg) { return store_i128_agg_to_cpp(data); }
         SIMJIT_MATCH (StepKind::PredicateNot) { return cpp_var_decl(step) + format("!%s", show_scalar_operand(data)); }
         SIMJIT_MATCH (StepKind::Select) {
             if (auto expr = scalar_select_bool_expr(data)) { return cpp_var_decl(step) + *expr; }
@@ -1118,9 +1117,6 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
 
 std::string CppEmitterBase::step_to_cpp(const Step *step, const MaskPushdownInfo *mask_pushdown) {
     if (mask_pushdown != nullptr) { return backend_step_to_cpp(step, mask_pushdown); }
-    if (step->kind == StepKind::StoreI128Agg) {
-        return store_i128_agg_to_cpp(step->step_data<StepKind::StoreI128Agg>());
-    }
     if (step->dtype.is_scalar() && is_scalar_step(step->kind)) { return backend_step_to_cpp(step, nullptr); }
     return backend_step_to_cpp(step, nullptr);
 }

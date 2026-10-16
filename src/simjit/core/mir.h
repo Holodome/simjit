@@ -76,6 +76,7 @@ struct AccStoreData {
 struct AggResultData {
     Step *arg;
     ArgumentIdx dst;
+    size_t byte_offset{};
 };
 
 struct ArithReduceData {
@@ -202,11 +203,9 @@ struct LoadDeinterleaveData {
     uint8_t lane = 0;
 };
 
-struct StoreI128AggData {
-    ArithBinaryOp op{};
-    ArenaArray<Step *> low_steps;
-    Step *hi_combined;
-    ArgumentIdx dst{};
+struct VecExtractData {
+    Step *arg;
+    uint8_t lane{};
 };
 
 enum class FmaKind : uint8_t {
@@ -292,7 +291,7 @@ enum class StepKind : uint8_t {
     VecConst,
     VecPermute,
     ScalarPermute,
-    StoreI128Agg,
+    VecExtract,
     CondScatter,
     FMA,
     Fpclass,
@@ -348,7 +347,7 @@ private:
         FloatCastData float_cast;
         VecPermuteData vec_permute;
         ScalarPermuteData scalar_permute;
-        StoreI128AggData i128_agg;
+        VecExtractData vec_extract;
         CondScatterData cond_scatter;
         FMAData fma;
         FpclassData fpclass;
@@ -405,7 +404,7 @@ enum class AllowedDataTypes : uint8_t {
     X(vec_const, VecConst, vec_const, Vec)                                        \
     X(vec_permute, VecPermute, vec_permute, Vec)                                  \
     X(scalar_permute, ScalarPermute, scalar_permute, Scalar)                      \
-    X(i128_agg, StoreI128Agg, i128_agg, Scalar)                                   \
+    X(vec_extract, VecExtract, vec_extract, Scalar)                               \
     X(cond_scatter, CondScatter, cond_scatter, ScalarOrVec)                       \
     X(float_cast, FloatCast, float_cast, ScalarOrVec)                             \
     X(fma, FMA, fma, ScalarOrVec)                                                 \
@@ -598,11 +597,8 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.arg);
             break;
         }
-        SIMJIT_MATCH (StepKind::StoreI128Agg) {
-            for (auto x : data.low_steps) {
-                process(x);
-            }
-            process(data.hi_combined);
+        SIMJIT_MATCH (StepKind::VecExtract) {
+            process(data.arg);
             break;
         }
         SIMJIT_MATCH (StepKind::CondScatter) {
@@ -788,7 +784,7 @@ constexpr bool is_scalar_step(StepKind kind) noexcept {
     case StepKind::ScalarArithBinaryOverflow:
     case StepKind::FunnelShift:
     case StepKind::ScalarPermute:
-    case StepKind::StoreI128Agg:
+    case StepKind::VecExtract:
     case StepKind::CondScatter:
     case StepKind::BitCast:
     case StepKind::Fpclass:

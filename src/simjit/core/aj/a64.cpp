@@ -1489,8 +1489,7 @@ struct CompileState {
                         GpR concat = cc.new_gp64();
                         cc.mov(concat.w(), right);
                         cc.orr(concat.x(), concat.x(), left.x(), aja64::lsl(32));
-                        cc.lsr(result.x(), concat.x(),
-                               data.kind == FunnelShiftKind::Left ? bits - imm : imm);
+                        cc.lsr(result.x(), concat.x(), data.kind == FunnelShiftKind::Left ? bits - imm : imm);
                         return result;
                     }
                     GpR concat = cc.new_gp32();
@@ -1869,38 +1868,15 @@ struct CompileState {
             SIMJIT_MATCH (StepKind::AggResult) {
                 const ArgInfo &info = args[data.dst];
                 AnyR arg = subexpr(data.arg);
-                store(cc, arg, aja64::ptr(info.gp), sdtype);
+                store(cc, arg, aja64::ptr(info.gp, int32_t(data.byte_offset)), sdtype);
                 return {};
             }
-            SIMJIT_MATCH (StepKind::StoreI128Agg) {
-                if (data.op != ArithBinaryOp::Add) {
-                    messed_up("Arm i128 aggregate store does not support %s", show_arith_binary_op(data.op));
-                }
-                const ArgInfo &info = args[data.dst];
-                GpR zero = cc.new_gp64();
-                cc.mov(zero, 0);
-                GpR high = int_subexpr(data.hi_combined);
-                GpR low = cc.new_gp64();
-                cc.mov(low, 0);
-                for (Step *lo_step : data.low_steps) {
-                    if (lo_step->dtype.is_scalar()) {
-                        GpR lo_val = int_subexpr(lo_step);
-                        cc.adds(low, low, lo_val);
-                        cc.adc(high, high, zero);
-                    } else {
-                        VecR vec = vec_subexpr(lo_step);
-                        GpR lo_val = cc.new_gp64();
-                        cc.umov(lo_val, vec.d(0));
-                        cc.adds(low, low, lo_val);
-                        cc.adc(high, high, zero);
-                        cc.umov(lo_val, vec.d(1));
-                        cc.adds(low, low, lo_val);
-                        cc.adc(high, high, zero);
-                    }
-                }
-
-                cc.stp(low, high, aja64::ptr(info.gp));
-                return {};
+            SIMJIT_MATCH (StepKind::VecExtract) {
+                VecDataType vdtype = data.arg->dtype.as_vec();
+                SIMJIT_ASSERT(vdtype.elem == VecElemType::I64 && data.lane < vdtype.nelems());
+                GpR result = create_int_reg(sdtype);
+                cc.umov(result, vec_subexpr(data.arg).d(data.lane));
+                return result;
             }
             SIMJIT_MATCH (StepKind::AccLoad) { return accs[mir_func->accs.index(data)]; }
             SIMJIT_MATCH (StepKind::AccStore) {
@@ -2324,7 +2300,7 @@ struct CompileState {
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
-        case StepKind::StoreI128Agg:
+        case StepKind::VecExtract:
         case StepKind::ConstDiv:
             SIMJIT_ASSERT(0);
             messed_up("Unexpected instruction %s", show_step_kind(step->kind));

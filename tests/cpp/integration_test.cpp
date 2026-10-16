@@ -510,7 +510,8 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
         MemoryArena arena;
         Context ctx{arena, "i128_aggregate_shape", CodeTransformations::All, Arch::Native};
         FunctionBuilder builder{ctx};
-        builder.sum_if(builder.input_arg(I64), builder.input_predicate_arg(), builder.arg(I128));
+        Argument dst = builder.arg(I128);
+        builder.sum_if(builder.input_arg(I64), builder.input_predicate_arg(), dst);
 
         hir::Function *hir = builder.build();
         SIMJIT_ASSERT(hir->accs.size() == 1);
@@ -520,10 +521,18 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
         mir::Function *mir = lower_scalar(hir);
         SIMJIT_ASSERT(mir->accs.group_offsets.size() == 2);
         SIMJIT_ASSERT(mir->accs.group_offsets[1] == 2);
-        SIMJIT_ASSERT(mir_has_step(mir, [](mir::Step *step) {
-            return step->is(mir::StepKind::StoreI128Agg) &&
-                   step->step_data<mir::StepKind::StoreI128Agg>().op == ArithBinaryOp::Add;
-        }));
+        size_t i128_result_words = 0;
+        for (mir::Step *step : mir->epilogue_roots) {
+            if (!step->is(mir::StepKind::AggResult)) continue;
+            const auto &result = step->step_data<mir::StepKind::AggResult>();
+            if (result.dst != dst.idx_ || step->dtype != ScalarDataType::I64) continue;
+            SIMJIT_ASSERT(result.byte_offset == i128_result_words * 8);
+            ++i128_result_words;
+        }
+        SIMJIT_ASSERT(i128_result_words == 2);
+
+        mir::Function *vector_mir = lower_vectorized(hir);
+        SIMJIT_ASSERT(mir_has_step(vector_mir, [](mir::Step *step) { return step->is(mir::StepKind::VecExtract); }));
     });
 
     tests.emplace_back([] {

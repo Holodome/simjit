@@ -714,8 +714,7 @@ struct FunctionBuilderImpl {
             return sm.con(ConstData::u64(x).retag(dtype), dtype);
         };
         size_t bit_count = scalar_dtype_bits(dtype);
-        ArithBinaryOpFlags shift_flags =
-            dtype == I128 ? ArithBinaryOpFlags::ShiftWraparound : ArithBinaryOpFlags::No;
+        ArithBinaryOpFlags shift_flags = dtype == I128 ? ArithBinaryOpFlags::ShiftWraparound : ArithBinaryOpFlags::No;
 
         auto multiply_pos = [&](uint64_t n, bool is_neg) -> Step * {
             SIMJIT_ASSERT(n != 0);
@@ -731,9 +730,7 @@ struct FunctionBuilderImpl {
             if (has_single_bit(n - 1)) {
                 size_t count = nonzero_log2(n - 1);
                 SIMJIT_ASSERT(count < bit_count);
-                Step *tmp = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(count), shift_flags},
-                    dtype);
+                Step *tmp = sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(count), shift_flags}, dtype);
                 return sm.arith_bin({ArithBinaryOp::Add, tmp, arg}, dtype);
             }
             // 2^n - 1 => (x << n) - x
@@ -741,9 +738,7 @@ struct FunctionBuilderImpl {
                 size_t count = nonzero_log2(n + 1);
                 if (count >= bit_count) { return nullptr; }
                 SIMJIT_ASSERT(count < bit_count);
-                Step *tmp = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(count), shift_flags},
-                    dtype);
+                Step *tmp = sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(count), shift_flags}, dtype);
                 return sm.arith_bin({ArithBinaryOp::Sub, tmp, arg}, dtype);
             }
             // 2^n + 2^m => (x << n) + (x << m)
@@ -753,12 +748,10 @@ struct FunctionBuilderImpl {
                 SIMJIT_ASSERT(((1llu << first_shift) | (1llu << second_shift)) == n);
                 SIMJIT_ASSERT(first_shift < bit_count);
                 SIMJIT_ASSERT(second_shift < bit_count);
-                Step *first_shift_s = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(first_shift), shift_flags},
-                    dtype);
-                Step *second_shift_s = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(second_shift), shift_flags},
-                    dtype);
+                Step *first_shift_s =
+                    sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(first_shift), shift_flags}, dtype);
+                Step *second_shift_s =
+                    sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(second_shift), shift_flags}, dtype);
                 return sm.arith_bin({ArithBinaryOp::Add, first_shift_s, second_shift_s}, dtype);
             }
             // 2^n - 2 => (x << n) - x - x
@@ -766,9 +759,8 @@ struct FunctionBuilderImpl {
                 size_t count = nonzero_log2(n + 2);
                 if (count >= bit_count) { return nullptr; }
                 SIMJIT_ASSERT(count < bit_count);
-                Step *shifted = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(count), shift_flags},
-                    dtype);
+                Step *shifted =
+                    sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(count), shift_flags}, dtype);
                 Step *tmp = sm.arith_bin({ArithBinaryOp::Add, arg, arg}, dtype);
                 return sm.arith_bin({ArithBinaryOp::Sub, shifted, tmp}, dtype);
             }
@@ -779,12 +771,10 @@ struct FunctionBuilderImpl {
                 SIMJIT_ASSERT(((1llu << first_shift) | (1llu << second_shift) | 1llu) == n);
                 SIMJIT_ASSERT(first_shift < bit_count);
                 SIMJIT_ASSERT(second_shift < bit_count);
-                Step *first_shift_s = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(first_shift), shift_flags},
-                    dtype);
-                Step *second_shift_s = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(second_shift), shift_flags},
-                    dtype);
+                Step *first_shift_s =
+                    sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(first_shift), shift_flags}, dtype);
+                Step *second_shift_s =
+                    sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(second_shift), shift_flags}, dtype);
                 Step *tmp = sm.arith_bin({ArithBinaryOp::Add, first_shift_s, second_shift_s}, dtype);
                 return sm.arith_bin({ArithBinaryOp::Add, tmp, arg}, dtype);
             }
@@ -798,16 +788,13 @@ struct FunctionBuilderImpl {
                 SIMJIT_ASSERT(first_shift < bit_count);
                 SIMJIT_ASSERT(second_shift < bit_count);
                 SIMJIT_ASSERT(third_shift < bit_count);
-                Step *first_shift_s = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(first_shift), shift_flags},
-                    dtype);
-                Step *second_shift_s = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(second_shift), shift_flags},
-                    dtype);
+                Step *first_shift_s =
+                    sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(first_shift), shift_flags}, dtype);
+                Step *second_shift_s =
+                    sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(second_shift), shift_flags}, dtype);
                 Step *first_sum_s = sm.arith_bin({ArithBinaryOp::Add, first_shift_s, second_shift_s}, dtype);
-                Step *third_shift_s = sm.arith_bin(
-                    {ArithBinaryOp::ShiftLeftLogical, arg, make_con(third_shift), shift_flags},
-                    dtype);
+                Step *third_shift_s =
+                    sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, arg, make_con(third_shift), shift_flags}, dtype);
                 return sm.arith_bin({ArithBinaryOp::Add, first_sum_s, third_shift_s}, dtype);
             }
             return nullptr;
@@ -1493,8 +1480,7 @@ struct I128RewriteState {
     };
 
     U64Parts split_u64(Step *value) {
-        return {value,
-                sm.arith_bin({ArithBinaryOp::ShiftRightLogical, value, sm.con(ConstData::i64(32), I64)}, I64)};
+        return {value, sm.arith_bin({ArithBinaryOp::ShiftRightLogical, value, sm.con(ConstData::i64(32), I64)}, I64)};
     }
 
     I128Pair umul64_wide(U64Parts left, U64Parts right) {
@@ -1509,12 +1495,14 @@ struct I128RewriteState {
             {ArithBinaryOp::Add, middle, sm.arith_bin({ArithBinaryOp::And, x0y1, get_i64_mask32()}, I64)}, I64);
         middle = sm.arith_bin(
             {ArithBinaryOp::Add, middle, sm.arith_bin({ArithBinaryOp::And, x1y0, get_i64_mask32()}, I64)}, I64);
-        Step *low = sm.arith_bin(
-            {ArithBinaryOp::Add, x0y0,
-             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x0y1, sm.con(ConstData::i64(32), I64)}, I64)}, I64);
-        low = sm.arith_bin(
-            {ArithBinaryOp::Add, low,
-             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x1y0, sm.con(ConstData::i64(32), I64)}, I64)}, I64);
+        Step *low =
+            sm.arith_bin({ArithBinaryOp::Add, x0y0,
+                          sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x0y1, sm.con(ConstData::i64(32), I64)}, I64)},
+                         I64);
+        low =
+            sm.arith_bin({ArithBinaryOp::Add, low,
+                          sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x1y0, sm.con(ConstData::i64(32), I64)}, I64)},
+                         I64);
         Step *high =
             sm.arith_bin({ArithBinaryOp::Add, x1y1,
                           sm.arith_bin({ArithBinaryOp::ShiftRightLogical, x0y1, sm.con(ConstData::i64(32), I64)}, I64)},
@@ -1534,12 +1522,14 @@ struct I128RewriteState {
         Step *x0y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.low, right.low}, I64);
         Step *x0y1 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.low, right.high}, I64);
         Step *x1y0 = sm.arith_bin({ArithBinaryOp::Mul64ZE, left.high, right.low}, I64);
-        Step *low = sm.arith_bin(
-            {ArithBinaryOp::Add, x0y0,
-             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x0y1, sm.con(ConstData::i64(32), I64)}, I64)}, I64);
+        Step *low =
+            sm.arith_bin({ArithBinaryOp::Add, x0y0,
+                          sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x0y1, sm.con(ConstData::i64(32), I64)}, I64)},
+                         I64);
         return sm.arith_bin(
             {ArithBinaryOp::Add, low,
-             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x1y0, sm.con(ConstData::i64(32), I64)}, I64)}, I64);
+             sm.arith_bin({ArithBinaryOp::ShiftLeftLogical, x1y0, sm.con(ConstData::i64(32), I64)}, I64)},
+            I64);
     }
 
     I128Pair multiply_i128(I128Pair left, I128Pair right) {

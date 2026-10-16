@@ -96,7 +96,6 @@ protected:
     virtual bool suppress_compacted_acc_store_args(const Step *step, ArenaBitmap &suppressed) const;
     virtual std::optional<std::string> backend_compact_acc_store_to_cpp(const Step *step);
     virtual std::string backend_step_to_cpp(const Step *step, const MaskPushdownInfo *mask_pushdown) = 0;
-    virtual std::string store_i128_agg_to_cpp(const StoreI128AggData &data) = 0;
     virtual void record_backend_peephole_uses(Step *step);
 
     const char *show(const Step *step) const;

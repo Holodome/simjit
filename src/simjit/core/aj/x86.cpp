@@ -1165,6 +1165,7 @@ struct CompileState {
     GpR shifted_counter[7]{};
 
     std::unordered_map<uint64_t, aj::Label> bit_permute_luts{};
+    std::unordered_map<uint32_t, ax86::Mem> vec_extract_spills{};
 
     struct DeinterleaveIdxTable {
         VecDataType dtype{};
@@ -2509,48 +2510,21 @@ struct CompileState {
                 AnyR arg = subexpr(data.arg);
                 ScalarDataType dst_dtype = step->dtype.as_scalar();
                 if (dst_dtype == ScalarDataType::I1) { messed_up("i1 aggs should've been rewritten to use i8"); }
-                if (dst_dtype == ScalarDataType::I128) {
-                    messed_up("i128 aggs should've been handled with special opcodes");
-                }
-                ax86::Mem mem = ax86::Mem(info.gp, 0, scalar_dtype_size(dst_dtype));
+                ax86::Mem mem = ax86::Mem(info.gp, int64_t(data.byte_offset), scalar_dtype_size(dst_dtype));
                 scalar_mov(cc, mem, arg, sdtype);
                 return {};
             }
-            SIMJIT_MATCH (StepKind::StoreI128Agg) {
-                if (data.op != ArithBinaryOp::Add) {
-                    messed_up("x86 i128 aggregate store does not support %s", show_arith_binary_op(data.op));
+            SIMJIT_MATCH (StepKind::VecExtract) {
+                VecDataType vdtype = data.arg->dtype.as_vec();
+                SIMJIT_ASSERT(vdtype.elem == VecElemType::I64 && data.lane < vdtype.nelems());
+                auto [it, inserted] = vec_extract_spills.emplace(data.arg->id, ax86::Mem{});
+                if (inserted) {
+                    it->second = cc.new_stack(vdtype.size_bytes(), 8);
+                    cc.vmovdqu64(it->second, vec_subexpr(data.arg));
                 }
-                const ArgInfo &info = args[data.dst];
-                GpR zero = cc.new_gp64();
-                cc.mov(zero, 0);
-                GpR high = int_subexpr(data.hi_combined);
-                GpR low = cc.new_gp64();
-                cc.mov(low, 0);
-                for (Step *lo_step : data.low_steps) {
-                    if (lo_step->dtype.is_scalar()) {
-                        GpR lo_val = int_subexpr(lo_step);
-                        cc.add(low, lo_val);
-                        cc.adc(high, 0);
-                    } else {
-                        VecDataType vdtype = lo_step->dtype.as_vec();
-                        VecR vec = vec_subexpr(lo_step);
-                        ax86::Mem mem = cc.new_stack(vdtype.size_bytes(), 8);
-                        GpR lo_val = cc.new_gp64();
-                        cc.vmovdqu64(mem, vec);
-                        for (size_t i = 0; i < vdtype.nelems(); ++i) {
-                            int64_t off = (int64_t)(i * vdtype.element_size_bytes());
-                            cc.mov(lo_val, mem.clone_adjusted(off));
-                            cc.add(low, lo_val);
-                            cc.adc(high, 0);
-                        }
-                    }
-                }
-
-                ax86::Mem low_mem = ax86::qword_ptr(info.gp);
-                ax86::Mem high_mem = ax86::qword_ptr(info.gp, 8);
-                cc.mov(low_mem, low);
-                cc.mov(high_mem, high);
-                return {};
+                GpR result = create_int_reg(sdtype);
+                cc.mov(result, it->second.clone_adjusted(int64_t(data.lane) * 8));
+                return result;
             }
             SIMJIT_MATCH (StepKind::AccLoad) {
                 require_acc_initialized(data);
@@ -2883,7 +2857,7 @@ struct CompileState {
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
-        case StepKind::StoreI128Agg:
+        case StepKind::VecExtract:
         case StepKind::ConstDiv:
             messed_up("this is scalar instruction");
 
@@ -3005,7 +2979,9 @@ struct CompileState {
                 case VecElemType::I32: cc.vpbroadcastd(reg, ax86::dword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
                 case VecElemType::I64: cc.vpbroadcastq(reg, ax86::qword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
                 case VecElemType::F32: cc.vbroadcastss(reg, ax86::dword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
-                case VecElemType::F64: broadcast_f64(cc, reg, ax86::qword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::F64:
+                    broadcast_f64(cc, reg, ax86::qword_ptr(arg.gp, (int32_t)data.byte_offset));
+                    break;
                 }
                 return reg;
             }
