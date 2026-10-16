@@ -283,7 +283,7 @@ static void add_wrapper_tests(std::vector<Test> &tests) {
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.signed_cast(b.input_arg(I1), I32)); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.unsigned_cast(b.input_arg(I1), I32)); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.log2_no_zero(b.input_arg(F32))); });
-    add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.log2(b.input_arg(I128))); });
+    add_valid(tests, [](FunctionBuilder &b) { b.output_arg(b.log2(b.input_arg(I128))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.bit_floor(b.input_arg(F64))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.bit_ceil(b.input_arg(I1))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.has_single_bit(b.input_arg(F32))); });

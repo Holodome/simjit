@@ -5785,6 +5785,11 @@ def func(n, arg, dst):
         Value tmp = b.log2(x);
         b.output_arg(tmp);
     }},
+    Test{[](FunctionBuilder &b) { b.store(b.log2(b.input_arg(I128)), b.arg(I128)); }},
+    Test{[](FunctionBuilder &b) {
+        Value x = b.or_(b.input_arg(I128), b.con(1, I128));
+        b.store(b.log2_no_zero(x), b.arg(I128));
+    }},
     // sign_no_zero
     Test{[](FunctionBuilder &b) {
         Value x = b.input_arg(I64);
@@ -6358,6 +6363,7 @@ def func(n, arg, dst):
         Value x = b.input_arg(I64);
         b.store(b.has_single_bit(x), dst);
     }},
+    Test{[](FunctionBuilder &b) { b.store(b.has_single_bit(b.input_arg(I128)), b.arg(I1)); }},
     // bit_floor
     Test{[](FunctionBuilder &b) {
         Argument dst = b.arg(I32);
@@ -6369,6 +6375,7 @@ def func(n, arg, dst):
         Value x = b.input_arg(I64);
         b.store(b.bit_floor(x), dst);
     }},
+    Test{[](FunctionBuilder &b) { b.store(b.bit_floor(b.input_arg(I128)), b.arg(I128)); }},
     // bit_ceil
     Test{[](FunctionBuilder &b) {
         Argument dst = b.arg(I32);
@@ -6381,6 +6388,10 @@ def func(n, arg, dst):
         Value x = b.input_arg(I64);
         x = b.and_(x, b.i64(0x7FFFFFFFFFFFFFFF));
         b.store(b.bit_ceil(x), dst);
+    }},
+    Test{[](FunctionBuilder &b) {
+        Value x = b.srl(b.input_arg(I128), b.con(1, I128));
+        b.store(b.bit_ceil(x), b.arg(I128));
     }},
     // sll overflow
     Test{[](FunctionBuilder &b) {

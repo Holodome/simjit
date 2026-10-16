@@ -2905,30 +2905,30 @@ Value FunctionBuilder::unsigned_cast(Value value, ScalarDataType to) {
     return trunc(value, to);
 }
 
-static void check_simple_int_bit_helper_arg(ScalarDataType dtype, const char *func_name) {
-    if (!is_simple_int_dtype(dtype)) {
-        invalid_type("%s argument must be one of the i8,i16,i32,i64 types. Got %s", func_name,
+static void check_int_bit_helper_arg(ScalarDataType dtype, const char *func_name) {
+    if (!is_int_dtype(dtype) || dtype == I1) {
+        invalid_type("%s argument must be one of the i8,i16,i32,i64,i128 types. Got %s", func_name,
                      show_scalar_dtype(dtype));
     }
 }
 
 Value FunctionBuilder::log2_no_zero(Value value) {
     ScalarDataType dtype = value.dtype();
-    check_simple_int_bit_helper_arg(dtype, "log2_no_zero");
+    check_int_bit_helper_arg(dtype, "log2_no_zero");
     size_t bits = scalar_dtype_bits(dtype) - 1;
     return sub(con((int64_t)bits, dtype), lzcnt(value));
 }
 
 Value FunctionBuilder::log2(Value value) {
     ScalarDataType dtype = value.dtype();
-    check_simple_int_bit_helper_arg(dtype, "log2");
+    check_int_bit_helper_arg(dtype, "log2");
     auto is_predicate_notzero = cmp_ne(value, con(0, dtype));
     size_t bits = scalar_dtype_bits(dtype) - 1;
     return zero_select(sub(con((int64_t)bits, dtype), lzcnt(value)), is_predicate_notzero);
 }
 
 Predicate FunctionBuilder::has_single_bit(Value value) {
-    check_simple_int_bit_helper_arg(value.dtype(), "has_single_bit");
+    check_int_bit_helper_arg(value.dtype(), "has_single_bit");
     return bit_testn(value, sub(value, con(1, value.dtype())));
 }
 
@@ -2948,14 +2948,14 @@ Value FunctionBuilder::byteswap(Value value) {
 
 Value FunctionBuilder::bit_floor(Value value) {
     ScalarDataType dtype = value.dtype();
-    check_simple_int_bit_helper_arg(dtype, "bit_floor");
+    check_int_bit_helper_arg(dtype, "bit_floor");
     return zero_select(sll(con(1, dtype), sub(con((int64_t)scalar_dtype_bits(dtype) - 1, dtype), lzcnt(value))),
                        cmp_ne(value, con(0, dtype)));
 }
 
 Value FunctionBuilder::bit_ceil(Value value) {
     ScalarDataType dtype = value.dtype();
-    check_simple_int_bit_helper_arg(dtype, "bit_ceil");
+    check_int_bit_helper_arg(dtype, "bit_ceil");
     // log2
     Value x = sub(con((int64_t)scalar_dtype_bits(dtype), dtype), lzcnt(sub(value, con(1, dtype))));
     return select(cmp_ule(value, con(1, dtype)), con(1, dtype), sll(con(1, dtype), x));
