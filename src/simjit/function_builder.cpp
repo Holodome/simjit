@@ -400,7 +400,7 @@ struct FunctionBuilderImpl {
         return sm.load_deinterleave({arg.idx, kind, lane_count, lane}, arg.interleaved_half_dtype);
     }
 
-    Step *gather(Step *idx, const ArgumentDecl &dst) { return sm.gather({idx, dst.idx}, dst.dtype); }
+    Step *gather(Step *idx, const ArgumentDecl &dst, ScalarDataType dtype) { return sm.gather({idx, dst.idx}, dtype); }
 
     Step *con(ConstData data, ScalarDataType dtype) { return sm.con(data, dtype); }
 
@@ -1674,6 +1674,17 @@ struct I128RewriteState {
                     {sm.load_splat({data.idx, data.kind, data.byte_offset}, I64),
                      sm.load_splat({data.idx, data.kind, data.byte_offset + sizeof(uint64_t)}, I64)});
             }
+            SIMJIT_MATCH (StepKind::Gather) {
+                if (step->dtype != I128) break;
+                mark_i128_argument(data.data);
+                Step *idx = rewrite_scalar(data.idx, step);
+                Step *twice_idx = sm.arith_bin({ArithBinaryOp::Add, idx, idx}, idx->dtype);
+                Step *odd_idx = sm.arith_bin(
+                    {ArithBinaryOp::Add, twice_idx, sm.con(ConstData::i64(1).retag(idx->dtype), idx->dtype)},
+                    idx->dtype);
+                return RewrittenStep::make_pair(
+                    {sm.gather({twice_idx, data.data}, I64), sm.gather({odd_idx, data.data}, I64)});
+            }
 
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 if (step->dtype != I128) break;
@@ -2217,6 +2228,10 @@ Predicate FunctionBuilder::load_predicate(Argument argument) {
 }
 
 Value FunctionBuilder::gather(Value idx, Argument argument) {
+    return gather(idx, argument, impl_->get_arg(argument.idx_).dtype);
+}
+
+Value FunctionBuilder::gather(Value idx, Argument argument, ScalarDataType dtype) {
     check_value(idx);
 
     if (!is_simple_int_dtype(idx.dtype())) {
@@ -2224,15 +2239,19 @@ Value FunctionBuilder::gather(Value idx, Argument argument) {
                      show_scalar_dtype(idx.dtype()));
     }
     if (idx.dtype() == I8 || idx.dtype() == I16) { idx = zext(idx, I32); }
-    uint64_t hash = make_hash(StepKind::Gather, argument, idx);
+    const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
+    if (dtype != func_arg.dtype && (!func_arg.interleaved || dtype != func_arg.interleaved_half_dtype)) {
+        invalid_type("gather type %s does not match argument carrier %s or interleaved half type",
+                     show_scalar_dtype(dtype), show_scalar_dtype(func_arg.dtype));
+    }
+    uint64_t hash = make_hash(StepKind::Gather, argument, idx, dtype);
     if (auto *result = impl_->cse<StepKind::Gather>(
-            hash, [idx, argument](const auto &x) { return x.idx == idx.step_ && x.data == argument.idx_; })) {
+            hash, dtype, [idx, argument](const auto &x) { return x.idx == idx.step_ && x.data == argument.idx_; })) {
         return result;
     }
-    const ArgumentDecl &func_arg = impl_->get_arg(argument.idx_);
-    if (func_arg.dtype == I8 || func_arg.dtype == I16) { impl_->special_ops |= SpecialOp::SmallGather; }
+    if (dtype == I8 || dtype == I16) { impl_->special_ops |= SpecialOp::SmallGather; }
     impl_->special_ops |= SpecialOp::Gather;
-    Step *s = impl_->gather(idx.step_, func_arg);
+    Step *s = impl_->gather(idx.step_, func_arg, dtype);
     return impl_->remember_expr(hash, s);
 }
 

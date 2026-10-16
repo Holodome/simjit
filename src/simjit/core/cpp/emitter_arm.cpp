@@ -1108,11 +1108,15 @@ struct ArmNeonCppEmitter : CppEmitterBase {
         }
 
         size_t id = step->id;
+        const ArgumentDecl &data_arg = func->args[data.data];
+        std::string data_expr = data_arg.dtype == dtype.to_scalar()
+                                    ? format("arg%zu", data.data)
+                                    : format("((const %s *)arg%zu)", cpp_dtype(dtype.to_scalar()), data.data);
         std::string values =
             format("const %s gather_values_%zu[%zu] = {", cpp_dtype(dtype.to_scalar()), id, dtype.nelems());
         for (size_t lane = 0; lane < dtype.nelems(); ++lane) {
             if (lane != 0) { values += ", "; }
-            format_to(values, "arg%zu[%s]", data.data, lane_expr(data.idx, lane).c_str());
+            format_to(values, "%s[%s]", data_expr.c_str(), lane_expr(data.idx, lane).c_str());
         }
         format_to(values, "};\n%s%s(gather_values_%zu)", cpp_var_decl(step).c_str(),
                   arm_intrin_name("ld1", dtype).c_str(), id);

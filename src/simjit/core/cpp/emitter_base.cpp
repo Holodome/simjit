@@ -813,6 +813,11 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
                                                data.addr.arg, data.byte_offset);
         }
         SIMJIT_MATCH (StepKind::Gather) {
+            const ArgumentDecl &arg = func->args[data.data];
+            if (arg.dtype != step->dtype.as_scalar()) {
+                return cpp_var_decl(step) + format("((const %s *)arg%zu)[%s]", cpp_dtype(step->dtype), data.data,
+                                                   show_scalar_operand(data.idx));
+            }
             return cpp_var_decl(step) + format("arg%zu[%s]", data.data, show_scalar_operand(data.idx));
         }
         SIMJIT_MATCH (StepKind::Store) {

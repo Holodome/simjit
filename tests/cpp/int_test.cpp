@@ -4067,6 +4067,11 @@ def func(n, x, idx, dst):
     for i in range(n):
         dst[i] = x[idx[i]]
         )FOO"},
+    // I128 gather rewrites to two i64 gathers at indices 2 * idx and 2 * idx + 1.
+    Test{[](FunctionBuilder &b) { b.store(b.gather(b.input_arg(I32), b.arg(I128)), b.arg(I128)); },
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector,
+                                                simjit::ErrorSubKind::CoefficientRangeNeedsNormalization)},
+    Test{[](FunctionBuilder &b) { b.store(b.gather(b.input_arg(I64), b.arg(I128)), b.arg(I128)); }, PASS_ALL},
     // scatter 32
     Test{[](FunctionBuilder &b) {
              Value x = b.input_arg(I32);

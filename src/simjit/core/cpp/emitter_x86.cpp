@@ -1489,14 +1489,18 @@ struct X86CppEmitter : CppEmitterBase {
             SIMJIT_MATCH (StepKind::Gather) {
                 VecDataType vec_dtype = step->dtype.as_vec();
                 MaskDataType mdtype = vec_dtype.mask();
+                const ArgumentDecl &data_arg = func->args[data.data];
+                ScalarDataType element_dtype = vec_dtype.to_scalar();
+                std::string data_ptr = data_arg.dtype == element_dtype
+                                           ? format("arg%zu", data.data)
+                                           : format("(const %s *)arg%zu", cpp_dtype(element_dtype), data.data);
                 const auto &intrin = data.idx->dtype.as_vec().elem == VecElemType::I32
                                          ? x86::mask_i32gather_map.lookup(vec_dtype)
                                          : x86::mask_i64gather_map.lookup(vec_dtype);
 
                 if (mask_pushdown != nullptr && mask_pushdown->merge != nullptr) {
                     return cpp_var_decl(result_step) +
-                           unsafe_intrin_call(intrin, mask_pushdown->merge, mask_pushdown->mask, data.idx,
-                                              format("arg%zu", data.data),
+                           unsafe_intrin_call(intrin, mask_pushdown->merge, mask_pushdown->mask, data.idx, data_ptr,
                                               std::to_string(vec_dtype.element_size_bytes()));
                 }
 
@@ -1504,14 +1508,13 @@ struct X86CppEmitter : CppEmitterBase {
                     const auto &setzero_intrin = x86::setzero_map.lookup(vec_dtype);
                     return cpp_var_decl(result_step) +
                            unsafe_intrin_call(intrin, unsafe_intrin_call(setzero_intrin), mask_pushdown->mask, data.idx,
-                                              format("arg%zu", data.data),
-                                              std::to_string(vec_dtype.element_size_bytes()));
+                                              data_ptr, std::to_string(vec_dtype.element_size_bytes()));
                 }
 
                 const auto &undefined_intrin = x86::undefined_map.lookup(vec_dtype);
-                return cpp_var_decl(step) +
-                       unsafe_intrin_call(intrin, unsafe_intrin_call(undefined_intrin), mask_all_ones(mdtype), data.idx,
-                                          format("arg%zu", data.data), std::to_string(vec_dtype.element_size_bytes()));
+                return cpp_var_decl(step) + unsafe_intrin_call(intrin, unsafe_intrin_call(undefined_intrin),
+                                                               mask_all_ones(mdtype), data.idx, data_ptr,
+                                                               std::to_string(vec_dtype.element_size_bytes()));
             }
             SIMJIT_MATCH (StepKind::Scatter) {
                 VecDataType vdtype = step->dtype.as_vec();

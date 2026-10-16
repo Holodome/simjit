@@ -574,7 +574,8 @@ struct LLVMBuilder {
             SIMJIT_MATCH (StepKind::Gather) {
                 ArgInfo &info = func_args[data.data];
                 V *idx_value = step_to_llvm(data.idx);
-                return b->CreateLoad(info.element_type, index_arg(info, idx_value));
+                llvm::Type *element_type = scalar_type_to_llvm(step->dtype.as_scalar());
+                return b->CreateLoad(element_type, index_arg(info, idx_value, element_type));
             }
             SIMJIT_MATCH (StepKind::Store) {
                 V *arg = step_to_llvm(data.what);

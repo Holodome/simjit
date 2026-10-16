@@ -601,6 +601,8 @@ public:
                             LoadStoreKind kind = LoadStoreKind::Unaligned);
 
     Value gather(Value idx, Argument a);
+    // `dtype` may be either the argument carrier type or the half type of a marked interleaved argument.
+    Value gather(Value idx, Argument a, ScalarDataType dtype);
     Value load_splat(Argument a, size_t byte_offset = 0);
     // `dtype` may be either the argument carrier type or the half type of a marked interleaved argument.
     Value load_splat(Argument a, ScalarDataType dtype, size_t byte_offset = 0);

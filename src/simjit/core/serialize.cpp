@@ -754,7 +754,7 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
     }
     case StepKind::Gather: {
         auto [idx, func_arg] = bind_step(hl::cap, hl::cap);
-        return builder.gather(ref_value(idx), parse_arg_ref(func_arg));
+        return builder.gather(ref_value(idx), parse_arg_ref(func_arg), dtype);
     }
     case StepKind::LoadSplat: {
         auto [func_arg, offset] = bind_step(hl::cap, hl::or_nil);
