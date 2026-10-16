@@ -25,17 +25,24 @@ std::vector<Test> agg_tests{
              b.andnot_agg_if(value, cond, b.arg(I128));
          },
          PASS_ALL},
-    // An i64 aggregate input keeps its existing implicit signed widening;
-    // callers that need a zero high word use the normal Zext HIR cast.
+    // The default-enabled SumAutoSext transformation sign-extends all widening
+    // integer sums, including the existing i64-to-i128 sum.
+    Test{[](FunctionBuilder &b) { b.sum(b.input_arg(I8), b.arg(I16)); }, PASS_ALL},
+    Test{[](FunctionBuilder &b) { b.sum(b.input_arg(I16), b.arg(I32)); }, PASS_ALL},
+    Test{[](FunctionBuilder &b) { b.sum(b.input_arg(I32), b.arg(I64)); }, PASS_ALL},
+    Test{[](FunctionBuilder &b) { b.sum(b.input_arg(I64), b.arg(I128)); }, PASS_ALL},
+    // Other i128 aggregates take an explicit integer extension, including Zext
+    // when the caller wants a zero high word.
     Test{[](FunctionBuilder &b) {
              Value value = b.input_arg(I64);
+             Value signed_extended = b.sext(value, I128);
              Value zero_extended = b.zext(value, I128);
              Predicate cond = b.input_predicate_arg();
-             b.umin_agg(value, b.arg(I128));
+             b.umin_agg(signed_extended, b.arg(I128));
              b.umin_agg(zero_extended, b.arg(I128));
-             b.umax_agg_if(value, cond, b.arg(I128));
+             b.umax_agg_if(signed_extended, cond, b.arg(I128));
              b.umax_agg_if(zero_extended, cond, b.arg(I128));
-             b.andnot_agg(value, b.arg(I128));
+             b.andnot_agg(signed_extended, b.arg(I128));
              b.andnot_agg(zero_extended, b.arg(I128));
          },
          PASS_ALL},

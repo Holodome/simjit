@@ -228,7 +228,7 @@ static void add_low_level_api_tests(std::vector<Test> &tests) {
     add_invalid(tests,
                 [](FunctionBuilder &b) { b.output_arg(b.int_cast(b.input_arg(I32), I64, IntCastKind::Sext, true)); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.cmp_ugt(b.input_arg(F32), b.input_arg(F32))); });
-    add_unsupported(tests, [](FunctionBuilder &b) { b.sum(b.input_arg(I32), b.arg(I128)); });
+    add_valid(tests, [](FunctionBuilder &b) { b.sum(b.input_arg(I32), b.arg(I128)); });
     add_unsupported(tests, [](FunctionBuilder &b) { b.product(b.input_arg(I64), b.arg(I128)); });
     add_valid(tests, [](FunctionBuilder &b) {
         Argument src = b.arg(I128);

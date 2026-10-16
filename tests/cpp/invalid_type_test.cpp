@@ -52,17 +52,17 @@ namespace {
     X(cmp_lt)                    \
     X(cmp_le)
 
-#define SIMJIT_ARITH_AGG_OPS(X) \
-    X(sum, sum_if)              \
-    X(product, product_if)      \
-    X(min_agg, min_agg_if)      \
-    X(max_agg, max_agg_if)      \
-    X(umin_agg, umin_agg_if)    \
-    X(umax_agg, umax_agg_if)    \
-    X(and_agg, and_agg_if)      \
-    X(or_agg, or_agg_if)        \
-    X(xor_agg, xor_agg_if)      \
-    X(andnot_agg, andnot_agg_if)
+#define SIMJIT_ARITH_AGG_OPS(X)     \
+    X(sum, sum_if, true)            \
+    X(product, product_if, false)   \
+    X(min_agg, min_agg_if, false)   \
+    X(max_agg, max_agg_if, false)   \
+    X(umin_agg, umin_agg_if, false) \
+    X(umax_agg, umax_agg_if, false) \
+    X(and_agg, and_agg_if, false)   \
+    X(or_agg, or_agg_if, false)     \
+    X(xor_agg, xor_agg_if, false)   \
+    X(andnot_agg, andnot_agg_if, false)
 
 #define SIMJIT_PREDICATE_AGG_OPS(X) \
     X(and_agg)                      \
@@ -228,12 +228,15 @@ static void add_aggregate_tests(std::vector<Test> &tests) {
     for (ScalarDataType arg_dtype : kAllDtypes) {
         for (ScalarDataType dst_dtype : kAllDtypes) {
             if (dst_dtype == arg_dtype || dst_dtype == I128) { continue; }
-#define SIMJIT_ADD_INVALID_AGG_TEST(OP, OP_IF)                                                                   \
-    add_invalid(tests,                                                                                           \
-                [arg_dtype, dst_dtype](FunctionBuilder &b) { b.OP(b.input_arg(arg_dtype), b.arg(dst_dtype)); }); \
-    add_invalid(tests, [arg_dtype, dst_dtype](FunctionBuilder &b) {                                              \
-        b.OP_IF(b.input_arg(arg_dtype), b.input_predicate_arg(), b.arg(dst_dtype));                              \
-    });
+#define SIMJIT_ADD_INVALID_AGG_TEST(OP, OP_IF, IS_SUM)                                                               \
+    if (!(IS_SUM && is_int_dtype(arg_dtype) && is_int_dtype(dst_dtype) &&                                            \
+          scalar_dtype_size(arg_dtype) < scalar_dtype_size(dst_dtype))) {                                            \
+        add_invalid(tests,                                                                                           \
+                    [arg_dtype, dst_dtype](FunctionBuilder &b) { b.OP(b.input_arg(arg_dtype), b.arg(dst_dtype)); }); \
+        add_invalid(tests, [arg_dtype, dst_dtype](FunctionBuilder &b) {                                              \
+            b.OP_IF(b.input_arg(arg_dtype), b.input_predicate_arg(), b.arg(dst_dtype));                              \
+        });                                                                                                          \
+    }
             SIMJIT_ARITH_AGG_OPS(SIMJIT_ADD_INVALID_AGG_TEST)
 #undef SIMJIT_ADD_INVALID_AGG_TEST
         }

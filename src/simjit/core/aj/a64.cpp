@@ -1868,7 +1868,8 @@ struct CompileState {
             SIMJIT_MATCH (StepKind::AggResult) {
                 const ArgInfo &info = args[data.dst];
                 AnyR arg = subexpr(data.arg);
-                store(cc, arg, aja64::ptr(info.gp, int32_t(data.byte_offset)), sdtype);
+                SIMJIT_ASSERT(data.byte_offset <= INT32_MAX);
+                store(cc, arg, aja64::ptr(info.gp, static_cast<int32_t>(data.byte_offset)), sdtype);
                 return {};
             }
             SIMJIT_MATCH (StepKind::VecExtract) {

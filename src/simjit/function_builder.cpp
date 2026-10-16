@@ -802,21 +802,19 @@ struct FunctionBuilderImpl {
 
         if (const_v == 0) { return make_con(0); }
         if (const_v > 0) { return multiply_pos(const_v, false); }
-        if (const_v < 0) {
-            if (const_v == -1) { return sm.arith_un({ArithUnaryOp::Negate, arg}, left->dtype); }
-            if (const_v == std::numeric_limits<int64_t>::min()) { return nullptr; }
-            uint64_t mn = -const_v;
-            if (Step *last = multiply_pos(mn, true)) {
-                // If the last instruction was subtraction, we can swap operands places
-                if (last->is(StepKind::ArithBinary) &&
-                    last->step_data<StepKind::ArithBinary>().op == ArithBinaryOp::Sub) {
-                    auto &dat = last->step_data<StepKind::ArithBinary>();
-                    std::swap(dat.left, dat.right);
-                } else {
-                    last = sm.arith_un({ArithUnaryOp::Negate, last}, dtype);
-                }
-                return last;
+        SIMJIT_ASSERT(const_v < 0);
+        if (const_v == -1) { return sm.arith_un({ArithUnaryOp::Negate, arg}, left->dtype); }
+        if (const_v == std::numeric_limits<int64_t>::min()) { return nullptr; }
+        uint64_t mn = -const_v;
+        if (Step *last = multiply_pos(mn, true)) {
+            // If the last instruction was subtraction, we can swap operands places
+            if (last->is(StepKind::ArithBinary) && last->step_data<StepKind::ArithBinary>().op == ArithBinaryOp::Sub) {
+                auto &dat = last->step_data<StepKind::ArithBinary>();
+                std::swap(dat.left, dat.right);
+            } else {
+                last = sm.arith_un({ArithUnaryOp::Negate, last}, dtype);
             }
+            return last;
         }
         return nullptr;
     }
@@ -2029,12 +2027,18 @@ void FunctionBuilder::cond_arith_agg(Value value, MaybePredicate cond, ArithBina
     check_arith_agg_op(op);
     const ArgumentDecl &dst_info = impl_->get_arg(dst.idx_);
     ScalarDataType dtype = dst_info.dtype;
+    bool widening_sum = op == ArithBinaryOp::Add && is_int_dtype(value.dtype()) && is_int_dtype(dtype) &&
+                        scalar_dtype_size(value.dtype()) < scalar_dtype_size(dtype);
+    if (widening_sum) {
+        if (!bool(impl_->ctx->transformations & CodeTransformations::SumAutoSext)) {
+            unsupported("widening sum requires SumAutoSext or an explicit sext");
+        }
+        Step *original = nullptr;
+        value.step_ = impl_->int_cast(value.step_, dtype, IntCastKind::Sext, &original);
+    }
     if (dst_info.dtype == I128) {
-        if (value.dtype() == I64) {
-            Step *original = nullptr;
-            value.step_ = impl_->int_cast(value.step_, I128, IntCastKind::Sext, &original);
-        } else if (value.dtype() != I128) {
-            unsupported("Only support calculating 128-bit aggregates of i64 or i128 values, got %s",
+        if (value.dtype() != I128) {
+            unsupported("Only support calculating 128-bit aggregates of i128 values, got %s",
                         show_scalar_dtype(value.dtype()));
         }
         if (op != ArithBinaryOp::Add && op != ArithBinaryOp::Min && op != ArithBinaryOp::Max &&

@@ -29,8 +29,8 @@ struct AccId {
 static_assert(sizeof(AccId) == sizeof(uint64_t));
 
 struct ArgumentAddress {
-    ArgumentIdx arg;
-    size_t offset;
+    ArgumentIdx arg{};
+    size_t offset{};
 };
 
 struct ArithBinData {
@@ -56,9 +56,9 @@ struct GatherData {
 };
 
 struct StoreData {
-    ArgumentAddress addr;
+    ArgumentAddress addr{};
     Step *what;
-    LoadStoreKind kind;
+    LoadStoreKind kind{};
 };
 
 struct CmpData {
@@ -75,7 +75,7 @@ struct AccStoreData {
 
 struct AggResultData {
     Step *arg;
-    ArgumentIdx dst;
+    ArgumentIdx dst{};
     size_t byte_offset{};
 };
 
@@ -138,10 +138,10 @@ struct PackData {
 };
 
 struct CondStoreData {
-    ArgumentAddress addr;
+    ArgumentAddress addr{};
     Step *arg;
     Step *cond;
-    LoadStoreKind kind;
+    LoadStoreKind kind{};
 };
 
 struct TernarylogicData {
@@ -191,8 +191,8 @@ struct ScalarPermuteData {
 };
 
 struct LoadData {
-    ArgumentAddress addr;
-    LoadStoreKind kind;
+    ArgumentAddress addr{};
+    LoadStoreKind kind{};
     size_t byte_offset{};
 };
 

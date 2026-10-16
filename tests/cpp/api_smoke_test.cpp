@@ -918,6 +918,47 @@ static void api_smoke_load_deinterleave() {
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
+        builder.sum(builder.input_arg(I8), builder.arg(I16));
+        builder.sum(builder.input_arg(I16), builder.arg(I32));
+        builder.sum(builder.input_arg(I32), builder.arg(I64));
+        Value i64 = builder.input_arg(I64);
+        builder.sum(i64, builder.arg(I128));
+
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots.size() == 4, "all integer sum widths retain a widening root");
+        for (size_t i = 0; i < 3; ++i) {
+            const auto &sum = fn->step_roots[i]->step_data<hir::StepKind::AccArithBinary>();
+            require_api_smoke(sum.arg->is(hir::StepKind::IntCast) &&
+                                  sum.arg->step_data<hir::StepKind::IntCast>().kind == IntCastKind::Sext,
+                              "automatic widening sum uses an ordinary sign extension");
+        }
+        const auto &i128_sum = fn->step_roots[3]->step_data<hir::StepKind::AccI128>();
+        require_api_smoke(i128_sum.low == i64.step_, "automatic i128 sum widening preserves the low i64 word");
+        require_api_smoke(i128_sum.high->is(hir::StepKind::ArithBinary) &&
+                              i128_sum.high->step_data<hir::StepKind::ArithBinary>().op ==
+                                  ArithBinaryOp::ShiftRightArith,
+                          "automatic i128 sum widening sign-extends the high i64 word");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::SumAutoSext, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        expect_api_smoke_simjit_error([&] { builder.sum(builder.input_arg(I32), builder.arg(I64)); }, ErrorModule::HIR,
+                                      ErrorKind::Unsupported, ErrorSubKind::UnsupportedFeature,
+                                      "integer sum widening can be disabled");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::SumAutoSext, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        builder.sum(builder.sext(builder.input_arg(I32), I64), builder.arg(I64));
+        require_api_smoke(builder.build()->step_roots[0]->is(hir::StepKind::AccArithBinary),
+                          "explicit sum sign extension works without SumAutoSext");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
         Argument src = builder.arg(I128);
         builder.store(builder.rotl(builder.load(src), builder.con(64, I128)), builder.arg(I128));
         hir::Function *fn = builder.build();

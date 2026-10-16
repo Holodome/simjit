@@ -887,8 +887,8 @@ static void vec_funnel_imm(ax86::Compiler &cc, FunnelShiftKind kind, VecElemType
 }
 
 template <typename T>
-static void vec_funnel_var(ax86::Compiler &cc, FunnelShiftKind kind, VecElemType type, VecR result, const VecR &right,
-                           const T &amount) {
+static void vec_funnel_var(ax86::Compiler &cc, FunnelShiftKind kind, VecElemType type, const VecR &result,
+                           const VecR &right, const T &amount) {
     switch (type) {
         INVALID_FLOAT_CASES;
     case VecElemType::I8: unsupported("Do not support i8 funnel shift");
@@ -2510,7 +2510,9 @@ struct CompileState {
                 AnyR arg = subexpr(data.arg);
                 ScalarDataType dst_dtype = step->dtype.as_scalar();
                 if (dst_dtype == ScalarDataType::I1) { messed_up("i1 aggs should've been rewritten to use i8"); }
-                ax86::Mem mem = ax86::Mem(info.gp, int64_t(data.byte_offset), scalar_dtype_size(dst_dtype));
+                SIMJIT_ASSERT(data.byte_offset <= INT32_MAX);
+                ax86::Mem mem =
+                    ax86::Mem(info.gp, static_cast<int32_t>(data.byte_offset), scalar_dtype_size(dst_dtype));
                 scalar_mov(cc, mem, arg, sdtype);
                 return {};
             }

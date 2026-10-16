@@ -1355,6 +1355,20 @@ struct MirConstructState {
         return i128_agg_combine(op, acc, value, dtype);
     }
 
+    I128AggState i128_agg_fold_values(ArithBinaryOp op, std::vector<I128AggState> values) {
+        SIMJIT_ASSERT(!values.empty());
+        size_t active = values.size();
+        while (active > 1) {
+            size_t output = 0;
+            for (size_t input = 0; input + 1 < active; input += 2) {
+                values[output++] = i128_agg_fold(op, values[input], values[input + 1], ScalarDataType::I64);
+            }
+            if (active % 2 != 0) { values[output++] = values[active - 1]; }
+            active = output;
+        }
+        return values[0];
+    }
+
     void gen_i128_add_result(const AccGroup &group) {
         Step *hi = nullptr;
         if (group.main_count() != 0) {
@@ -1368,40 +1382,39 @@ struct MirConstructState {
         } else {
             hi = tmp;
         }
-        I128AggState result{make_const(0, ScalarDataType::I64), hi};
         Step *zero = make_const(0, ScalarDataType::I64);
+        std::vector<I128AggState> low_values;
         for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
             Step *low = sm.acc_load(group.main(copy, 0), vect_result->acc_dtypes[group.hir_idx]);
             VecDataType vdtype = low->dtype.as_vec();
-            for (uint8_t lane = 0; lane < vdtype.nelems(); ++lane) {
-                Step *lane_low = sm.vec_extract({low, lane}, ScalarDataType::I64);
-                result = i128_agg_combine(ArithBinaryOp::Add, result, {lane_low, zero}, ScalarDataType::I64);
+            for (size_t lane = 0; lane < vdtype.nelems(); ++lane) {
+                Step *lane_low = sm.vec_extract({low, static_cast<uint8_t>(lane)}, ScalarDataType::I64);
+                low_values.push_back({lane_low, zero});
             }
         }
         Step *remainder_low = sm.acc_load(group.remainder(0), ScalarDataType::I64);
-        result = i128_agg_combine(ArithBinaryOp::Add, result, {remainder_low, zero}, ScalarDataType::I64);
+        low_values.push_back({remainder_low, zero});
+        I128AggState result = i128_agg_fold_values(ArithBinaryOp::Add, std::move(low_values));
+        result.high = sm.arith_bin({result.high, hi, ArithBinaryOp::Add}, ScalarDataType::I64);
         epilogue_roots.push_back(sm.agg_result({result.low, group.dst_arg, 0}, ScalarDataType::I64));
         epilogue_roots.push_back(sm.agg_result({result.high, group.dst_arg, 8}, ScalarDataType::I64));
     }
 
     void gen_i128_generic_result(const AccGroup &group, ArithBinaryOp op) {
-        I128AggState result = i128_agg_init(op, ScalarDataType::I64);
+        std::vector<I128AggState> values;
         for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
             Step *low = sm.acc_load(group.main(copy, 0), vect_result->acc_dtypes[group.hir_idx]);
             Step *high = sm.acc_load(group.main(copy, 1), vect_result->acc_dtypes[group.hir_idx]);
             VecDataType vdtype = low->dtype.as_vec();
             SIMJIT_ASSERT(high->dtype == low->dtype);
-            for (uint8_t lane = 0; lane < vdtype.nelems(); ++lane) {
-                result = i128_agg_fold(op, result,
-                                       {sm.vec_extract({low, lane}, ScalarDataType::I64),
-                                        sm.vec_extract({high, lane}, ScalarDataType::I64)},
-                                       ScalarDataType::I64);
+            for (size_t lane = 0; lane < vdtype.nelems(); ++lane) {
+                values.push_back({sm.vec_extract({low, static_cast<uint8_t>(lane)}, ScalarDataType::I64),
+                                  sm.vec_extract({high, static_cast<uint8_t>(lane)}, ScalarDataType::I64)});
             }
         }
-        result = i128_agg_fold(op, result,
-                               {sm.acc_load(group.remainder(0), ScalarDataType::I64),
-                                sm.acc_load(group.remainder(1), ScalarDataType::I64)},
-                               ScalarDataType::I64);
+        values.push_back({sm.acc_load(group.remainder(0), ScalarDataType::I64),
+                          sm.acc_load(group.remainder(1), ScalarDataType::I64)});
+        I128AggState result = i128_agg_fold_values(op, std::move(values));
         epilogue_roots.push_back(sm.agg_result({result.low, group.dst_arg, 0}, ScalarDataType::I64));
         epilogue_roots.push_back(sm.agg_result({result.high, group.dst_arg, 8}, ScalarDataType::I64));
     }
@@ -2525,7 +2538,8 @@ struct MirConstructState {
         case hir::StepKind::Load:
         case hir::StepKind::LoadDeinterleave:
         case hir::StepKind::Gather:
-        case hir::StepKind::LoadSplat: SIMJIT_UNREACHABLE();
+        case hir::StepKind::LoadSplat:
+        case hir::StepKind::FunnelShift: SIMJIT_UNREACHABLE();
         }
 #undef ref_arg
 #undef ref_left

@@ -439,11 +439,13 @@ enum class CodeTransformations : uint32_t {
     ConstantConditionPeephole = 0x4000,
     // Lower ordinary i128 operations to i64 interleaved pairs before backend lowering.
     I128Rewrite = 0x8000,
+    // Automatically sign-extend narrower integer inputs for widening sums, including i64-to-i128.
+    SumAutoSext = 0x10000,
 
     All = MuldqInst | MulConstPeephole | LogicalPeephole | BetweenPeephole | Unroll | AccSplit | MaskCombine |
         TernarylogicInst | FmaInst | CastPeephole | ProactiveUnroll | CastDecomposition | BinaryIdentityPeephole |
-        ConstantConditionPeephole |
-        I128Rewrite
+        ConstantConditionPeephole | I128Rewrite |
+        SumAutoSext
 #if SIMJIT_USE_LIBDIVIDE
         // Actually we can just set it always, but I want to make it clear that libdivide is required.
         | ConstDiv
