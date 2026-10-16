@@ -444,9 +444,10 @@ struct LLVMBuilder {
         messed_up("Invalid float cast from {} to {}");
     }
 
-    V *index_arg(const ArgInfo &info, V *idx) {
-        SIMJIT_ASSERT(info.element_type != b->getVoidTy());
-        return b->CreateInBoundsGEP(info.element_type, info.data_ptr, idx);
+    V *index_arg(const ArgInfo &info, V *idx, llvm::Type *element_type = nullptr) {
+        if (element_type == nullptr) { element_type = info.element_type; }
+        SIMJIT_ASSERT(element_type != b->getVoidTy());
+        return b->CreateInBoundsGEP(element_type, info.data_ptr, idx);
     }
 
     V *index_interleaved_arg(const ArgInfo &info, V *row, ScalarDataType half_dtype, uint8_t lane = 0) {
@@ -599,7 +600,7 @@ struct LLVMBuilder {
                 V *arg = step_to_llvm(data.arg);
                 ArgInfo &info = func_args[data.dst];
                 V *off = step_to_llvm(data.idx);
-                b->CreateStore(arg, index_arg(info, off));
+                b->CreateStore(arg, index_arg(info, off, scalar_type_to_llvm(step->dtype.as_scalar())));
                 return nullptr;
             }
             SIMJIT_MATCH (StepKind::CondScatter) {
@@ -613,7 +614,7 @@ struct LLVMBuilder {
                 b->CreateCondBr(cond, then, merge);
                 b->SetInsertPoint(then);
 
-                b->CreateStore(arg, index_arg(info, off));
+                b->CreateStore(arg, index_arg(info, off, scalar_type_to_llvm(step->dtype.as_scalar())));
                 b->CreateBr(merge);
 
                 b->SetInsertPoint(merge);

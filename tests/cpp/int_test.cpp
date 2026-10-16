@@ -4141,6 +4141,11 @@ def func(n, x, idx, dst):
     for i in range(n):
         dst[idx[i]] = x[i]
         )FOO"},
+    // I128 scatter rewrites to two i64 scatters at indices 2 * idx and 2 * idx + 1.
+    Test{[](FunctionBuilder &b) { b.scatter(b.input_arg(I128), b.input_arg(I32), b.arg(I128)); },
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector,
+                                                simjit::ErrorSubKind::CoefficientRangeNeedsNormalization)},
+    Test{[](FunctionBuilder &b) { b.scatter(b.input_arg(I128), b.input_arg(I64), b.arg(I128)); }, PASS_ALL},
     // scatter 64
     Test{[](FunctionBuilder &b) {
              Value x = b.input_arg(I8);
@@ -4252,6 +4257,10 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I64);
              Predicate cond = b.input_predicate_arg();
              b.cond_scatter(x, idx, cond, dst);
+         },
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+    Test{[](FunctionBuilder &b) {
+             b.cond_scatter(b.input_arg(I128), b.input_arg(I32), b.input_predicate_arg(), b.arg(I128));
          },
          LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
     // cond scatter 64

@@ -1516,20 +1516,28 @@ struct X86CppEmitter : CppEmitterBase {
             SIMJIT_MATCH (StepKind::Scatter) {
                 VecDataType vdtype = step->dtype.as_vec();
                 const ArgumentDecl &data_arg = func->args[data.dst];
+                ScalarDataType element_dtype = vdtype.to_scalar();
                 const auto &intrin = data.idx->dtype.as_vec().elem == VecElemType::I32
                                          ? x86::i32scatter_map.lookup(vdtype)
                                          : x86::i64scatter_map.lookup(vdtype);
                 auto caller =
-                    typecheck_intrin_call(intrin, step, data_arg.dtype, data.idx, data.arg, ScalarDataType::I32);
-                return caller.call(format("arg%zu", data.dst), data.idx, data.arg,
-                                   std::to_string(vdtype.element_size_bytes()));
+                    typecheck_intrin_call(intrin, step, element_dtype, data.idx, data.arg, ScalarDataType::I32);
+                std::string dst = data_arg.dtype == element_dtype
+                                      ? format("arg%zu", data.dst)
+                                      : format("(%s *)arg%zu", cpp_dtype(element_dtype), data.dst);
+                return caller.call(dst, data.idx, data.arg, std::to_string(vdtype.element_size_bytes()));
             }
             SIMJIT_MATCH (StepKind::CondScatter) {
                 VecDataType vdtype = step->dtype.as_vec();
+                const ArgumentDecl &data_arg = func->args[data.dst];
+                ScalarDataType element_dtype = vdtype.to_scalar();
                 const auto &intrin = data.idx->dtype.as_vec().elem == VecElemType::I32
                                          ? x86::mask_i32scatter_map.lookup(vdtype)
                                          : x86::mask_i64scatter_map.lookup(vdtype);
-                return unsafe_intrin_call(intrin, format("arg%zu", data.dst), data.cond, data.idx, data.arg,
+                std::string dst = data_arg.dtype == element_dtype
+                                      ? format("arg%zu", data.dst)
+                                      : format("(%s *)arg%zu", cpp_dtype(element_dtype), data.dst);
+                return unsafe_intrin_call(intrin, dst, data.cond, data.idx, data.arg,
                                           std::to_string(vdtype.element_size_bytes()));
             }
             SIMJIT_MATCH (StepKind::Compare) {

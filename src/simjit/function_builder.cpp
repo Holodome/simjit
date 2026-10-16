@@ -370,7 +370,7 @@ struct FunctionBuilderImpl {
     Step *scatter(Step *arg, Step *idx, Step *cond, const ArgumentDecl &dst) {
         cond = simplify_optional_cond(ctx, cond);
         ScalarDataType dtype = arg->dtype;
-        SIMJIT_ASSERT(dst.dtype == dtype);
+        SIMJIT_ASSERT(dst.dtype == dtype || (dst.interleaved && dst.interleaved_half_dtype == dtype));
         return sm.scatter({arg, idx, dst.idx, cond}, dtype);
     }
     Step *store_interleave(Step *even, Step *odd, Step *cond, const ArgumentDecl &dst, LoadStoreKind kind) {
@@ -1240,6 +1240,7 @@ struct I128RewriteState {
     StepMaker &sm;
     size_t original_step_count;
     std::vector<RewrittenStep> rewritten;
+    std::vector<Step *> additional_roots;
     ArenaBitmap rewritten_steps;
     Step *zero = nullptr;
     Step *one = nullptr;
@@ -1836,6 +1837,20 @@ struct I128RewriteState {
                 return RewrittenStep::make_scalar(
                     sm.store_interleave({value.low, value.high, data.addr, data.kind, cond}, I64));
             }
+            SIMJIT_MATCH (StepKind::Scatter) {
+                if (step->dtype != I128) break;
+                mark_i128_argument(data.dst);
+                I128Pair value = rewrite_pair_child(data.arg, step);
+                Step *idx = rewrite_scalar(data.idx, step);
+                Step *twice_idx = sm.arith_bin({ArithBinaryOp::Add, idx, idx}, idx->dtype);
+                Step *odd_idx = sm.arith_bin(
+                    {ArithBinaryOp::Add, twice_idx, sm.con(ConstData::i64(1).retag(idx->dtype), idx->dtype)},
+                    idx->dtype);
+                Step *cond = data.cond == nullptr ? nullptr : rewrite_scalar(data.cond, step);
+                Step *low = sm.scatter({value.low, twice_idx, data.dst, cond}, I64);
+                additional_roots.push_back(sm.scatter({value.high, odd_idx, data.dst, cond}, I64));
+                return RewrittenStep::make_scalar(low);
+            }
             SIMJIT_MATCH (StepKind::AccI128) {
                 SIMJIT_ASSERT(data.high == nullptr);
                 I128Pair value = rewrite_pair_child(data.low, step);
@@ -1857,11 +1872,21 @@ struct I128RewriteState {
     }
 
     void rewrite_roots() {
-        for (Step *&root : func->step_roots) {
+        std::vector<Step *> roots;
+        roots.reserve(func->step_roots.size());
+        for (Step *root : func->step_roots) {
+            SIMJIT_ASSERT(additional_roots.empty());
             RewrittenStep rewritten_root = rewrite(root);
             SIMJIT_ASSERT(!rewritten_root.is_pair());
-            root = rewritten_root.scalar;
+            roots.push_back(rewritten_root.scalar);
+            roots.insert(roots.end(), additional_roots.begin(), additional_roots.end());
+            additional_roots.clear();
         }
+        if (roots.size() > func->ctx->build_limits.max_hir_roots) {
+            unsupported_limit("HIR has too many roots after i128 rewrite (%zu > %zu)", roots.size(),
+                              func->ctx->build_limits.max_hir_roots);
+        }
+        func->step_roots = func->ctx->arena->copy_array<Step *>(roots);
         func->step_id_count = sm.max_id();
     }
 };
@@ -1987,7 +2012,11 @@ void FunctionBuilder::cond_scatter(Value value, Value idx, MaybePredicate cond, 
     }
     Step *cond_step = simplify_optional_cond(impl_->ctx, cond.step_);
     impl_->special_ops |= cond_step != nullptr ? SpecialOp::CondScatter : SpecialOp::Scatter;
-    check_store_dst(func_arg, value.step_, StepKind::Scatter);
+    if (func_arg.dtype != value.dtype() &&
+        (!func_arg.interleaved || func_arg.interleaved_half_dtype != value.dtype())) {
+        invalid_type("Step scatter argument and destination have different types %s %s",
+                     show_scalar_dtype(value.dtype()), show_scalar_dtype(func_arg.dtype));
+    }
     if (idx.dtype() == I8 || idx.dtype() == I16) { idx = zext(idx, I32); }
 
     auto *step = impl_->scatter(value.step_, idx.step_, cond_step, func_arg);

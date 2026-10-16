@@ -1038,9 +1038,21 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
         SIMJIT_MATCH (StepKind::AccLoad) return cpp_var_decl(step) + format("acc%zu", func->accs.index(data));
         SIMJIT_MATCH (StepKind::AccStore) { return format_acc_store(data.acc, show_scalar_operand(data.arg)); }
         SIMJIT_MATCH (StepKind::Scatter) {
+            const ArgumentDecl &dst = func->args[data.dst];
+            const char *element_type = cpp_dtype(step->dtype);
+            if (dst.dtype != step->dtype.as_scalar()) {
+                return format("((%s *)arg%zu)[%s] = %s", element_type, data.dst, show_scalar_operand(data.idx),
+                              show_scalar_operand(data.arg));
+            }
             return format("arg%zu[%s] = %s", data.dst, show_scalar_operand(data.idx), show_scalar_operand(data.arg));
         }
         SIMJIT_MATCH (StepKind::CondScatter) {
+            const ArgumentDecl &dst = func->args[data.dst];
+            const char *element_type = cpp_dtype(step->dtype);
+            if (dst.dtype != step->dtype.as_scalar()) {
+                return format("if (%s) ((%s *)arg%zu)[%s] = %s", show_scalar_operand(data.cond), element_type, data.dst,
+                              show_scalar_operand(data.idx), show_scalar_operand(data.arg));
+            }
             return format("if (%s) arg%zu[%s] = %s", show_scalar_operand(data.cond), data.dst,
                           show_scalar_operand(data.idx), show_scalar_operand(data.arg));
         }
