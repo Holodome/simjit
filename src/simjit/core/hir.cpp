@@ -260,8 +260,14 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
         SIMJIT_MATCH (StepKind::Compare)
             wr("op=%s left=%%%u right=%%%u is_unsigned=%s", show_cmp_op(data.op), ref(data.left), ref(data.right),
                data.is_unsigned ? "true" : "false");
-        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccI128) {
+        SIMJIT_MATCH (StepKind::AccArithBinary) {
             wr_("op=%s acc=$%zu arg=%%%u", show_arith_binary_op(data.op), data.acc, ref(data.arg));
+            if (data.cond != nullptr) wr_(" cond=%%%u", ref(data.cond));
+            return;
+        }
+        SIMJIT_MATCH (StepKind::AccI128) {
+            wr_("op=%s acc=$%zu low=%%%u high=%%%u", show_arith_binary_op(data.op), data.acc, ref(data.low),
+                ref(data.high));
             if (data.cond != nullptr) wr_(" cond=%%%u", ref(data.cond));
             return;
         }

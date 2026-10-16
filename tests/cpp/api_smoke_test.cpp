@@ -882,6 +882,42 @@ static void api_smoke_load_deinterleave() {
         MemoryArena arena{};
         Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
         FunctionBuilder builder{context};
+        Value value = builder.input_arg(I128);
+        Predicate cond = builder.input_predicate_arg();
+        builder.min_agg(value, builder.arg(I128));
+        builder.umax_agg_if(value, cond, builder.arg(I128));
+        builder.andnot_agg(value, builder.arg(I128));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots.size() == 3, "i128 aggregate roots are retained");
+        for (hir::Step *root : fn->step_roots) {
+            require_api_smoke(root->is(hir::StepKind::AccI128), "i128 aggregate has dedicated HIR root");
+            const auto &agg = root->step_data<hir::StepKind::AccI128>();
+            require_api_smoke(agg.low->dtype == I64 && agg.high->dtype == I64,
+                              "i128 aggregate consumes rewritten i64 pair");
+        }
+        const auto &conditional = fn->step_roots[1]->step_data<hir::StepKind::AccI128>();
+        require_api_smoke(conditional.cond == cond.step_, "i128 aggregate preserves its predicate");
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->is(hir::StepKind::AccI128) || step->dtype != I128,
+                                  "i128 aggregate leaves no ordinary i128 step reachable");
+            });
+        }
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::I128Rewrite, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        builder.min_agg(builder.input_arg(I128), builder.arg(I128));
+        expect_api_smoke_simjit_error([&] { (void)builder.build(); }, ErrorModule::HIR, ErrorKind::Unsupported,
+                                      ErrorSubKind::UnsupportedFeature,
+                                      "build rejects an unlowered i128 aggregate when rewrite is disabled");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
         Argument src = builder.arg(I128);
         builder.store(builder.rotl(builder.load(src), builder.con(64, I128)), builder.arg(I128));
         hir::Function *fn = builder.build();

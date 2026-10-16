@@ -82,7 +82,7 @@ pack_step: "(" "step" step_id "pack" scalar_dtype step_ref step_ref arg_ref acc_
 
 acc_arith_step: "(" "step" step_id "acc-arith-bin" scalar_dtype arith_binary_op step_ref acc_ref step_ref? ")"
 acc_predicate_step: "(" "step" step_id "acc-predicate-bin" scalar_dtype predicate_binary_op step_ref acc_ref ")"
-acc_sum128_step: "(" "step" step_id "sum128" scalar_dtype arith_binary_op step_ref acc_ref step_ref? ")"
+acc_sum128_step: "(" "step" step_id "sum128" scalar_dtype arith_binary_op step_ref step_ref acc_ref step_ref? ")"
 permute_step: "(" "step" step_id "permute" scalar_dtype step_ref HEX_STRING bool_literal ")"
 fpclass_step: "(" "step" step_id "fpclass" scalar_dtype step_ref fpclass_flags ")"
 

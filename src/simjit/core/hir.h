@@ -67,6 +67,16 @@ struct AccArithBinaryData {
     Step *cond{};
 };
 
+// Before i128 rewriting, low holds the public i128 input and high is null. The
+// rewrite replaces it with the two i64 words that MIR consumes.
+struct AccI128Data {
+    ArithBinaryOp op{};
+    Step *low{};
+    Step *high{};
+    AccIdx acc{};
+    Step *cond{};
+};
+
 struct AccPredicateBinData {
     PredicateBinaryOp op{};
     Step *arg{};
@@ -208,6 +218,7 @@ private:
         GatherData gather;
         PredicateBinaryData pb;
         AccArithBinaryData acc_ab;
+        AccI128Data acc_i128;
         IndexData index;
         AccPredicateBinData acc_pb;
         ScatterData scatter;
@@ -243,7 +254,7 @@ private:
     X(index, Index, index)                                    \
     X(scatter, Scatter, scatter)                              \
     X(pack, Pack, pack)                                       \
-    X(i128_agg, AccI128, acc_ab)                              \
+    X(i128_agg, AccI128, acc_i128)                            \
     X(permute, Permute, permute)                              \
     X(bitcast, BitCast, arg)                                  \
     X(fpclass, Fpclass, fpclass)                              \
@@ -435,8 +446,14 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.arg);
             break;
         }
-        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccI128) {
+        SIMJIT_MATCH (StepKind::AccArithBinary) {
             process(data.arg);
+            if (data.cond) process(data.cond);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::AccI128) {
+            process(data.low);
+            if (data.high) process(data.high);
             if (data.cond) process(data.cond);
             break;
         }

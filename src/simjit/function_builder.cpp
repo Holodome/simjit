@@ -351,8 +351,8 @@ struct FunctionBuilderImpl {
         cond = simplify_optional_cond(ctx, cond);
         ScalarDataType dtype = acc.dtype;
         if (dtype == I128) {
-            SIMJIT_ASSERT(arg->dtype == I64);
-            return sm.i128_agg({op, arg, acc.idx, cond}, dtype);
+            SIMJIT_ASSERT(arg->dtype == I128);
+            return sm.i128_agg({op, arg, nullptr, acc.idx, cond}, dtype);
         }
         SIMJIT_ASSERT(arg->dtype == dtype);
         return sm.acc_arith_bin({op, arg, acc.idx, cond}, dtype);
@@ -1838,6 +1838,14 @@ struct I128RewriteState {
                 return RewrittenStep::make_scalar(
                     sm.store_interleave({value.low, value.high, data.addr, data.kind, cond}, I64));
             }
+            SIMJIT_MATCH (StepKind::AccI128) {
+                SIMJIT_ASSERT(data.high == nullptr);
+                I128Pair value = rewrite_pair_child(data.low, step);
+                data.low = value.low;
+                data.high = value.high;
+                if (data.cond != nullptr) { data.cond = rewrite_scalar(data.cond, step); }
+                return RewrittenStep::make_scalar(step);
+            }
 
         default: break;
         }
@@ -1875,8 +1883,14 @@ static void validate_i128_hir(const Function *func) {
     for (Step *root : func->step_roots) {
         traverse_steps_postorder_unique(root, state, [&](Step *step) {
             if (step->is(StepKind::AccI128)) {
-                ArithBinaryOp op = step->step_data<StepKind::AccI128>().op;
-                if (op != ArithBinaryOp::Add) {
+                const auto &data = step->step_data<StepKind::AccI128>();
+                if (data.high == nullptr || data.low->dtype != I64 || data.high->dtype != I64) {
+                    unsupported("unlowered i128 aggregate in finalized HIR; enable I128Rewrite");
+                }
+                ArithBinaryOp op = data.op;
+                if (op != ArithBinaryOp::Add && op != ArithBinaryOp::Min && op != ArithBinaryOp::Max &&
+                    op != ArithBinaryOp::UMin && op != ArithBinaryOp::UMax && op != ArithBinaryOp::And &&
+                    op != ArithBinaryOp::Or && op != ArithBinaryOp::Xor && op != ArithBinaryOp::AndNot) {
                     unsupported("i128 aggregation does not support %s", show_arith_binary_op(op));
                 }
             } else if (step->dtype == I128) {
@@ -2016,10 +2030,18 @@ void FunctionBuilder::cond_arith_agg(Value value, MaybePredicate cond, ArithBina
     const ArgumentDecl &dst_info = impl_->get_arg(dst.idx_);
     ScalarDataType dtype = dst_info.dtype;
     if (dst_info.dtype == I128) {
-        if (value.dtype() != I64) {
-            unsupported("Only support calculating 128-bit sum of i64 values, got %s", show_scalar_dtype(value.dtype()));
+        if (value.dtype() == I64) {
+            Step *original = nullptr;
+            value.step_ = impl_->int_cast(value.step_, I128, IntCastKind::Sext, &original);
+        } else if (value.dtype() != I128) {
+            unsupported("Only support calculating 128-bit aggregates of i64 or i128 values, got %s",
+                        show_scalar_dtype(value.dtype()));
         }
-        if (op != ArithBinaryOp::Add) { unsupported("Don't support 128-bit %s agg", show_arith_binary_op(op)); }
+        if (op != ArithBinaryOp::Add && op != ArithBinaryOp::Min && op != ArithBinaryOp::Max &&
+            op != ArithBinaryOp::UMin && op != ArithBinaryOp::UMax && op != ArithBinaryOp::And &&
+            op != ArithBinaryOp::Or && op != ArithBinaryOp::Xor && op != ArithBinaryOp::AndNot) {
+            unsupported("Don't support 128-bit %s agg", show_arith_binary_op(op));
+        }
     } else {
         check_store_dst(dst_info, value.step_, StepKind::AccArithBinary);
     }

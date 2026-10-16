@@ -9,6 +9,36 @@ using namespace simjit;
 using namespace simjit::types;
 
 std::vector<Test> agg_tests{
+    // I128 aggregates consume an ordinary i128 value and lower it to a pair
+    // before vectorization. Keep the high words distinct so comparisons must
+    // not accidentally reduce the two words independently.
+    Test{[](FunctionBuilder &b) {
+             Value value = b.input_arg(I128);
+             Predicate cond = b.input_predicate_arg();
+             b.min_agg(value, b.arg(I128));
+             b.max_agg(value, b.arg(I128));
+             b.umin_agg_if(value, cond, b.arg(I128));
+             b.umax_agg_if(value, cond, b.arg(I128));
+             b.and_agg(value, b.arg(I128));
+             b.or_agg_if(value, cond, b.arg(I128));
+             b.xor_agg(value, b.arg(I128));
+             b.andnot_agg_if(value, cond, b.arg(I128));
+         },
+         PASS_ALL},
+    // An i64 aggregate input keeps its existing implicit signed widening;
+    // callers that need a zero high word use the normal Zext HIR cast.
+    Test{[](FunctionBuilder &b) {
+             Value value = b.input_arg(I64);
+             Value zero_extended = b.zext(value, I128);
+             Predicate cond = b.input_predicate_arg();
+             b.umin_agg(value, b.arg(I128));
+             b.umin_agg(zero_extended, b.arg(I128));
+             b.umax_agg_if(value, cond, b.arg(I128));
+             b.umax_agg_if(zero_extended, cond, b.arg(I128));
+             b.andnot_agg(value, b.arg(I128));
+             b.andnot_agg(zero_extended, b.arg(I128));
+         },
+         PASS_ALL},
     // Signed i64 widening into i128 preserves both the predicate and carries
     // from the low half while accumulating negative values.
     Test{[](FunctionBuilder &b) {

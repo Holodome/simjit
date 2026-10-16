@@ -1340,18 +1340,22 @@ struct MirConstructState {
         epilogue_roots.push_back(sm.agg_result({result, arg.idx}, dt));
     }
 
+    struct I128AggState {
+        Step *low;
+        Step *high;
+    };
+
     ArithBinaryOp i128_agg_op(const AccGroup &group) {
         SIMJIT_ASSERT(group.kind == AccKind::I128);
         return group.agg_expr->step_data<hir::StepKind::AccI128>().op;
     }
 
-    void gen_i128_agg_result(const AccGroup &group) {
-        ArithBinaryOp op = i128_agg_op(group);
-        switch (op) {
-        case ArithBinaryOp::Add: break;
-        default: messed_up("i128 aggregate result does not support %s", show_arith_binary_op(op));
-        }
+    I128AggState i128_agg_fold(ArithBinaryOp op, I128AggState acc, I128AggState value, DataType dtype) {
+        if (op == ArithBinaryOp::AndNot) { op = ArithBinaryOp::And; }
+        return i128_agg_combine(op, acc, value, dtype);
+    }
 
+    void gen_i128_add_result(const AccGroup &group) {
         Step *hi = nullptr;
         if (group.main_count() != 0) {
             VecDataType vdtype = vect_result->acc_dtypes[group.hir_idx].as_vec();
@@ -1371,13 +1375,44 @@ struct MirConstructState {
             VecDataType vdtype = low->dtype.as_vec();
             for (uint8_t lane = 0; lane < vdtype.nelems(); ++lane) {
                 Step *lane_low = sm.vec_extract({low, lane}, ScalarDataType::I64);
-                result = i128_agg_combine(op, result, {lane_low, zero}, ScalarDataType::I64);
+                result = i128_agg_combine(ArithBinaryOp::Add, result, {lane_low, zero}, ScalarDataType::I64);
             }
         }
         Step *remainder_low = sm.acc_load(group.remainder(0), ScalarDataType::I64);
-        result = i128_agg_combine(op, result, {remainder_low, zero}, ScalarDataType::I64);
+        result = i128_agg_combine(ArithBinaryOp::Add, result, {remainder_low, zero}, ScalarDataType::I64);
         epilogue_roots.push_back(sm.agg_result({result.low, group.dst_arg, 0}, ScalarDataType::I64));
         epilogue_roots.push_back(sm.agg_result({result.high, group.dst_arg, 8}, ScalarDataType::I64));
+    }
+
+    void gen_i128_generic_result(const AccGroup &group, ArithBinaryOp op) {
+        I128AggState result = i128_agg_init(op, ScalarDataType::I64);
+        for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
+            Step *low = sm.acc_load(group.main(copy, 0), vect_result->acc_dtypes[group.hir_idx]);
+            Step *high = sm.acc_load(group.main(copy, 1), vect_result->acc_dtypes[group.hir_idx]);
+            VecDataType vdtype = low->dtype.as_vec();
+            SIMJIT_ASSERT(high->dtype == low->dtype);
+            for (uint8_t lane = 0; lane < vdtype.nelems(); ++lane) {
+                result = i128_agg_fold(op, result,
+                                       {sm.vec_extract({low, lane}, ScalarDataType::I64),
+                                        sm.vec_extract({high, lane}, ScalarDataType::I64)},
+                                       ScalarDataType::I64);
+            }
+        }
+        result = i128_agg_fold(op, result,
+                               {sm.acc_load(group.remainder(0), ScalarDataType::I64),
+                                sm.acc_load(group.remainder(1), ScalarDataType::I64)},
+                               ScalarDataType::I64);
+        epilogue_roots.push_back(sm.agg_result({result.low, group.dst_arg, 0}, ScalarDataType::I64));
+        epilogue_roots.push_back(sm.agg_result({result.high, group.dst_arg, 8}, ScalarDataType::I64));
+    }
+
+    void gen_i128_agg_result(const AccGroup &group) {
+        ArithBinaryOp op = i128_agg_op(group);
+        if (op == ArithBinaryOp::Add) {
+            gen_i128_add_result(group);
+            return;
+        }
+        gen_i128_generic_result(group, op);
     }
 
     // This functions is used to construct code to output aggregate results. Since we might have several instances that
@@ -1517,17 +1552,42 @@ struct MirConstructState {
         return step;
     }
 
-    struct I128AggState {
-        Step *low;
-        Step *high;
-    };
-
     I128AggState i128_agg_init(ArithBinaryOp op, DataType dtype) {
         switch (op) {
         case ArithBinaryOp::Add: return {make_const(0, dtype), make_const(0, dtype)};
+        case ArithBinaryOp::Min:
+            return {make_const(scalar_dtype_umax(ScalarDataType::I64), dtype),
+                    make_const(scalar_dtype_max(ScalarDataType::I64), dtype)};
+        case ArithBinaryOp::Max:
+            return {make_const(0, dtype), make_const(scalar_dtype_min(ScalarDataType::I64), dtype)};
+        case ArithBinaryOp::UMin:
+        case ArithBinaryOp::And:
+        case ArithBinaryOp::AndNot:
+            return {make_const(scalar_dtype_umax(ScalarDataType::I64), dtype),
+                    make_const(scalar_dtype_umax(ScalarDataType::I64), dtype)};
+        case ArithBinaryOp::UMax:
+        case ArithBinaryOp::Or:
+        case ArithBinaryOp::Xor: return {make_const(0, dtype), make_const(0, dtype)};
         default: messed_up("i128 aggregate initialization does not support %s", show_arith_binary_op(op));
         }
         SIMJIT_UNREACHABLE();
+    }
+
+    Step *i128_agg_predicate_bin(Step *left, Step *right, PredicateBinaryOp op, DataType dtype) {
+        if (dtype.is_vec()) { return sm.mask_bin({left, right, op}, dtype.as_vec().mask()); }
+        auto arith_op = arith_op_from_predicate(op);
+        SIMJIT_ASSERT(arith_op);
+        return sm.arith_bin({left, right, *arith_op}, ScalarDataType::I8);
+    }
+
+    Step *i128_agg_less(I128AggState left, I128AggState right, bool is_unsigned, DataType dtype) {
+        DataType predicate_dtype = dtype.is_vec() ? DataType(dtype.as_vec().mask()) : DataType(ScalarDataType::I1);
+        Step *high_less = sm.cmp({left.high, right.high, CmpOp::Less, is_unsigned}, predicate_dtype);
+        Step *high_equal = sm.cmp({left.high, right.high, CmpOp::Equal}, predicate_dtype);
+        Step *low_less = sm.cmp({left.low, right.low, CmpOp::Less, true}, predicate_dtype);
+        return i128_agg_predicate_bin(high_less,
+                                      i128_agg_predicate_bin(high_equal, low_less, PredicateBinaryOp::And, dtype),
+                                      PredicateBinaryOp::Or, dtype);
     }
 
     I128AggState i128_agg_combine(ArithBinaryOp op, I128AggState acc, I128AggState arg, DataType dtype) {
@@ -1541,13 +1601,32 @@ struct MirConstructState {
             hi = sm.select({overflow, added, hi}, dtype);
             return {low, hi};
         }
+        case ArithBinaryOp::Min:
+        case ArithBinaryOp::Max:
+        case ArithBinaryOp::UMin:
+        case ArithBinaryOp::UMax: {
+            bool is_unsigned = op == ArithBinaryOp::UMin || op == ArithBinaryOp::UMax;
+            Step *take_arg = i128_agg_less(arg, acc, is_unsigned, dtype);
+            if (op == ArithBinaryOp::Max || op == ArithBinaryOp::UMax) {
+                return {sm.select({take_arg, acc.low, arg.low}, dtype),
+                        sm.select({take_arg, acc.high, arg.high}, dtype)};
+            }
+            return {sm.select({take_arg, arg.low, acc.low}, dtype), sm.select({take_arg, arg.high, acc.high}, dtype)};
+        }
+        case ArithBinaryOp::And:
+        case ArithBinaryOp::Or:
+        case ArithBinaryOp::Xor:
+            return {sm.arith_bin({arg.low, acc.low, op}, dtype), sm.arith_bin({arg.high, acc.high, op}, dtype)};
+        case ArithBinaryOp::AndNot:
+            return {sm.arith_bin({arg.low, acc.low, ArithBinaryOp::AndNot}, dtype),
+                    sm.arith_bin({arg.high, acc.high, ArithBinaryOp::AndNot}, dtype)};
         default: messed_up("i128 aggregate combination does not support %s", show_arith_binary_op(op));
         }
         SIMJIT_UNREACHABLE();
     }
 
-    I128AggState i128_agg_transition(ArithBinaryOp op, I128AggState acc, Step *arg, Step *cond, DataType dtype) {
-        I128AggState value{arg, sm.arith_bin({arg, make_const(63, dtype), ArithBinaryOp::ShiftRightArith}, dtype)};
+    I128AggState i128_agg_transition(ArithBinaryOp op, I128AggState acc, I128AggState value, Step *cond,
+                                     DataType dtype) {
         I128AggState result = i128_agg_combine(op, acc, value, dtype);
         if (cond != nullptr) {
             result.low = sm.select({cond, result.low, acc.low}, dtype);
@@ -2420,9 +2499,11 @@ struct MirConstructState {
                 VecDataType vdtype = node->dtype.as_vec();
                 auto [low_acc, high_acc] = acc_groups[data.acc].alloc_main_pair(ctx.remap);
                 I128AggState acc{sm.acc_load(low_acc, vdtype), sm.acc_load(high_acc, vdtype)};
-                Step *arg = data.cond == nullptr ? ref_arg() : ref_left();
+                Step *low = ref_nth(0);
+                Step *high = ref_nth(1);
+                invariant_same_vec_type(low, high);
                 I128AggState updated =
-                    i128_agg_transition(data.op, acc, arg, data.cond == nullptr ? nullptr : ref_right(), vdtype);
+                    i128_agg_transition(data.op, acc, {low, high}, data.cond == nullptr ? nullptr : ref_nth(2), vdtype);
                 main_loop_roots.push_back(sm.acc_store({high_acc, updated.high}, vdtype));
                 main_loop_roots.push_back(sm.acc_store({low_acc, updated.low}, vdtype));
                 return;
@@ -3067,7 +3148,7 @@ struct MirConstructState {
                 ScalarDataType dtype = ScalarDataType::I64;
                 auto [low_acc, high_acc] = acc_groups[data.acc].alloc_remainder_pair();
                 I128AggState acc{sm.acc_load(low_acc, dtype), sm.acc_load(high_acc, dtype)};
-                I128AggState updated = i128_agg_transition(data.op, acc, ref(data.arg),
+                I128AggState updated = i128_agg_transition(data.op, acc, {ref(data.low), ref(data.high)},
                                                            data.cond == nullptr ? nullptr : ref(data.cond), dtype);
                 Step *store_lo = sm.acc_store({low_acc, updated.low}, dtype);
                 Step *store_hi = sm.acc_store({high_acc, updated.high}, dtype);

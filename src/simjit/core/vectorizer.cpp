@@ -644,10 +644,16 @@ struct AlgebraicVectorizer {
                     break;
                 case StepKind::AccPredicateBinary: accumulate(graph_unify_carriers(node, node->arg())); break;
                 case StepKind::AccArithBinary:
-                case StepKind::AccI128:
                     accumulate(graph_unify_carriers(node, node->children[0]));
                     if (node->child_count == 2) {
                         accumulate(graph_unify_carriers(node->children[0], node->children[1]));
+                    }
+                    break;
+                case StepKind::AccI128:
+                    accumulate(graph_unify_carriers(node, node->children[0]));
+                    accumulate(graph_unify_carriers(node->children[0], node->children[1]));
+                    if (node->child_count == 3) {
+                        accumulate(graph_unify_carriers(node->children[0], node->children[2]));
                     }
                     break;
                 case StepKind::Countif: accumulate(graph_unify_carriers(node, node->arg())); break;
@@ -1620,8 +1626,13 @@ struct AlgebraicVectorizer {
             }
             break;
         case StepKind::AccArithBinary:
-        case StepKind::AccI128:
             if (node->child_count == 2 && !graph_validate_same_width(node, node->left(), node->right())) {
+                return false;
+            }
+            break;
+        case StepKind::AccI128:
+            if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }
+            if (node->child_count == 3 && !graph_validate_same_width(node, node->children[0], node->children[2])) {
                 return false;
             }
             break;

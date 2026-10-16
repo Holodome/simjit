@@ -516,7 +516,9 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
         hir::Function *hir = builder.build();
         SIMJIT_ASSERT(hir->accs.size() == 1);
         SIMJIT_ASSERT(hir->accs[0].agg_expr->is(hir::StepKind::AccI128));
-        SIMJIT_ASSERT(hir->accs[0].agg_expr->step_data<hir::StepKind::AccI128>().op == ArithBinaryOp::Add);
+        const auto &agg = hir->accs[0].agg_expr->step_data<hir::StepKind::AccI128>();
+        SIMJIT_ASSERT(agg.op == ArithBinaryOp::Add);
+        SIMJIT_ASSERT(agg.low->dtype == I64 && agg.high->dtype == I64);
 
         mir::Function *mir = lower_scalar(hir);
         SIMJIT_ASSERT(mir->accs.group_offsets.size() == 2);
@@ -530,6 +532,31 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
             ++i128_result_words;
         }
         SIMJIT_ASSERT(i128_result_words == 2);
+
+        mir::Function *vector_mir = lower_vectorized(hir);
+        SIMJIT_ASSERT(mir_has_step(vector_mir, [](mir::Step *step) { return step->is(mir::StepKind::VecExtract); }));
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_aggregate_pair_lowering", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Value value = builder.input_arg(I128);
+        builder.min_agg(value, builder.arg(I128));
+        builder.andnot_agg(value, builder.arg(I128));
+
+        hir::Function *hir = builder.build();
+        SIMJIT_ASSERT(hir->accs.size() == 2);
+        for (const hir::Accumulator &acc : hir->accs) {
+            SIMJIT_ASSERT(acc.agg_expr->is(hir::StepKind::AccI128));
+            const auto &agg = acc.agg_expr->step_data<hir::StepKind::AccI128>();
+            SIMJIT_ASSERT(agg.low->dtype == I64 && agg.high->dtype == I64);
+        }
+
+        mir::Function *scalar_mir = lower_scalar(hir);
+        SIMJIT_ASSERT(mir_has_step(scalar_mir, [](mir::Step *step) { return step->is(mir::StepKind::Compare); }));
+        SIMJIT_ASSERT(mir_has_step(scalar_mir, [](mir::Step *step) { return step->is(mir::StepKind::Select); }));
+        SIMJIT_ASSERT(mir_has_arith_op(scalar_mir, ArithBinaryOp::AndNot));
 
         mir::Function *vector_mir = lower_vectorized(hir);
         SIMJIT_ASSERT(mir_has_step(vector_mir, [](mir::Step *step) { return step->is(mir::StepKind::VecExtract); }));

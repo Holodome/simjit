@@ -499,8 +499,14 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             payload = hl::list(data.op, ref(data.arg), serialize_acc_ref(data.acc));
             break;
         }
-        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccI128) {
+        SIMJIT_MATCH (StepKind::AccArithBinary) {
             payload = hl::list_dot(data.op, ref(data.arg), serialize_acc_ref(data.acc),
+                                   data.cond ? hl::list(ref(data.cond)) : nullptr);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::AccI128) {
+            SIMJIT_ASSERT(data.high != nullptr);
+            payload = hl::list_dot(data.op, ref(data.low), ref(data.high), serialize_acc_ref(data.acc),
                                    data.cond ? hl::list(ref(data.cond)) : nullptr);
             break;
         }
@@ -795,13 +801,26 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         }
         return {};
     }
-    case StepKind::AccArithBinary:
-    case StepKind::AccI128: {
+    case StepKind::AccArithBinary: {
         auto [op, arg, acc, cond] = bind_step(hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap, hl::maybe);
         if (cond) {
             builder.cond_arith_agg(ref_value(arg), ref_predicate(cond.value()), op, acc_arg_map.at(parse_acc_ref(acc)));
         } else {
             builder.arith_agg(ref_value(arg), op, acc_arg_map.at(parse_acc_ref(acc)));
+        }
+        return {};
+    }
+    case StepKind::AccI128: {
+        auto [op, low_word, high_word, acc, cond] =
+            bind_step(hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap, hl::cap, hl::maybe);
+        Value low = builder.int_cast(ref_value(low_word), ScalarDataType::I128, IntCastKind::Zext);
+        Value high = builder.int_cast(ref_value(high_word), ScalarDataType::I128, IntCastKind::Zext);
+        Value value = builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+        Argument dst = acc_arg_map.at(parse_acc_ref(acc));
+        if (cond) {
+            builder.cond_arith_agg(value, ref_predicate(cond.value()), op, dst);
+        } else {
+            builder.arith_agg(value, op, dst);
         }
         return {};
     }
