@@ -928,6 +928,35 @@ struct MirConstructState {
         return sm.vec_narrow_combine({low, high}, dtype);
     }
 
+    Step *mulhi_u64(Step *left, Step *right) {
+        DataType dtype = left->dtype;
+        invariant_same_type(left, right);
+        Step *mask32 = make_const(ConstData::u64(0xffffffffull), dtype);
+        Step *left_lo = sm.arith_bin({left, mask32, ArithBinaryOp::And}, dtype);
+        Step *left_hi = sm.arith_bin({left, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+        Step *right_lo = sm.arith_bin({right, mask32, ArithBinaryOp::And}, dtype);
+        Step *right_hi = sm.arith_bin({right, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+
+        Step *x0y0 = sm.arith_bin({left_lo, right_lo, ArithBinaryOp::Mul64ZE}, dtype);
+        Step *x0y0_hi = sm.arith_bin({x0y0, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+        Step *x0y1 = sm.arith_bin({left_lo, right_hi, ArithBinaryOp::Mul64ZE}, dtype);
+        Step *x1y0 = sm.arith_bin({left_hi, right_lo, ArithBinaryOp::Mul64ZE}, dtype);
+        Step *x1y1 = sm.arith_bin({left_hi, right_hi, ArithBinaryOp::Mul64ZE}, dtype);
+
+        Step *temp = sm.arith_bin({x1y0, x0y0_hi, ArithBinaryOp::Add}, dtype);
+        Step *temp_lo = sm.arith_bin({temp, mask32, ArithBinaryOp::And}, dtype);
+        Step *temp_hi = sm.arith_bin({temp, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+        Step *carry = sm.arith_bin({temp_lo, x0y1, ArithBinaryOp::Add}, dtype);
+        Step *carry_hi = sm.arith_bin({carry, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+
+        Step *sum = sm.arith_bin({x1y1, temp_hi, ArithBinaryOp::Add}, dtype);
+        return sm.arith_bin({sum, carry_hi, ArithBinaryOp::Add}, dtype);
+    }
+
+    Step *mulhi_u64(Step *left, uint64_t right) {
+        return mulhi_u64(left, make_const(ConstData::u64(right), left->dtype));
+    }
+
 #if SIMJIT_USE_LIBDIVIDE
     Step *mulhi_u16_part(Step *left32, uint16_t magic) {
         VecDataType wide_dtype = left32->dtype.as_vec();
@@ -957,31 +986,6 @@ struct MirConstructState {
         Step *low = sm.widen_lo({left, true}, wide_dtype);
         Step *high = sm.widen_hi({left, true}, wide_dtype);
         return make_narrow_combine(mulhi_u32_part(low, magic), mulhi_u32_part(high, magic), dtype);
-    }
-
-    Step *mulhi_u64(Step *left, uint64_t magic) {
-        VecDataType dtype = left->dtype.as_vec();
-        Step *mask32 = make_const(ConstData::u64(0xffffffffull), dtype);
-        Step *right_lo = make_const(ConstData::u64(magic & 0xffffffffull), dtype);
-        Step *right_hi = make_const(ConstData::u64(magic >> 32ull), dtype);
-
-        Step *left_lo = sm.arith_bin({left, mask32, ArithBinaryOp::And}, dtype);
-        Step *left_hi = sm.arith_bin({left, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
-
-        Step *x0y0 = sm.arith_bin({left_lo, right_lo, ArithBinaryOp::Mul64ZE}, dtype);
-        Step *x0y0_hi = sm.arith_bin({x0y0, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
-        Step *x0y1 = sm.arith_bin({left_lo, right_hi, ArithBinaryOp::Mul64ZE}, dtype);
-        Step *x1y0 = sm.arith_bin({left_hi, right_lo, ArithBinaryOp::Mul64ZE}, dtype);
-        Step *x1y1 = sm.arith_bin({left_hi, right_hi, ArithBinaryOp::Mul64ZE}, dtype);
-
-        Step *temp = sm.arith_bin({x1y0, x0y0_hi, ArithBinaryOp::Add}, dtype);
-        Step *temp_lo = sm.arith_bin({temp, mask32, ArithBinaryOp::And}, dtype);
-        Step *temp_hi = sm.arith_bin({temp, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
-        Step *carry = sm.arith_bin({temp_lo, x0y1, ArithBinaryOp::Add}, dtype);
-        Step *carry_hi = sm.arith_bin({carry, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
-
-        Step *sum = sm.arith_bin({x1y1, temp_hi, ArithBinaryOp::Add}, dtype);
-        return sm.arith_bin({sum, carry_hi, ArithBinaryOp::Add}, dtype);
     }
 
     Step *udiv_const_peephole(Step *left, uint64_t rhs) {
@@ -1419,6 +1423,12 @@ struct MirConstructState {
         }
         values.push_back({sm.acc_load(group.remainder(0), ScalarDataType::I64),
                           sm.acc_load(group.remainder(1), ScalarDataType::I64)});
+        constexpr size_t max_i128_product_epilogue_values = 2;
+        if (op == ArithBinaryOp::Mul && values.size() > max_i128_product_epilogue_values) {
+            simjit_exception(ErrorModule::Vectorizer, ErrorKind::VectorizationFailed, ErrorSubKind::LimitExceeded,
+                             "i128 product aggregate requires %zu epilogue values (limit %zu)", values.size(),
+                             max_i128_product_epilogue_values);
+        }
         I128AggState result = i128_agg_fold_values(op, std::move(values));
         epilogue_roots.push_back(sm.agg_result({result.low, group.dst_arg, 0}, ScalarDataType::I64));
         epilogue_roots.push_back(sm.agg_result({result.high, group.dst_arg, 8}, ScalarDataType::I64));
@@ -1573,6 +1583,7 @@ struct MirConstructState {
     I128AggState i128_agg_init(ArithBinaryOp op, DataType dtype) {
         switch (op) {
         case ArithBinaryOp::Add: return {make_const(0, dtype), make_const(0, dtype)};
+        case ArithBinaryOp::Mul: return {make_const(1, dtype), make_const(0, dtype)};
         case ArithBinaryOp::Min:
             return {make_const(scalar_dtype_umax(ScalarDataType::I64), dtype),
                     make_const(scalar_dtype_max(ScalarDataType::I64), dtype)};
@@ -1618,6 +1629,15 @@ struct MirConstructState {
             Step *added = sm.arith_bin({hi, make_const(1, dtype), ArithBinaryOp::Add}, dtype);
             hi = sm.select({overflow, added, hi}, dtype);
             return {low, hi};
+        }
+        case ArithBinaryOp::Mul: {
+            Step *low = sm.arith_bin({arg.low, acc.low, ArithBinaryOp::Mul}, dtype);
+            Step *high = mulhi_u64(arg.low, acc.low);
+            high = sm.arith_bin(
+                {high, sm.arith_bin({arg.low, acc.high, ArithBinaryOp::Mul}, dtype), ArithBinaryOp::Add}, dtype);
+            high = sm.arith_bin(
+                {high, sm.arith_bin({arg.high, acc.low, ArithBinaryOp::Mul}, dtype), ArithBinaryOp::Add}, dtype);
+            return {low, high};
         }
         case ArithBinaryOp::Min:
         case ArithBinaryOp::Max:

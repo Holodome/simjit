@@ -1931,8 +1931,9 @@ static void validate_i128_hir(const Function *func) {
                 }
                 ArithBinaryOp op = data.op;
                 if (op != ArithBinaryOp::Add && op != ArithBinaryOp::Min && op != ArithBinaryOp::Max &&
-                    op != ArithBinaryOp::UMin && op != ArithBinaryOp::UMax && op != ArithBinaryOp::And &&
-                    op != ArithBinaryOp::Or && op != ArithBinaryOp::Xor && op != ArithBinaryOp::AndNot) {
+                    op != ArithBinaryOp::UMin && op != ArithBinaryOp::UMax && op != ArithBinaryOp::Mul &&
+                    op != ArithBinaryOp::And && op != ArithBinaryOp::Or && op != ArithBinaryOp::Xor &&
+                    op != ArithBinaryOp::AndNot) {
                     unsupported("i128 aggregation does not support %s", show_arith_binary_op(op));
                 }
             } else if (step->dtype == I128) {
@@ -2090,8 +2091,9 @@ void FunctionBuilder::cond_arith_agg(Value value, MaybePredicate cond, ArithBina
                         show_scalar_dtype(value.dtype()));
         }
         if (op != ArithBinaryOp::Add && op != ArithBinaryOp::Min && op != ArithBinaryOp::Max &&
-            op != ArithBinaryOp::UMin && op != ArithBinaryOp::UMax && op != ArithBinaryOp::And &&
-            op != ArithBinaryOp::Or && op != ArithBinaryOp::Xor && op != ArithBinaryOp::AndNot) {
+            op != ArithBinaryOp::UMin && op != ArithBinaryOp::UMax && op != ArithBinaryOp::Mul &&
+            op != ArithBinaryOp::And && op != ArithBinaryOp::Or && op != ArithBinaryOp::Xor &&
+            op != ArithBinaryOp::AndNot) {
             unsupported("Don't support 128-bit %s agg", show_arith_binary_op(op));
         }
     } else {

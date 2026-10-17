@@ -25,6 +25,16 @@ std::vector<Test> agg_tests{
              b.andnot_agg_if(value, cond, b.arg(I128));
          },
          PASS_ALL},
+    // Product is a modulo-2^128 pair multiplication. Its scalar epilogue is
+    // compact; vector reduction deliberately falls back until it has a
+    // bounded paired reduction strategy.
+    Test{[](FunctionBuilder &b) {
+             Value value = b.input_arg(I128);
+             Predicate cond = b.input_predicate_arg();
+             b.product(value, b.arg(I128));
+             b.product_if(value, cond, b.arg(I128));
+         },
+         LIMIT_ALL_VECTOR.vectorization_failure(TestVariant::VectorAll, simjit::ErrorSubKind::LimitExceeded)},
     // The default-enabled SumAutoSext transformation sign-extends all widening
     // integer sums, including the existing i64-to-i128 sum.
     Test{[](FunctionBuilder &b) { b.sum(b.input_arg(I8), b.arg(I16)); }, PASS_ALL},
