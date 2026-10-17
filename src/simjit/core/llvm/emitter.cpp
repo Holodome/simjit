@@ -641,6 +641,26 @@ struct LLVMBuilder {
                 b->SetInsertPoint(merge);
                 return nullptr;
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                ArgInfo &info = func_args[data.dst];
+                llvm::BasicBlock *then = llvm::BasicBlock::Create(*context, "then", function);
+                llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context, "merge", function);
+                V *low = step_to_llvm(data.low);
+                V *high = step_to_llvm(data.high);
+                V *cond = b->CreateIntCast(step_to_llvm(data.cond), b->getInt1Ty(), false);
+                b->CreateCondBr(cond, then, merge);
+                b->SetInsertPoint(then);
+                AccInfo &acc = accs[func->accs.index(data.acc)];
+                V *acc_value = b->CreateLoad(acc.type, acc.val_ptr);
+                V *word_index = b->CreateShl(acc_value, b->getInt64(1));
+                V *low_ptr = index_arg(info, word_index, b->getInt64Ty());
+                b->CreateStore(low, low_ptr);
+                b->CreateStore(high, b->CreateInBoundsGEP(b->getInt64Ty(), low_ptr, b->getInt64(1)));
+                b->CreateStore(b->CreateAdd(acc_value, b->getInt64(1)), acc.val_ptr);
+                b->CreateBr(merge);
+                b->SetInsertPoint(merge);
+                return nullptr;
+            }
             SIMJIT_MATCH (StepKind::CondStore) {
                 ArgInfo &info = func_args[data.addr.arg];
                 llvm::BasicBlock *then = llvm::BasicBlock::Create(*context, "then", function);
@@ -1370,6 +1390,36 @@ struct LLVMBuilder {
                 V *count = b->CreateIntrinsic(mask_int->getType(), llvm::Intrinsic::ctpop, {mask_int});
                 if (mdtype != MaskDataType::M64) { count = b->CreateZExt(count, b->getInt64Ty()); }
                 acc_value = b->CreateNUWAdd(acc_value, count);
+                store_acc(data.acc, acc_value);
+                return nullptr;
+            }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                ArgInfo &info = func_args[data.dst];
+                V *low = step_to_llvm(data.low);
+                V *high = step_to_llvm(data.high);
+                V *cond = step_to_llvm(data.cond);
+                V *acc_value = load_acc(data.acc);
+                VecDataType vdtype = step->dtype.as_vec();
+                for (size_t lane = 0; lane < vdtype.nelems(); ++lane) {
+                    llvm::BasicBlock *before = b->GetInsertBlock();
+                    llvm::BasicBlock *then = llvm::BasicBlock::Create(*context, "pack128.then", function);
+                    llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context, "pack128.merge", function);
+                    V *active = b->CreateExtractElement(cond, b->getInt32(lane));
+                    b->CreateCondBr(active, then, merge);
+                    b->SetInsertPoint(then);
+                    V *word_index = b->CreateShl(acc_value, b->getInt64(1));
+                    V *low_ptr = index_arg(info, word_index, b->getInt64Ty());
+                    b->CreateStore(b->CreateExtractElement(low, b->getInt32(lane)), low_ptr);
+                    b->CreateStore(b->CreateExtractElement(high, b->getInt32(lane)),
+                                   b->CreateInBoundsGEP(b->getInt64Ty(), low_ptr, b->getInt64(1)));
+                    V *incremented_acc = b->CreateAdd(acc_value, b->getInt64(1));
+                    b->CreateBr(merge);
+                    b->SetInsertPoint(merge);
+                    llvm::PHINode *next_acc = b->CreatePHI(b->getInt64Ty(), 2);
+                    next_acc->addIncoming(incremented_acc, then);
+                    next_acc->addIncoming(acc_value, before);
+                    acc_value = next_acc;
+                }
                 store_acc(data.acc, acc_value);
                 return nullptr;
             }

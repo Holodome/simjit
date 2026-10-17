@@ -1486,6 +1486,25 @@ struct X86CppEmitter : CppEmitterBase {
 
                 return result;
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                VecDataType vdtype = step->dtype.as_vec();
+                size_t id = step->id;
+                std::string result = format("{\nint64_t pack_low_%zu[%zu];\nint64_t pack_high_%zu[%zu];\n", id,
+                                            vdtype.nelems(), id, vdtype.nelems());
+                const auto &storeu = x86::storeu_map.lookup(vdtype);
+                result += unsafe_intrin_call(storeu, format("pack_low_%zu", id), data.low) + ";\n";
+                result += unsafe_intrin_call(storeu, format("pack_high_%zu", id), data.high) + ";\n";
+                for (size_t lane = 0; lane < vdtype.nelems(); ++lane) {
+                    format_to(result,
+                              "if ((%s >> %zu) & 1) { size_t pack_pos_%zu_%zu = acc%zu++; ((int64_t *)arg%zu)[2 * "
+                              "pack_pos_%zu_%zu] = pack_low_%zu[%zu]; ((int64_t *)arg%zu)[2 * pack_pos_%zu_%zu + 1] = "
+                              "pack_high_%zu[%zu]; }\n",
+                              show(data.cond), lane, id, lane, func->accs.index(data.acc), data.dst, id, lane, id, lane,
+                              data.dst, id, lane, id, lane);
+                }
+                result += '}';
+                return result;
+            }
             SIMJIT_MATCH (StepKind::Gather) {
                 VecDataType vec_dtype = step->dtype.as_vec();
                 MaskDataType mdtype = vec_dtype.mask();

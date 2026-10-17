@@ -137,6 +137,14 @@ struct PackData {
     AccId acc;
 };
 
+struct Pack128Data {
+    ArgumentIdx dst;
+    Step *low;
+    Step *high;
+    Step *cond;
+    AccId acc;
+};
+
 struct CondStoreData {
     ArgumentAddress addr{};
     Step *arg;
@@ -284,6 +292,7 @@ enum class StepKind : uint8_t {
     VecIndex,
     Scatter,
     Pack,
+    Pack128,
     Ternarylogic,
     CondStore,
     ScalarIndex,
@@ -340,6 +349,7 @@ private:
         IndexData index;
         ScatterData scatter;
         PackData pack;
+        Pack128Data pack128;
         TernarylogicData ternarylogic;
         CondStoreData cond_store;
         ScalarBinWithSafetyCheck ab_overflow;
@@ -397,6 +407,7 @@ enum class AllowedDataTypes : uint8_t {
     X(vec_index, VecIndex, index, Vec)                                            \
     X(scatter, Scatter, scatter, ScalarOrVec)                                     \
     X(pack, Pack, pack, ScalarOrVec)                                              \
+    X(pack128, Pack128, pack128, ScalarOrVec)                                     \
     X(ternarylogic, Ternarylogic, ternarylogic, Vec)                              \
     X(cond_store, CondStore, cond_store, ScalarOrVec)                             \
     X(scalar_index, ScalarIndex, index, Scalar)                                   \
@@ -562,6 +573,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
         }
         SIMJIT_MATCH (StepKind::Pack) {
             process(data.arg);
+            process(data.cond);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::Pack128) {
+            process(data.low);
+            process(data.high);
             process(data.cond);
             break;
         }
@@ -780,6 +797,7 @@ constexpr bool is_scalar_step(StepKind kind) noexcept {
     case StepKind::ScalarIndex:
     case StepKind::Scatter:
     case StepKind::Pack:
+    case StepKind::Pack128:
     case StepKind::CondStore:
     case StepKind::ScalarArithBinaryOverflow:
     case StepKind::FunnelShift:

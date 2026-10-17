@@ -150,7 +150,7 @@ static void find_mask_combineable_nodes(Node *node, std::vector<Node *> &mask_re
             }
         }
         if (step->is(StepKind::Select)) { return; }
-        if (step->is(StepKind::Pack)) { return; }
+        if (step->is(StepKind::Pack) || step->is(StepKind::Pack128)) { return; }
         if (step->is(StepKind::Store) && step->step_data<StepKind::Store>().cond != nullptr) { return; }
         if (is_mask_combineable_step(step)) {
             if (!is_mask_result_node.get(node->id)) {
@@ -641,6 +641,11 @@ struct AlgebraicVectorizer {
                 case StepKind::Pack:
                     accumulate(graph_unify_carriers(node, node->left()));
                     accumulate(graph_unify_carriers(node->left(), node->right()));
+                    break;
+                case StepKind::Pack128:
+                    accumulate(graph_unify_carriers(node, node->children[0]));
+                    accumulate(graph_unify_carriers(node->children[0], node->children[1]));
+                    accumulate(graph_unify_carriers(node->children[0], node->children[2]));
                     break;
                 case StepKind::AccPredicateBinary: accumulate(graph_unify_carriers(node, node->arg())); break;
                 case StepKind::AccArithBinary:
@@ -1465,6 +1470,7 @@ struct AlgebraicVectorizer {
         case StepKind::Permute: node->dtype = node->arg()->dtype; break;
         case StepKind::Scatter: node->dtype = node->children[1]->dtype; break;
         case StepKind::Pack: node->dtype = node->left()->dtype; break;
+        case StepKind::Pack128: node->dtype = node->children[0]->dtype; break;
         case StepKind::AccPredicateBinary: {
             auto data = step->step_data<StepKind::AccPredicateBinary>();
             node->dtype = node->arg()->dtype;
@@ -1602,6 +1608,12 @@ struct AlgebraicVectorizer {
         case StepKind::Store:
         case StepKind::Pack:
             if (node->child_count == 2 && !graph_validate_same_width(node, node->left(), node->right())) {
+                return false;
+            }
+            break;
+        case StepKind::Pack128:
+            if (!graph_validate_same_width(node, node->children[0], node->children[1]) ||
+                !graph_validate_same_width(node, node->children[0], node->children[2])) {
                 return false;
             }
             break;

@@ -1862,6 +1862,14 @@ struct I128RewriteState {
                 additional_roots.push_back(sm.scatter({value.high, odd_idx, data.dst, cond}, I64));
                 return RewrittenStep::make_scalar(low);
             }
+            SIMJIT_MATCH (StepKind::Pack) {
+                if (step->dtype != I128) break;
+                mark_i128_argument(data.dst);
+                I128Pair value = rewrite_pair_child(data.arg, step);
+                Step *cond = rewrite_scalar(data.cond, step);
+                return RewrittenStep::make_scalar(
+                    sm.pack128({value.low, value.high, cond, data.dst, data.dst_size_acc}, I64));
+            }
             SIMJIT_MATCH (StepKind::AccI128) {
                 SIMJIT_ASSERT(data.high == nullptr);
                 I128Pair value = rewrite_pair_child(data.low, step);

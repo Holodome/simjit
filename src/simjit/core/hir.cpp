@@ -35,6 +35,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::Index: return "index";
     case StepKind::Scatter: return "scatter";
     case StepKind::Pack: return "pack";
+    case StepKind::Pack128: return "pack128";
     // Keep the serialized spelling stable while the internal node has the generic name.
     case StepKind::AccI128: return "sum128";
     case StepKind::Permute: return "permute";
@@ -172,6 +173,9 @@ void add_step_argument_accesses(std::vector<ArgumentUsage> &usages, const Step *
     case StepKind::Pack:
         add_argument_access(usages, step->step_data<StepKind::Pack>().dst, ArgumentUsage::AppendWrite);
         return;
+    case StepKind::Pack128:
+        add_argument_access(usages, step->step_data<StepKind::Pack128>().dst, ArgumentUsage::AppendWrite);
+        return;
     default: return;
     }
 }
@@ -282,6 +286,9 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
                show_funnel_shift_kind(data.kind));
         SIMJIT_MATCH (StepKind::Pack)
             wr("arg=%%%u cond=%%%u dst=@%zu dst_size=$%zu", ref(data.arg), ref(data.cond), data.dst, data.dst_size_acc);
+        SIMJIT_MATCH (StepKind::Pack128)
+            wr("low=%%%u high=%%%u cond=%%%u dst=@%zu dst_size=$%zu", ref(data.low), ref(data.high), ref(data.cond),
+               data.dst, data.dst_size_acc);
         SIMJIT_MATCH (StepKind::Permute)
             wr("is_bit=%s arg=%%%u permute=%llx", data.is_bit ? "true" : "false", ref(data.arg),
                (unsigned long long)data.permute);

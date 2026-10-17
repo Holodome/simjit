@@ -2718,6 +2718,24 @@ struct CompileState {
                 cc.bind(skip_label);
                 return {};
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                const ArgInfo &arg_info = args[data.dst];
+                require_acc_initialized(data.acc);
+                GpR acc = accs[mir_func->accs.index(data.acc)].as<GpR>();
+                GpR low = int_subexpr(data.low);
+                GpR high = int_subexpr(data.high);
+                GpR cond = int_subexpr(data.cond);
+                aj::Label skip_label = cc.new_anonymous_label("skip");
+                cc.test(cond, cond);
+                cc.jz(skip_label);
+                GpR word_index = cc.new_gp64();
+                cc.lea(word_index, ax86::ptr(acc, acc, 0));
+                cc.mov(mem_offset(arg_info.gp, word_index, ScalarDataType::I64), low);
+                cc.mov(mem_offset(arg_info.gp, word_index, ScalarDataType::I64, 8), high);
+                cc.inc(acc);
+                cc.bind(skip_label);
+                return {};
+            }
             SIMJIT_MATCH (StepKind::CondStore) {
                 const ArgInfo &arg_info = args[data.addr.arg];
                 AnyR arg = subexpr(data.arg);
@@ -4011,6 +4029,63 @@ struct CompileState {
                 cc.add(acc, popcnt_gp.r64());
                 return {};
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                ArgInfo &info = args[data.dst];
+                require_acc_initialized(data.acc);
+                GpR acc = accs[mir_func->accs.index(data.acc)].as<GpR>();
+                VecR low = vec_subexpr(data.low);
+                VecR high = vec_subexpr(data.high);
+                MaskR cond = mask_subexpr(data.cond);
+                VecDataType dtype = step->dtype.as_vec();
+                if (dtype.elem != VecElemType::I64) { messed_up("i128 vector pack has non-i64 lanes"); }
+                const InterleaveIdxTable *table = interleave_table(dtype);
+                if (table == nullptr) { messed_up("missing i128 pack interleave table"); }
+                MaskDataType mdtype = data.cond->dtype.as_mask();
+                SIMJIT_ASSERT(mask_dtype_bits(mdtype) <= 8);
+                size_t half_width = dtype.nelems() / 2;
+                GpR cond_bits = cc.new_gp32();
+                mask_to_gp(cc, mdtype, cond_bits, cond);
+                GpR low_bits = cc.new_gp32();
+                GpR high_bits = cc.new_gp32();
+                cc.mov(low_bits, cond_bits);
+                cc.and_(low_bits, (1u << half_width) - 1);
+                cc.mov(high_bits, cond_bits);
+                cc.shr(high_bits, half_width);
+                // Do the counts before the independent vector permutes and compresses.
+                cc.popcnt(low_bits, low_bits);
+                cc.popcnt(high_bits, high_bits);
+                cc.add(high_bits.r64(), low_bits.r64());
+                cc.add(low_bits.r64(), low_bits.r64());
+
+                GpR deposit_mask = cc.new_gp32();
+                GpR duplicate_bits = cc.new_gp32();
+                cc.mov(deposit_mask, 0x55555555u);
+                // Deposit every condition bit into the first position of its pair, then x + 2*x
+                // duplicates every bit.  One widened mask holds the low and high packed masks.
+                cc.pdep(duplicate_bits, cond_bits, deposit_mask);
+                cc.lea(duplicate_bits, ax86::ptr(duplicate_bits, duplicate_bits, 1));
+                MaskR low_mask = create_mask_reg(MaskDataType::M16);
+                gp_to_mask(MaskDataType::M16, low_mask, duplicate_bits);
+                MaskR high_mask = create_mask_reg(MaskDataType::M16);
+                cc.kshiftrw(high_mask, low_mask, dtype.nelems());
+
+                VecR packed_low = create_vec_reg(dtype);
+                VecR packed_high = create_vec_reg(dtype);
+                cc.vmovdqu64(packed_low, low);
+                cc.vmovdqu64(packed_high, low);
+                vec_permute2(cc, packed_low, table->lo, high, dtype);
+                vec_permute2(cc, packed_high, table->hi, high, dtype);
+                cc.k(low_mask).vpcompressq(packed_low, packed_low);
+                cc.k(high_mask).vpcompressq(packed_high, packed_high);
+
+                GpR addr = cc.new_gp64();
+                cc.lea(addr, ax86::ptr(acc, acc, 0));
+                cc.lea(addr, ax86::ptr(info.gp, addr, 3));
+                cc.vmovdqu64(ax86::ptr(addr), packed_low);
+                cc.vmovdqu64(ax86::ptr(addr, low_bits.r64(), 3), packed_high);
+                cc.add(acc, high_bits.r64());
+                return {};
+            }
             SIMJIT_MATCH (StepKind::Scatter) {
                 VecDataType vdtype = step->dtype.as_vec();
                 const ArgInfo &arg_info = args[data.dst];
@@ -4293,6 +4368,8 @@ struct CompileState {
                     main_loop_acc_uses[mir_func->accs.index(x->step_data<StepKind::VecIndex>().acc)] = 1;
                 } else if (x->is(StepKind::Pack)) {
                     main_loop_acc_uses[mir_func->accs.index(x->step_data<StepKind::Pack>().acc)] = 1;
+                } else if (x->is(StepKind::Pack128)) {
+                    main_loop_acc_uses[mir_func->accs.index(x->step_data<StepKind::Pack128>().acc)] = 1;
                 } else if (x->is(StepKind::ScalarArithBinaryOverflow)) {
                     main_loop_acc_uses[mir_func->accs.index(
                         x->step_data<StepKind::ScalarArithBinaryOverflow>().overflow_flag)] = 1;

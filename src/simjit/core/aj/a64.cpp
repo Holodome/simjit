@@ -2151,6 +2151,21 @@ struct CompileState {
                 cc.bind(skip_label);
                 return {};
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                const ArgInfo &arg_info = args[data.dst];
+                GpR acc = accs[mir_func->accs.index(data.acc)].as<GpR>();
+                GpR low = int_subexpr(data.low);
+                GpR high = int_subexpr(data.high);
+                GpR cond = int_subexpr(data.cond);
+                aj::Label skip_label = cc.new_anonymous_label("skip");
+                cc.cbz(cond, skip_label);
+                GpR addr = cc.new_gp64();
+                cc.add(addr, arg_info.gp, acc, aja64::lsl(4));
+                cc.stp(low, high, aja64::ptr(addr));
+                cc.add(acc, acc, 1);
+                cc.bind(skip_label);
+                return {};
+            }
             SIMJIT_MATCH (StepKind::CondStore) {
                 const ArgInfo &arg_info = args[data.addr.arg];
                 AnyR arg = subexpr(data.arg);
@@ -2415,6 +2430,31 @@ struct CompileState {
                     cc.add(tmpGp.w(), tmpGp.w(), x);
                 }
                 cc.add(acc, acc, tmpGp);
+                return {};
+            }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                VecDataType dtype = step->dtype.as_vec();
+                if (dtype.elem != VecElemType::I64 || dtype.nelems() != 2) {
+                    messed_up("i128 vector pack has non-two-i64-lane dtype %s", show_vec_dtype(dtype));
+                }
+                GpR acc = accs[mir_func->accs.index(data.acc)].as<GpR>();
+                GpR base = args[data.dst].gp;
+                VecR low = vec_subexpr(data.low);
+                VecR high = vec_subexpr(data.high);
+                VecR cond = vec_subexpr(data.cond);
+                for (size_t lane = 0; lane < 2; ++lane) {
+                    GpR active = cc.new_gp64();
+                    GpR addr = cc.new_gp64();
+                    aj::Label skip_label = cc.new_anonymous_label("skip");
+                    cc.umov(active, cond.d(lane));
+                    cc.cbz(active, skip_label);
+                    cc.add(addr, base, acc, aja64::lsl(4));
+                    cc.st1(low.d(lane), aja64::ptr(addr));
+                    cc.add(addr, addr, 8);
+                    cc.st1(high.d(lane), aja64::ptr(addr));
+                    cc.add(acc, acc, 1);
+                    cc.bind(skip_label);
+                }
                 return {};
             }
             SIMJIT_MATCH (StepKind::Const) {

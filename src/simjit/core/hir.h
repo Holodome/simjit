@@ -113,6 +113,14 @@ struct PackData {
     AccIdx dst_size_acc{};
 };
 
+struct Pack128Data {
+    Step *low{};
+    Step *high{};
+    Step *cond{};
+    ArgumentIdx dst{};
+    AccIdx dst_size_acc{};
+};
+
 struct GatherData {
     Step *idx{};
     ArgumentIdx data{};
@@ -175,6 +183,7 @@ enum class StepKind : uint8_t {
     // Stores
     Store,
     Pack,
+    Pack128,
     Scatter,
     StoreInterleave,
 
@@ -223,6 +232,7 @@ private:
         AccPredicateBinData acc_pb;
         ScatterData scatter;
         PackData pack;
+        Pack128Data pack128;
         IntCastData int_cast;
         FloatCastData float_cast;
         PermuteData permute;
@@ -254,6 +264,7 @@ private:
     X(index, Index, index)                                    \
     X(scatter, Scatter, scatter)                              \
     X(pack, Pack, pack)                                       \
+    X(pack128, Pack128, pack128)                              \
     X(i128_agg, AccI128, acc_i128)                            \
     X(permute, Permute, permute)                              \
     X(bitcast, BitCast, arg)                                  \
@@ -484,6 +495,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.cond);
             break;
         }
+        SIMJIT_MATCH (StepKind::Pack128) {
+            process(data.low);
+            process(data.high);
+            process(data.cond);
+            break;
+        }
         SIMJIT_MATCH (StepKind::Permute) {
             process(data.arg);
             break;
@@ -509,6 +526,7 @@ constexpr bool is_root_step(StepKind kind) {
     switch (kind) {
     case StepKind::Store:
     case StepKind::Pack:
+    case StepKind::Pack128:
     case StepKind::Scatter:
     case StepKind::AccArithBinary:
     case StepKind::AccPredicateBinary:

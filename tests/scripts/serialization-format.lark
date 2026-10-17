@@ -46,6 +46,7 @@ step: const_step
     | store_interleave_step
     | scatter_step
     | pack_step
+    | pack128_step
     | acc_arith_step
     | acc_predicate_step
     | acc_sum128_step
@@ -79,6 +80,7 @@ store_step: "(" "step" step_id "store" scalar_dtype step_ref arg_ref load_store_
 store_interleave_step: "(" "step" step_id "store-interleave" scalar_dtype step_ref step_ref arg_ref load_store_kind step_ref? ")"
 scatter_step: "(" "step" step_id "scatter" scalar_dtype step_ref step_ref arg_ref step_ref? ")"
 pack_step: "(" "step" step_id "pack" scalar_dtype step_ref step_ref arg_ref acc_ref ")"
+pack128_step: "(" "step" step_id "pack128" scalar_dtype step_ref step_ref step_ref arg_ref acc_ref ")"
 
 acc_arith_step: "(" "step" step_id "acc-arith-bin" scalar_dtype arith_binary_op step_ref acc_ref step_ref? ")"
 acc_predicate_step: "(" "step" step_id "acc-predicate-bin" scalar_dtype predicate_binary_op step_ref acc_ref ")"

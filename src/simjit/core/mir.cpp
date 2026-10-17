@@ -288,6 +288,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::ScalarIndex: return "scalar-index";
     case StepKind::Scatter: return "scatter";
     case StepKind::Pack: return "pack";
+    case StepKind::Pack128: return "pack128";
     case StepKind::Ternarylogic: return "ternarylogic";
     case StepKind::CondStore: return "cond-store";
     case StepKind::ScalarArithBinaryOverflow: return "ab-overflow";
@@ -315,6 +316,7 @@ constexpr bool is_root_step(StepKind kind) noexcept {
     case StepKind::AccStore:
     case StepKind::Scatter:
     case StepKind::Pack:
+    case StepKind::Pack128:
     case StepKind::CondStore:
     case StepKind::CondScatter:
     case StepKind::StoreInterleave: return true;
@@ -450,6 +452,9 @@ struct ExprShowState {
             SIMJIT_MATCH (StepKind::Pack)
                 wr("arg=%%%u cond=%%%u dst=%zu acc=$%lld:%llu", ref(data.arg), ref(data.cond), data.dst,
                    (long long)data.acc.group, (unsigned long long)data.acc.local);
+            SIMJIT_MATCH (StepKind::Pack128)
+                wr("low=%%%u high=%%%u cond=%%%u dst=%zu acc=$%lld:%llu", ref(data.low), ref(data.high), ref(data.cond),
+                   data.dst, (long long)data.acc.group, (unsigned long long)data.acc.local);
             SIMJIT_MATCH (StepKind::CondStore)
                 wr("arg=%%%u cond=%%%u dst=@%zu offset=%zu", ref(data.arg), ref(data.cond), data.addr.arg,
                    data.addr.offset);
@@ -1450,7 +1455,7 @@ struct MirConstructState {
                 auto maybe_arith_op = arith_op_from_predicate(op);
                 if (!maybe_arith_op) messed_up("got invalid op %s in agg", show_predicate_binary_op(op));
                 collapse_predicate_accs(group, op, *maybe_arith_op);
-            } else if (agg_expr->is(hir::StepKind::Pack)) {
+            } else if (agg_expr->is(hir::StepKind::Pack) || agg_expr->is(hir::StepKind::Pack128)) {
                 SIMJIT_ASSERT(group.main_count() == 0);
                 Step *acc = sm.acc_load(group.remainder(), ScalarDataType::I64);
                 epilogue_roots.push_back(sm.agg_result({acc, group.dst_arg}, ScalarDataType::I64));
@@ -2508,6 +2513,16 @@ struct MirConstructState {
                 main_loop_roots.push_back(sm.pack({data.dst, arg, cond, acc}, node->dtype));
                 return;
             }
+            SIMJIT_MATCH (hir::StepKind::Pack128) {
+                Step *low = ref_nth(0);
+                Step *high = ref_nth(1);
+                Step *cond = ref_nth(2);
+                invariant_same_vec_type(low, high);
+                invariant_vec_mask(node, cond);
+                auto acc = acc_groups[data.dst_size_acc].singleton();
+                main_loop_roots.push_back(sm.pack128({data.dst, low, high, cond, acc}, node->dtype));
+                return;
+            }
             SIMJIT_MATCH (hir::StepKind::AccI128) {
                 VecDataType vdtype = node->dtype.as_vec();
                 auto [low_acc, high_acc] = acc_groups[data.acc].alloc_main_pair(ctx.remap);
@@ -2561,6 +2576,7 @@ struct MirConstructState {
             // Root steps
         case hir::StepKind::Store:
         case hir::StepKind::Pack:
+        case hir::StepKind::Pack128:
         case hir::StepKind::Scatter:
         case hir::StepKind::AccArithBinary:
         case hir::StepKind::AccPredicateBinary:
@@ -3196,6 +3212,13 @@ struct MirConstructState {
                 auto acc = acc_groups[data.dst_size_acc].singleton();
                 return remainder_roots.push_back(sm.pack({data.dst, arg, cond, acc}, arg->dtype));
             }
+            SIMJIT_MATCH (hir::StepKind::Pack128) {
+                Step *low = ref(data.low);
+                Step *high = ref(data.high);
+                Step *cond = ref(data.cond);
+                auto acc = acc_groups[data.dst_size_acc].singleton();
+                return remainder_roots.push_back(sm.pack128({data.dst, low, high, cond, acc}, low->dtype));
+            }
         default: break;
         }
 #undef ref
@@ -3210,6 +3233,7 @@ struct MirConstructState {
             // Root steps
         case hir::StepKind::Store:
         case hir::StepKind::Pack:
+        case hir::StepKind::Pack128:
         case hir::StepKind::Scatter:
         case hir::StepKind::AccArithBinary:
         case hir::StepKind::AccPredicateBinary:
@@ -3665,9 +3689,10 @@ struct MirConstructState {
     void create_acc_groups() {
         acc_groups.reserve(hir->accs.size());
         for (const hir::Accumulator &acc : hir->accs) {
-            AccKind kind = acc.agg_expr->is(hir::StepKind::AccI128)    ? AccKind::I128
-                           : acc.agg_expr->kind == hir::StepKind::Pack ? AccKind::Pack
-                                                                       : AccKind::Agg;
+            AccKind kind = acc.agg_expr->is(hir::StepKind::AccI128) ? AccKind::I128
+                           : (acc.agg_expr->kind == hir::StepKind::Pack || acc.agg_expr->kind == hir::StepKind::Pack128)
+                               ? AccKind::Pack
+                               : AccKind::Agg;
             acc_groups.emplace_back(kind, acc.dtype, acc.idx, acc.agg_expr, acc.dst_arg);
         }
     }
@@ -3728,6 +3753,13 @@ struct MirConstructState {
                 if (std::find(dtypes.begin(), dtypes.end(), lane_dtype) == dtypes.end()) {
                     dtypes.push_back(lane_dtype);
                 }
+            }
+        }
+        for (Step *root : main_loop_roots) {
+            if (!root->is(StepKind::Pack128) || !root->dtype.is_vec()) { continue; }
+            VecDataType lane_dtype = root->dtype.as_vec();
+            if (std::find(interleave_dtypes.begin(), interleave_dtypes.end(), lane_dtype) == interleave_dtypes.end()) {
+                interleave_dtypes.push_back(lane_dtype);
             }
         }
         func->interleave.deinterleave_dtypes = arena->copy_array<VecDataType>(deinterleave_dtypes);

@@ -1783,6 +1783,30 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
         return result;
     }
 
+    std::string pack128_to_cpp(const Pack128Data &data, const Step *step) {
+        if (!step->dtype.is_vec() || !data.low->dtype.is_vec() || !data.high->dtype.is_vec() ||
+            !data.cond->dtype.is_mask()) {
+            return unexpected_step_dtype(step, "vector i128 pack");
+        }
+        VecDataType dtype = step->dtype.as_vec();
+        size_t id = step->id;
+        std::string result = format("{\n"
+                                    "int64_t pack_low_%zu[%zu];\n"
+                                    "int64_t pack_high_%zu[%zu];\n",
+                                    id, dtype.nelems(), id, dtype.nelems());
+        format_to(result, "%s(pack_low_%zu, %s);\n", arm_intrin_name("st1", dtype).c_str(), id, show(data.low));
+        format_to(result, "%s(pack_high_%zu, %s);\n", arm_intrin_name("st1", dtype).c_str(), id, show(data.high));
+        for (size_t lane = 0; lane < dtype.nelems(); ++lane) {
+            format_to(result,
+                      "if (%s) { size_t pack_pos_%zu_%zu = acc%zu++; ((int64_t *)arg%zu)[2 * pack_pos_%zu_%zu] = "
+                      "pack_low_%zu[%zu]; ((int64_t *)arg%zu)[2 * pack_pos_%zu_%zu + 1] = pack_high_%zu[%zu]; }\n",
+                      lane_expr(data.cond, lane).c_str(), id, lane, func->accs.index(data.acc), data.dst, id, lane, id,
+                      lane, data.dst, id, lane, id, lane);
+        }
+        result += '}';
+        return result;
+    }
+
     std::string vec_lane_expr(VecDataType dtype, const char *arg, size_t lane, bool is_unsigned = false) const {
         return format("%s(%s, %zu)", lane_get_intrin(dtype, is_unsigned).c_str(), arg, lane);
     }
@@ -2264,6 +2288,7 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
         case StepKind::Scatter: return vector_scatter_to_cpp(step, step->step_data<StepKind::Scatter>());
         case StepKind::CondScatter: unsupported("Do not support cond scatter");
         case StepKind::Pack: return pack_to_cpp(step->step_data<StepKind::Pack>(), step);
+        case StepKind::Pack128: return pack128_to_cpp(step->step_data<StepKind::Pack128>(), step);
         case StepKind::Ternarylogic: return ternarylogic_to_cpp(step, step->step_data<StepKind::Ternarylogic>());
         case StepKind::VecReduce: return vec_reduce_to_cpp(step, step->step_data<StepKind::VecReduce>());
         case StepKind::MaskReduce: return mask_reduce_to_cpp(step, step->step_data<StepKind::MaskReduce>());

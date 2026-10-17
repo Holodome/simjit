@@ -423,6 +423,7 @@ CppEmitterBase::StepNameKind CppEmitterBase::classify_step_name(const Step *step
     case StepKind::Scatter:
     case StepKind::CondScatter:
     case StepKind::Pack:
+    case StepKind::Pack128:
     case StepKind::AccStore:
     case StepKind::AggResult: return StepNameKind::None;
     default: return StepNameKind::Temp;
@@ -479,6 +480,10 @@ void CppEmitterBase::record_main_loop_acc_uses() {
                 break;
             }
             SIMJIT_MATCH (StepKind::Pack) {
+                mark_main_loop_acc_use(data.acc);
+                break;
+            }
+            SIMJIT_MATCH (StepKind::Pack128) {
                 mark_main_loop_acc_use(data.acc);
                 break;
             }
@@ -1064,6 +1069,13 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
         SIMJIT_MATCH (StepKind::Pack) {
             return format("if(%s) arg%zu[acc%zu++] = %s", show_scalar_operand(data.cond), data.dst,
                           func->accs.index(data.acc), show_scalar_operand(data.arg));
+        }
+        SIMJIT_MATCH (StepKind::Pack128) {
+            return format("if(%s) { size_t pack_pos%zu = acc%zu++; ((int64_t *)arg%zu)[2 * pack_pos%zu] = %s; "
+                          "((int64_t *)arg%zu)[2 * pack_pos%zu + 1] = %s; }",
+                          show_scalar_operand(data.cond), size_t(step->id), func->accs.index(data.acc), data.dst,
+                          size_t(step->id), show_scalar_operand(data.low), data.dst, size_t(step->id),
+                          show_scalar_operand(data.high));
         }
         SIMJIT_MATCH (StepKind::CondStore) {
             return format("if (%s) arg%zu[i] = %s", show_scalar_operand(data.cond), data.addr.arg,

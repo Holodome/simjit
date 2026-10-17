@@ -266,6 +266,7 @@ template <> struct hl::from_list<simjit::hir::StepKind> {
         if (s == "index") return simjit::hir::StepKind::Index;
         if (s == "scatter") return simjit::hir::StepKind::Scatter;
         if (s == "pack") return simjit::hir::StepKind::Pack;
+        if (s == "pack128") return simjit::hir::StepKind::Pack128;
         if (s == "sum128") return simjit::hir::StepKind::AccI128;
         if (s == "permute") return simjit::hir::StepKind::Permute;
         if (s == "bitcast") return simjit::hir::StepKind::BitCast;
@@ -532,6 +533,11 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
                                serialize_acc_ref(data.dst_size_acc));
             break;
         }
+        SIMJIT_MATCH (StepKind::Pack128) {
+            payload = hl::list(ref(data.low), ref(data.high), ref(data.cond), serialize_arg_ref(data.dst),
+                               serialize_acc_ref(data.dst_size_acc));
+            break;
+        }
         SIMJIT_MATCH (StepKind::Permute) {
             payload = hl::list(ref(data.arg), simjit::format("0x%llx", (unsigned long long)data.permute), data.is_bit);
             break;
@@ -791,6 +797,14 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
     case StepKind::Pack: {
         auto [arg, cond, dst, acc] = bind_step(hl::cap, hl::cap, hl::cap, hl::cap);
         builder.pack(ref_value(arg), ref_predicate(cond), parse_arg_ref(dst), acc_arg_map.at(parse_acc_ref(acc)));
+        return {};
+    }
+    case StepKind::Pack128: {
+        auto [low_word, high_word, cond, dst, acc] = bind_step(hl::cap, hl::cap, hl::cap, hl::cap, hl::cap);
+        Value low = builder.zext(ref_value(low_word), ScalarDataType::I128);
+        Value high = builder.zext(ref_value(high_word), ScalarDataType::I128);
+        Value value = builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+        builder.pack(value, ref_predicate(cond), parse_arg_ref(dst), acc_arg_map.at(parse_acc_ref(acc)));
         return {};
     }
     case StepKind::Scatter: {
