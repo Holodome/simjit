@@ -1791,13 +1791,17 @@ struct I128RewriteState {
                 const auto &op = data.op->step_data<StepKind::ArithBinary>();
                 bool is_division = op.op == ArithBinaryOp::Div || op.op == ArithBinaryOp::UDiv ||
                                    op.op == ArithBinaryOp::Mod || op.op == ArithBinaryOp::UMod;
-                if (!is_division || op.flags != ArithBinaryOpFlags::No) {
+                bool matching_kind = (data.kind == CheckedOpKind::Div && op.op == ArithBinaryOp::Div) ||
+                                     (data.kind == CheckedOpKind::UDiv && op.op == ArithBinaryOp::UDiv) ||
+                                     (data.kind == CheckedOpKind::Mod && op.op == ArithBinaryOp::Mod) ||
+                                     (data.kind == CheckedOpKind::UMod && op.op == ArithBinaryOp::UMod);
+                if (!is_division || !matching_kind || op.flags != ArithBinaryOpFlags::No) {
                     unsupported("i128 rewrite does not support checked %s", show_arith_binary_op(op.op));
                 }
                 I128Pair result = rewrite_pair_child(data.op, step);
                 Step *mask = data.mask == nullptr ? nullptr : rewrite_scalar(data.mask, step);
-                return RewrittenStep::make_pair(
-                    {sm.checked_op({result.low, mask}, I64), sm.checked_op({result.high, mask}, I64)});
+                return RewrittenStep::make_pair({sm.checked_op({CheckedOpKind::I128Div, result.low, mask}, I64),
+                                                 sm.checked_op({CheckedOpKind::I128Div, result.high, mask}, I64)});
             }
             SIMJIT_MATCH (StepKind::Select) {
                 if (step->dtype != I128) break;
@@ -2510,17 +2514,44 @@ Value FunctionBuilder::checked_op(Value value, MaybePredicate mask) {
         invalid_input("Unsupported checked operation %s", show_step_kind(operation->kind));
     }
 
+    CheckedOpKind kind{};
+    if (operation->is(StepKind::ArithBinary)) {
+        switch (operation->step_data<StepKind::ArithBinary>().op) {
+        case ArithBinaryOp::Add: kind = CheckedOpKind::Add; break;
+        case ArithBinaryOp::Sub: kind = CheckedOpKind::Sub; break;
+        case ArithBinaryOp::Mul: kind = CheckedOpKind::Mul; break;
+        case ArithBinaryOp::Div: kind = CheckedOpKind::Div; break;
+        case ArithBinaryOp::UDiv: kind = CheckedOpKind::UDiv; break;
+        case ArithBinaryOp::Mod: kind = CheckedOpKind::Mod; break;
+        case ArithBinaryOp::UMod: kind = CheckedOpKind::UMod; break;
+        case ArithBinaryOp::ShiftRightArith: kind = CheckedOpKind::ShiftRightArith; break;
+        case ArithBinaryOp::ShiftRightLogical: kind = CheckedOpKind::ShiftRightLogical; break;
+        case ArithBinaryOp::ShiftLeftLogical: kind = CheckedOpKind::ShiftLeftLogical; break;
+        case ArithBinaryOp::RotateLeft: kind = CheckedOpKind::RotateLeft; break;
+        case ArithBinaryOp::RotateRight: kind = CheckedOpKind::RotateRight; break;
+        default: SIMJIT_UNREACHABLE();
+        }
+    } else if (operation->is(StepKind::IntCast)) {
+        kind = CheckedOpKind::Trunc;
+    } else if (operation->is(StepKind::ArithUnary)) {
+        kind = operation->step_data<StepKind::ArithUnary>().op == ArithUnaryOp::Abs ? CheckedOpKind::Abs
+                                                                                    : CheckedOpKind::Negate;
+    } else {
+        SIMJIT_UNREACHABLE();
+    }
+
     impl_->ensure_has_safety_check_arg();
 
     Step *mask_step = mask.is_valid() ? mask.value().step_ : nullptr;
     mask_step = simplify_optional_cond(impl_->ctx, mask_step);
-    uint64_t hash = make_hash(StepKind::CheckedOp, operation, mask_step);
-    if (auto *result = impl_->cse<StepKind::CheckedOp>(
-            hash, [operation, mask_step](const auto &x) { return x.op == operation && x.mask == mask_step; })) {
+    uint64_t hash = make_hash(StepKind::CheckedOp, kind, operation, mask_step);
+    if (auto *result = impl_->cse<StepKind::CheckedOp>(hash, [kind, operation, mask_step](const auto &x) {
+            return x.kind == kind && x.op == operation && x.mask == mask_step;
+        })) {
         return result;
     }
     impl_->special_ops |= arith_binary_special_ops(operation);
-    Step *result = impl_->sm.checked_op({operation, mask_step}, value.dtype());
+    Step *result = impl_->sm.checked_op({kind, operation, mask_step}, value.dtype());
     return impl_->remember_expr(hash, result);
 }
 

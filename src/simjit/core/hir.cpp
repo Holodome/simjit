@@ -48,6 +48,28 @@ const char *show_step_kind(StepKind kind) noexcept {
     SIMJIT_UNREACHABLE();
 }
 
+const char *show_checked_op_kind(CheckedOpKind kind) noexcept {
+    switch (kind) {
+    case CheckedOpKind::Add: return "add";
+    case CheckedOpKind::Sub: return "sub";
+    case CheckedOpKind::Mul: return "mul";
+    case CheckedOpKind::Div: return "div";
+    case CheckedOpKind::UDiv: return "udiv";
+    case CheckedOpKind::Mod: return "mod";
+    case CheckedOpKind::UMod: return "umod";
+    case CheckedOpKind::I128Div: return "i128-div";
+    case CheckedOpKind::ShiftRightArith: return "shra";
+    case CheckedOpKind::ShiftRightLogical: return "shrl";
+    case CheckedOpKind::ShiftLeftLogical: return "shll";
+    case CheckedOpKind::RotateLeft: return "rol";
+    case CheckedOpKind::RotateRight: return "ror";
+    case CheckedOpKind::Trunc: return "trunc";
+    case CheckedOpKind::Abs: return "abs";
+    case CheckedOpKind::Negate: return "neg";
+    }
+    SIMJIT_UNREACHABLE();
+}
+
 std::string show_special_ops(SpecialOp ops) {
     if (ops == SpecialOp::None) { return "none"; }
     std::string result;
@@ -250,7 +272,7 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
                show_arith_binary_op(data.op), ref(data.left_low), ref(data.left_high), ref(data.right_low),
                ref(data.right_high), data.high_word ? "high" : "low");
         SIMJIT_MATCH (StepKind::CheckedOp) {
-            wr_("op=%%%u", ref(data.op));
+            wr_("kind=%s op=%%%u", show_checked_op_kind(data.kind), ref(data.op));
             if (data.mask != nullptr) wr_(" mask=%%%u", ref(data.mask));
             return;
         }

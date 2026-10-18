@@ -33,7 +33,29 @@ struct I128DivData {
     bool high_word = false;
 };
 
+enum class CheckedOpKind : uint8_t {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    UDiv,
+    Mod,
+    UMod,
+    I128Div,
+    ShiftRightArith,
+    ShiftRightLogical,
+    ShiftLeftLogical,
+    RotateLeft,
+    RotateRight,
+    Trunc,
+    Abs,
+    Negate,
+};
+
+const char *show_checked_op_kind(CheckedOpKind kind) noexcept;
+
 struct CheckedOpData {
+    CheckedOpKind kind{};
     Step *op{};
     Step *mask{};
 };

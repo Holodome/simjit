@@ -38,6 +38,7 @@ DEFAULT_TO_LIST(simjit::VecSize, simjit::show_vec_size);
 DEFAULT_TO_LIST(simjit::MaskDataType, simjit::show_mask_dtype);
 DEFAULT_TO_LIST(simjit::ArithUnaryOp, simjit::show_arith_unary_op);
 DEFAULT_TO_LIST(simjit::ArithBinaryOp, simjit::show_arith_binary_op);
+DEFAULT_TO_LIST(simjit::hir::CheckedOpKind, simjit::hir::show_checked_op_kind);
 DEFAULT_TO_LIST(simjit::CmpOp, simjit::show_cmp_op);
 DEFAULT_TO_LIST(simjit::IntCastKind, simjit::show_int_cast_kind);
 DEFAULT_TO_LIST(simjit::PredicateBinaryOp, simjit::show_predicate_binary_op);
@@ -219,6 +220,30 @@ template <> struct hl::from_list<simjit::IntCastKind> {
         if (s == "sext") return simjit::IntCastKind::Sext;
         if (s == "zext") return simjit::IntCastKind::Zext;
         serialization_error("Invalid IntCastKind value %.*s", SV(s));
+    }
+};
+
+template <> struct hl::from_list<simjit::hir::CheckedOpKind> {
+    simjit::hir::CheckedOpKind operator()(hl::value x) {
+        std::string_view s = x.as_string_view();
+        using Kind = simjit::hir::CheckedOpKind;
+        if (s == "add") return Kind::Add;
+        if (s == "sub") return Kind::Sub;
+        if (s == "mul") return Kind::Mul;
+        if (s == "div") return Kind::Div;
+        if (s == "udiv") return Kind::UDiv;
+        if (s == "mod") return Kind::Mod;
+        if (s == "umod") return Kind::UMod;
+        if (s == "i128-div") return Kind::I128Div;
+        if (s == "shra") return Kind::ShiftRightArith;
+        if (s == "shrl") return Kind::ShiftRightLogical;
+        if (s == "shll") return Kind::ShiftLeftLogical;
+        if (s == "rol") return Kind::RotateLeft;
+        if (s == "ror") return Kind::RotateRight;
+        if (s == "trunc") return Kind::Trunc;
+        if (s == "abs") return Kind::Abs;
+        if (s == "neg") return Kind::Negate;
+        serialization_error("Invalid CheckedOpKind value %.*s", SV(s));
     }
 };
 
@@ -464,7 +489,7 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             break;
         }
         SIMJIT_MATCH (StepKind::CheckedOp) {
-            payload = hl::list_dot(ref(data.op), data.mask ? hl::list(ref(data.mask)) : nullptr);
+            payload = hl::list_dot(data.kind, ref(data.op), data.mask ? hl::list(ref(data.mask)) : nullptr);
             break;
         }
         SIMJIT_MATCH (StepKind::ArithUnary) {
@@ -687,7 +712,7 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         return builder.trunc(selected, ScalarDataType::I64);
     }
     case StepKind::CheckedOp: {
-        auto [op, mask] = bind_step(hl::cap, hl::or_nil);
+        auto [checked_kind, op, mask] = bind_step(hl::cap_as<hir::CheckedOpKind>, hl::cap, hl::or_nil);
         MaybePredicate predicate{};
         if (!hl::is_nil(mask)) { predicate = ref_predicate(mask); }
         auto [op_kind, op_dtype, op_payload] =
@@ -706,10 +731,17 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
             Value quotient = builder.checked_op(
                 builder.arith_binary(join_i128(left_low, left_high), join_i128(right_low, right_high), div_op),
                 predicate);
+            if (checked_kind != hir::CheckedOpKind::I128Div) {
+                serialization_error("Checked operation kind does not match i128 division");
+            }
             Value selected = high_word ? builder.srl(quotient, builder.con(64, ScalarDataType::I128)) : quotient;
             return builder.trunc(selected, ScalarDataType::I64);
         }
-        return builder.checked_op(ref_value(op), predicate);
+        Value checked = builder.checked_op(ref_value(op), predicate);
+        if (checked.step_->step_data<StepKind::CheckedOp>().kind != checked_kind) {
+            serialization_error("Checked operation kind does not match its operation");
+        }
+        return checked;
     }
     case StepKind::ArithUnary: {
         auto [op, arg, overflow] = bind_step(hl::cap_as<ArithUnaryOp>, hl::cap, hl::or_nil_as<bool>);

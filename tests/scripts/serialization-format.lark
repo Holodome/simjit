@@ -63,7 +63,7 @@ gather_step: "(" "step" step_id "gather" scalar_dtype step_ref arg_ref ")"
 
 arith_binary_step: "(" "step" step_id "binary" scalar_dtype arith_binary_op step_ref step_ref arith_binary_flags? ")"
 i128_div_step: "(" "step" step_id "i128-div" "i64" arith_binary_op step_ref step_ref step_ref step_ref bool_literal ")"
-checked_op_step: "(" "step" step_id "checked-op" scalar_dtype step_ref step_ref? ")"
+checked_op_step: "(" "step" step_id "checked-op" scalar_dtype checked_op_kind step_ref step_ref? ")"
 arith_unary_step: "(" "step" step_id "unary" scalar_dtype arith_unary_op step_ref ")"
 compare_step: "(" "step" step_id "cmp" scalar_dtype cmp_op step_ref step_ref true_literal? ")"
 int_cast_step: "(" "step" step_id "int-cast" scalar_dtype int_cast_kind step_ref ")"
@@ -123,6 +123,8 @@ arith_binary_op: "add"
                | "shll"
                | "rol"
                | "ror"
+
+checked_op_kind: "add" | "sub" | "mul" | "div" | "udiv" | "mod" | "umod" | "i128-div" | "shra" | "shrl" | "shll" | "rol" | "ror" | "trunc" | "abs" | "neg"
 
 arith_unary_op: "not"
               | "neg"

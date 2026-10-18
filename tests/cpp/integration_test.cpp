@@ -101,7 +101,9 @@ static void add_checked_op_shape_tests(std::vector<IntegrationTest> &tests) {
 
             hir::Step *step = single_stored_step(builder.build());
             SIMJIT_ASSERT(step->is(hir::StepKind::CheckedOp));
-            hir::Step *operation = step->step_data<hir::StepKind::CheckedOp>().op;
+            const auto &checked_data = step->step_data<hir::StepKind::CheckedOp>();
+            SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Mul);
+            hir::Step *operation = checked_data.op;
             SIMJIT_ASSERT(operation->is(hir::StepKind::ArithBinary));
             SIMJIT_ASSERT(operation->step_data<hir::StepKind::ArithBinary>().op == ArithBinaryOp::Mul);
         });
@@ -121,7 +123,18 @@ static void add_checked_op_shape_tests(std::vector<IntegrationTest> &tests) {
 
             hir::Step *step = single_stored_step(builder.build());
             SIMJIT_ASSERT(step->is(hir::StepKind::CheckedOp));
-            hir::Step *operation = step->step_data<hir::StepKind::CheckedOp>().op;
+            const auto &checked_data = step->step_data<hir::StepKind::CheckedOp>();
+            switch (op) {
+            case ArithBinaryOp::Add: SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Add); break;
+            case ArithBinaryOp::Sub: SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Sub); break;
+            case ArithBinaryOp::Mul: SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Mul); break;
+            case ArithBinaryOp::ShiftLeftLogical:
+                SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::ShiftLeftLogical);
+                break;
+            case ArithBinaryOp::Div: SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Div); break;
+            default: SIMJIT_UNREACHABLE();
+            }
+            hir::Step *operation = checked_data.op;
             SIMJIT_ASSERT(operation->is(hir::StepKind::ArithBinary));
             const auto &arith = operation->step_data<hir::StepKind::ArithBinary>();
             SIMJIT_ASSERT(arith.op == op);
@@ -139,7 +152,9 @@ static void add_checked_op_shape_tests(std::vector<IntegrationTest> &tests) {
 
         hir::Step *step = single_stored_step(builder.build());
         SIMJIT_ASSERT(step->is(hir::StepKind::CheckedOp));
-        hir::Step *operation = step->step_data<hir::StepKind::CheckedOp>().op;
+        const auto &checked_data = step->step_data<hir::StepKind::CheckedOp>();
+        SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Trunc);
+        hir::Step *operation = checked_data.op;
         SIMJIT_ASSERT(operation->is(hir::StepKind::IntCast));
         SIMJIT_ASSERT(operation->step_data<hir::StepKind::IntCast>().kind == IntCastKind::Trunc);
     });
@@ -686,8 +701,12 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
         hir::Function *function = roundtrip.build();
         std::vector<uint8_t> state(function->step_id_count);
         for (hir::Step *root : function->step_roots) {
-            hir::traverse_steps_postorder_unique(root, state,
-                                                 [](hir::Step *step) { SIMJIT_ASSERT(step->dtype != I128); });
+            hir::traverse_steps_postorder_unique(root, state, [](hir::Step *step) {
+                SIMJIT_ASSERT(step->dtype != I128);
+                if (step->is(hir::StepKind::CheckedOp)) {
+                    SIMJIT_ASSERT(step->step_data<hir::StepKind::CheckedOp>().kind == hir::CheckedOpKind::I128Div);
+                }
+            });
         }
         (void)lower_scalar(function);
     });
