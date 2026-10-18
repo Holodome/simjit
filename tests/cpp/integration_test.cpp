@@ -668,6 +668,31 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
 #endif
     });
 
+#if SIMJIT_ENABLE_SERIALIZATION
+    tests.emplace_back([] {
+        MemoryArena source_arena;
+        Context source_ctx{source_arena, "checked_i128_div_serialize", CodeTransformations::All, Arch::Native};
+        FunctionBuilder source{source_ctx};
+        source.arg_safety_check();
+        Argument numerator = source.arg(I128);
+        Argument denominator = source.arg(I128);
+        source.store(source.mod_checked(source.load(numerator), source.load(denominator)), source.arg(I128));
+        std::string serialized = serialize(source.build());
+
+        MemoryArena roundtrip_arena;
+        Context roundtrip_ctx{roundtrip_arena, "checked_i128_div_serialize", CodeTransformations::All, Arch::Native};
+        FunctionBuilder roundtrip{roundtrip_ctx};
+        deserialize(serialized, roundtrip);
+        hir::Function *function = roundtrip.build();
+        std::vector<uint8_t> state(function->step_id_count);
+        for (hir::Step *root : function->step_roots) {
+            hir::traverse_steps_postorder_unique(root, state,
+                                                 [](hir::Step *step) { SIMJIT_ASSERT(step->dtype != I128); });
+        }
+        (void)lower_scalar(function);
+    });
+#endif
+
     tests.emplace_back([] {
         using U128 = unsigned __int128;
         constexpr size_t count = 7;

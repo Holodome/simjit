@@ -39,6 +39,18 @@ struct ArithBinData {
     ArithBinaryOp op;
 };
 
+// See hir::I128DivData. The partner is metadata rather than a traversal edge;
+// scalar emitters materialize both result words from one helper call.
+struct I128DivData {
+    ArithBinaryOp op{};
+    Step *left_low{};
+    Step *left_high{};
+    Step *right_low{};
+    Step *right_high{};
+    Step *partner{};
+    bool high_word = false;
+};
+
 struct PredicateBinData {
     Step *left;
     Step *right;
@@ -270,6 +282,7 @@ enum class StepKind : uint8_t {
     Gather,
     Store,
     ArithBinary,
+    I128Div,
     ArithUnary,
     IntCast,
     FloatCast,
@@ -333,6 +346,7 @@ private:
         StoreData store;
         SelectData select;
         ArithBinData ab;
+        I128DivData i128_div;
         GatherData gather;
         ArithUnaryData au;
         PredicateBinData mb;
@@ -388,6 +402,7 @@ enum class AllowedDataTypes : uint8_t {
     X(store, Store, store, Any)                                                   \
     X(arith_un, ArithUnary, au, ScalarOrVec)                                      \
     X(arith_bin, ArithBinary, ab, ScalarOrVec)                                    \
+    X(i128_div, I128Div, i128_div, Scalar)                                        \
     X(mask_bin, MaskBinary, mb, Mask)                                             \
     X(int_cast, IntCast, int_cast, ScalarOrVec)                                   \
     X(widen_hi, VecWidenHighHalf, half_cast, Vec)                                 \
@@ -520,6 +535,13 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             if (data.magic != nullptr) { process(data.magic); }
             if (data.round_mask != nullptr) { process(data.round_mask); }
             process(data.divisor);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::I128Div) {
+            process(data.left_low);
+            process(data.left_high);
+            process(data.right_low);
+            process(data.right_high);
             break;
         }
         SIMJIT_MATCH2 (StepKind::PredicateNot, StepKind::MaskCount) {
@@ -784,6 +806,7 @@ constexpr bool is_scalar_step(StepKind kind) noexcept {
     case StepKind::Gather:
     case StepKind::Store:
     case StepKind::ArithBinary:
+    case StepKind::I128Div:
     case StepKind::FMA:
     case StepKind::ArithUnary:
     case StepKind::IntCast:
@@ -814,6 +837,9 @@ constexpr bool is_scalar_step(StepKind kind) noexcept {
 }
 
 std::vector<uint8_t> generate_bit_permute_lut(uint64_t func);
+
+const char *i128_div_helper_symbol(ArithBinaryOp op);
+void *i128_div_helper_address(ArithBinaryOp op);
 
 } // namespace mir
 } // namespace simjit

@@ -1455,6 +1455,7 @@ struct AlgebraicVectorizer {
         case StepKind::Index:
         case StepKind::Const:
         case StepKind::ArithBinary:
+        case StepKind::I128Div:
         case StepKind::CheckedOp:
         case StepKind::ArithUnary:
         case StepKind::FunnelShift:

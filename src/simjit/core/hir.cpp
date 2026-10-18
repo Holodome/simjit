@@ -20,6 +20,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::LoadDeinterleave: return "load-deinterleave";
     case StepKind::Gather: return "gather";
     case StepKind::ArithBinary: return "binary";
+    case StepKind::I128Div: return "i128-div";
     case StepKind::CheckedOp: return "checked-op";
     case StepKind::PredicateBinary: return "predicate-binary";
     case StepKind::ArithUnary: return "unary";
@@ -244,6 +245,10 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
         SIMJIT_MATCH (StepKind::ArithBinary)
             wr("op=%s left=%%%u right=%%%u flags=%s", show_arith_binary_op(data.op), ref(data.left), ref(data.right),
                show_arith_binary_flags(data.flags).c_str());
+        SIMJIT_MATCH (StepKind::I128Div)
+            wr("op=%s left_low=%%%u left_high=%%%u right_low=%%%u right_high=%%%u word=%s",
+               show_arith_binary_op(data.op), ref(data.left_low), ref(data.left_high), ref(data.right_low),
+               ref(data.right_high), data.high_word ? "high" : "low");
         SIMJIT_MATCH (StepKind::CheckedOp) {
             wr_("op=%%%u", ref(data.op));
             if (data.mask != nullptr) wr_(" mask=%%%u", ref(data.mask));

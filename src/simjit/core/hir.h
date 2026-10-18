@@ -20,6 +20,19 @@ struct ArithBinaryData {
     ArithBinaryOpFlags flags{};
 };
 
+// Internal result word of an i128 division/remainder. `partner` is the other
+// result word and deliberately isn't a dependency: both words are produced by
+// one compiler-runtime call during scalar lowering.
+struct I128DivData {
+    ArithBinaryOp op{};
+    Step *left_low{};
+    Step *left_high{};
+    Step *right_low{};
+    Step *right_high{};
+    Step *partner{};
+    bool high_word = false;
+};
+
 struct CheckedOpData {
     Step *op{};
     Step *mask{};
@@ -160,6 +173,7 @@ struct FpclassData {
 enum class StepKind : uint8_t {
     Const,
     ArithBinary,
+    I128Div,
     CheckedOp,
     ArithUnary,
     Compare,
@@ -219,6 +233,7 @@ private:
         StoreData store;
         SelectData select;
         ArithBinaryData ab;
+        I128DivData i128_div;
         CheckedOpData checked_op;
         LoadData load;
         LoadDeinterleaveData load_deinterleave;
@@ -245,6 +260,7 @@ private:
 #define HIR_STEP_DATA_LIST(X)                                 \
     X(con, Const, con)                                        \
     X(arith_bin, ArithBinary, ab)                             \
+    X(i128_div, I128Div, i128_div)                            \
     X(checked_op, CheckedOp, checked_op)                      \
     X(arith_un, ArithUnary, au)                               \
     X(cmp, Compare, cmp)                                      \
@@ -415,6 +431,13 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
         SIMJIT_MATCH (StepKind::ArithBinary) {
             process(data.left);
             process(data.right);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::I128Div) {
+            process(data.left_low);
+            process(data.left_high);
+            process(data.right_low);
+            process(data.right_high);
             break;
         }
         SIMJIT_MATCH (StepKind::CheckedOp) {

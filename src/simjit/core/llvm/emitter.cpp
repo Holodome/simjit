@@ -499,6 +499,30 @@ struct LLVMBuilder {
         return v;
     }
 
+    V *i128_div_to_llvm(const Step *step, const I128DivData &data) {
+        if (step->dtype != ScalarDataType::I64 || data.partner == nullptr || data.partner->kind != StepKind::I128Div ||
+            data.partner->dtype != ScalarDataType::I64) {
+            messed_up("malformed scalar i128 division");
+        }
+        llvm::IntegerType *i64 = b->getInt64Ty();
+        llvm::IntegerType *i128 = b->getIntNTy(128);
+        auto combine = [&](Step *low_step, Step *high_step) {
+            V *low = b->CreateZExt(step_to_llvm(low_step), i128);
+            V *high = b->CreateShl(b->CreateZExt(step_to_llvm(high_step), i128), 64);
+            return b->CreateOr(low, high);
+        };
+        V *left = combine(data.left_low, data.left_high);
+        V *right = combine(data.right_low, data.right_high);
+        // LLVM represents wide division directly. Its target lowering chooses an
+        // appropriate compiler-runtime helper for offline compilation when needed.
+        V *result = arith_binary(ScalarDataType::I128, data.op, left, right);
+        V *low = b->CreateTrunc(result, i64);
+        V *high = b->CreateTrunc(b->CreateLShr(result, 64), i64);
+        value_map[data.high_word ? data.partner->id : step->id] = low;
+        value_map[data.high_word ? step->id : data.partner->id] = high;
+        return data.high_word ? high : low;
+    }
+
     V *scalar_step_to_llvm_internal(const Step *step) {
         switch (step->kind) {
             SIMJIT_MATCH (StepKind::Const) {
@@ -694,6 +718,7 @@ struct LLVMBuilder {
                 if (is_float_dtype(step->dtype.as_scalar())) return float_arith_binary(data.op, left, right);
                 return arith_binary(step->dtype.as_scalar(), data.op, left, right);
             }
+            SIMJIT_MATCH (StepKind::I128Div) { return i128_div_to_llvm(step, data); }
             SIMJIT_MATCH (StepKind::FunnelShift) {
                 V *left = step_to_llvm(data.left);
                 V *right = step_to_llvm(data.right);
@@ -896,6 +921,7 @@ struct LLVMBuilder {
         case StepKind::ScalarPermute:
         case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             SIMJIT_ASSERT(0);
             messed_up("Unexpected instruction %s", show_step_kind(step->kind));
 

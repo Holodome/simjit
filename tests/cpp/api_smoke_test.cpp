@@ -6,6 +6,7 @@
 #include "simjit/asmjit.h"
 #include "simjit/compiler.h"
 #include "simjit/core/hir.h"
+#include "simjit/core/mir.h"
 #include "simjit/jit.h"
 
 #include <array>
@@ -877,6 +878,61 @@ static void api_smoke_load_deinterleave() {
         }
         require_api_smoke(pair_loads == 4, "i128 add has four pair load lanes");
         require_api_smoke(i64_adds == 3, "i128 add has low, high, and carry additions");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument left = builder.arg(I128);
+        Argument right = builder.arg(I128);
+        builder.store(builder.umod(builder.load(left), builder.load(right)), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->is_scalar_only(), "i128 division is scalar-only even with all transformations enabled");
+        size_t i128_div_words = 0;
+        hir::Step *first_word = nullptr;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        hir::traverse_steps_postorder_unique(fn->step_roots[0], traversal_state, [&](hir::Step *step) {
+            require_api_smoke(step->dtype != I128, "i128 division rewrite leaves no ordinary i128 step");
+            if (!step->is(hir::StepKind::I128Div)) { return; }
+            ++i128_div_words;
+            require_api_smoke(step->dtype == I64, "i128 division result words are i64");
+            require_api_smoke(step->step_data<hir::StepKind::I128Div>().op == ArithBinaryOp::UMod,
+                              "i128 division preserves its operation");
+            if (first_word == nullptr) {
+                first_word = step;
+            } else {
+                require_api_smoke(step->step_data<hir::StepKind::I128Div>().partner == first_word,
+                                  "i128 division words are mutual partners");
+            }
+        });
+        require_api_smoke(i128_div_words == 2, "i128 division has two result words");
+        mir::Function *mir_fn = lower_scalar(fn);
+        size_t mir_i128_div_words = 0;
+        std::vector<uint8_t> mir_traversal_state(mir_fn->step_id_count, 0);
+        for (mir::Step *root : mir_fn->remainder_roots) {
+            mir::traverse_steps_postorder_unique(root, mir_traversal_state, [&](mir::Step *step) {
+                if (step->is(mir::StepKind::I128Div)) { ++mir_i128_div_words; }
+            });
+        }
+        require_api_smoke(mir_i128_div_words == 2, "scalar MIR retains the paired i128 division words");
+        require_api_smoke_contains(emit_llvm_ir(mir_fn), "urem i128", "LLVM emits native i128 remainder IR");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        builder.store(builder.udiv(builder.input_arg(I128), builder.con(7, I128)), builder.arg(I128));
+        require_api_smoke(builder.build()->is_scalar_only(),
+                          "constant i128 division bypasses the const-division vector peephole");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::I128Rewrite, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        builder.store(builder.div(builder.input_arg(I128), builder.input_arg(I128)), builder.arg(I128));
+        expect_api_smoke_simjit_error([&] { (void)builder.build(); }, ErrorModule::HIR, ErrorKind::Unsupported,
+                                      ErrorSubKind::UnsupportedFeature,
+                                      "build rejects unlowered i128 division when rewrite is disabled");
     }
     {
         MemoryArena arena{};

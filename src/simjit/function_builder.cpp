@@ -549,25 +549,30 @@ struct FunctionBuilderImpl {
         if (bool(ctx->transformations & CodeTransformations::BinaryIdentityPeephole)) {
             if (Step *peepholed = binary_identity_peephole(left, right, op)) { return peepholed; }
         }
-        if ((op == ArithBinaryOp::Div || op == ArithBinaryOp::UDiv || op == ArithBinaryOp::Mod ||
-             op == ArithBinaryOp::UMod) &&
-            is_simple_int_dtype(left->dtype)) {
+        if (op == ArithBinaryOp::Div || op == ArithBinaryOp::UDiv || op == ArithBinaryOp::Mod ||
+            op == ArithBinaryOp::UMod) {
+            // i128 division is lowered to a scalar compiler-runtime call. Keep
+            // this before the simple-integer constant-division peephole.
+            if (left->dtype == I128) {
+                vectorization_hint = VectorizationHint::ScalarOnly;
+            } else if (is_simple_int_dtype(left->dtype)) {
 #if SIMJIT_USE_LIBDIVIDE
-            {
-                bool vector_const_div = false;
-                if (bool(ctx->transformations & CodeTransformations::ConstDiv) && right->is(StepKind::Const) &&
-                    (left->dtype == I16 || left->dtype == I32 || left->dtype == I64)) {
-                    auto const_data = right->step_data<StepKind::Const>();
-                    uint64_t rhs = (op == ArithBinaryOp::Div || op == ArithBinaryOp::Mod)
-                                       ? (uint64_t)const_data.as_signed()
-                                       : const_data.as_unsigned();
-                    vector_const_div = rhs != 0;
+                {
+                    bool vector_const_div = false;
+                    if (bool(ctx->transformations & CodeTransformations::ConstDiv) && right->is(StepKind::Const) &&
+                        (left->dtype == I16 || left->dtype == I32 || left->dtype == I64)) {
+                        auto const_data = right->step_data<StepKind::Const>();
+                        uint64_t rhs = (op == ArithBinaryOp::Div || op == ArithBinaryOp::Mod)
+                                           ? (uint64_t)const_data.as_signed()
+                                           : const_data.as_unsigned();
+                        vector_const_div = rhs != 0;
+                    }
+                    if (!vector_const_div) { vectorization_hint = VectorizationHint::ScalarOnly; }
                 }
-                if (!vector_const_div) { vectorization_hint = VectorizationHint::ScalarOnly; }
-            }
 #else
-            vectorization_hint = VectorizationHint::ScalarOnly;
+                vectorization_hint = VectorizationHint::ScalarOnly;
 #endif
+            }
         }
 
         // Ad-hoc strength reduction for mul
@@ -1352,6 +1357,31 @@ struct I128RewriteState {
         return {low, high};
     }
 
+    I128Pair safe_i128_divisor(I128Pair left, I128Pair right, ArithBinaryOp op) {
+        Step *low_zero = sm.cmp({CmpOp::Equal, right.low, get_i64_zero()}, I1);
+        Step *high_zero = sm.cmp({CmpOp::Equal, right.high, get_i64_zero()}, I1);
+        Step *invalid = sm.predicate_bin({low_zero, high_zero, PredicateBinaryOp::And}, I1);
+        if (op == ArithBinaryOp::Div || op == ArithBinaryOp::Mod) {
+            Step *left_low_zero = sm.cmp({CmpOp::Equal, left.low, get_i64_zero()}, I1);
+            Step *left_high_min =
+                sm.cmp({CmpOp::Equal, left.high, sm.con(ConstData::i64(std::numeric_limits<int64_t>::min()), I64)}, I1);
+            Step *right_low_ones = sm.cmp({CmpOp::Equal, right.low, get_i64_ones()}, I1);
+            Step *right_high_ones = sm.cmp({CmpOp::Equal, right.high, get_i64_ones()}, I1);
+            Step *left_is_min = sm.predicate_bin({left_low_zero, left_high_min, PredicateBinaryOp::And}, I1);
+            Step *right_is_minus_one = sm.predicate_bin({right_low_ones, right_high_ones, PredicateBinaryOp::And}, I1);
+            Step *overflow = sm.predicate_bin({left_is_min, right_is_minus_one, PredicateBinaryOp::And}, I1);
+            invalid = sm.predicate_bin({invalid, overflow, PredicateBinaryOp::Or}, I1);
+        }
+        return select_i128(invalid, {get_i64_one(), get_i64_zero()}, right);
+    }
+
+    I128Pair i128_div(I128Pair left, I128Pair right, ArithBinaryOp op) {
+        Step *low = sm.i128_div({op, left.low, left.high, right.low, right.high, nullptr, false}, I64);
+        Step *high = sm.i128_div({op, left.low, left.high, right.low, right.high, low, true}, I64);
+        low->step_data<StepKind::I128Div>().partner = high;
+        return {low, high};
+    }
+
     struct ShiftCount {
         Step *within_word;
         Step *at_least_word;
@@ -1692,8 +1722,12 @@ struct I128RewriteState {
                                 data.op == ArithBinaryOp::ShiftRightLogical ||
                                 data.op == ArithBinaryOp::ShiftLeftLogical || data.op == ArithBinaryOp::RotateLeft ||
                                 data.op == ArithBinaryOp::RotateRight;
+                bool is_division = data.op == ArithBinaryOp::Div || data.op == ArithBinaryOp::UDiv ||
+                                   data.op == ArithBinaryOp::Mod || data.op == ArithBinaryOp::UMod;
                 if ((is_shift && data.flags != ArithBinaryOpFlags::ShiftWraparound) ||
-                    (!is_shift && data.flags != ArithBinaryOpFlags::No)) {
+                    (!is_shift && !is_division && data.flags != ArithBinaryOpFlags::No) ||
+                    (is_division && data.flags != ArithBinaryOpFlags::No &&
+                     data.flags != ArithBinaryOpFlags::SafeDivision)) {
                     unsupported("i128 rewrite does not support flags for %s", show_arith_binary_op(data.op));
                 }
                 I128Pair left = rewrite_pair_child(data.left, step);
@@ -1707,6 +1741,14 @@ struct I128RewriteState {
                 case ArithBinaryOp::Add: return RewrittenStep::make_pair(add_i128(left, right));
                 case ArithBinaryOp::Sub: return RewrittenStep::make_pair(sub_i128(left, right));
                 case ArithBinaryOp::Mul: return RewrittenStep::make_pair(multiply_i128(left, right));
+                case ArithBinaryOp::Div:
+                case ArithBinaryOp::UDiv:
+                case ArithBinaryOp::Mod:
+                case ArithBinaryOp::UMod:
+                    if (data.flags == ArithBinaryOpFlags::SafeDivision) {
+                        right = safe_i128_divisor(left, right, data.op);
+                    }
+                    return RewrittenStep::make_pair(i128_div(left, right, data.op));
                 case ArithBinaryOp::ShiftRightArith:
                 case ArithBinaryOp::ShiftRightLogical:
                 case ArithBinaryOp::ShiftLeftLogical:
@@ -1740,6 +1782,22 @@ struct I128RewriteState {
                 default: break;
                 }
                 break;
+            }
+            SIMJIT_MATCH (StepKind::CheckedOp) {
+                if (step->dtype != I128) break;
+                if (!data.op->is(StepKind::ArithBinary)) {
+                    unsupported("i128 rewrite does not support checked %s", show_step_kind(data.op->kind));
+                }
+                const auto &op = data.op->step_data<StepKind::ArithBinary>();
+                bool is_division = op.op == ArithBinaryOp::Div || op.op == ArithBinaryOp::UDiv ||
+                                   op.op == ArithBinaryOp::Mod || op.op == ArithBinaryOp::UMod;
+                if (!is_division || op.flags != ArithBinaryOpFlags::No) {
+                    unsupported("i128 rewrite does not support checked %s", show_arith_binary_op(op.op));
+                }
+                I128Pair result = rewrite_pair_child(data.op, step);
+                Step *mask = data.mask == nullptr ? nullptr : rewrite_scalar(data.mask, step);
+                return RewrittenStep::make_pair(
+                    {sm.checked_op({result.low, mask}, I64), sm.checked_op({result.high, mask}, I64)});
             }
             SIMJIT_MATCH (StepKind::Select) {
                 if (step->dtype != I128) break;
@@ -2353,7 +2411,7 @@ Value FunctionBuilder::arith_binary(Value left, Value right, ArithBinaryOp op, A
             invalid_input("Safe division flag is not supported for binary arithmetic operation %s",
                           show_arith_binary_op(op));
         }
-        if (!is_simple_int_dtype(left.dtype()) && !is_float_dtype(left.dtype())) {
+        if (!is_simple_int_dtype(left.dtype()) && left.dtype() != I128 && !is_float_dtype(left.dtype())) {
             unsupported("Safe division is not supported for op %s type %s", show_arith_binary_op(op),
                         show_scalar_dtype(left.dtype()));
         }
@@ -2419,6 +2477,7 @@ Value FunctionBuilder::checked_op(Value value, MaybePredicate mask) {
         bool supports_all_int_widths =
             op == ArithBinaryOp::Add || op == ArithBinaryOp::Sub || op == ArithBinaryOp::Mul || is_shift_or_rotate;
         bool supported_type = value.dtype() == I32 || value.dtype() == I64 ||
+                              (is_division_op && value.dtype() == I128) ||
                               (supports_all_int_widths && is_simple_int_dtype(value.dtype()));
         if (!supported_type) {
             if (supports_all_int_widths) {

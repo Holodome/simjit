@@ -117,6 +117,33 @@ template <> struct std::hash<simjit::ContextualMirCacheKey> {
 namespace simjit {
 namespace mir {
 
+extern "C" {
+__int128 __divti3(__int128, __int128);
+unsigned __int128 __udivti3(unsigned __int128, unsigned __int128);
+__int128 __modti3(__int128, __int128);
+unsigned __int128 __umodti3(unsigned __int128, unsigned __int128);
+}
+
+const char *i128_div_helper_symbol(ArithBinaryOp op) {
+    switch (op) {
+    case ArithBinaryOp::Div: return "__divti3";
+    case ArithBinaryOp::UDiv: return "__udivti3";
+    case ArithBinaryOp::Mod: return "__modti3";
+    case ArithBinaryOp::UMod: return "__umodti3";
+    default: messed_up("invalid i128 division op %s", show_arith_binary_op(op));
+    }
+}
+
+void *i128_div_helper_address(ArithBinaryOp op) {
+    switch (op) {
+    case ArithBinaryOp::Div: return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(&__divti3));
+    case ArithBinaryOp::UDiv: return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(&__udivti3));
+    case ArithBinaryOp::Mod: return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(&__modti3));
+    case ArithBinaryOp::UMod: return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(&__umodti3));
+    default: messed_up("invalid i128 division op %s", show_arith_binary_op(op));
+    }
+}
+
 namespace {
 template <AllowedDataTypes Allowed> struct AllowedMap;
 
@@ -265,6 +292,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::LoadSplat: return "load-splat";
     case StepKind::Gather: return "gather";
     case StepKind::ArithBinary: return "binary";
+    case StepKind::I128Div: return "i128-div";
     case StepKind::ArithUnary: return "unary";
     case StepKind::Store: return "store";
     case StepKind::Compare: return "cmp";
@@ -403,6 +431,10 @@ struct ExprShowState {
             SIMJIT_MATCH (StepKind::Gather) wr("arg=%zu idx=%%%u", data.data, ref(data.idx));
             SIMJIT_MATCH (StepKind::ArithBinary)
                 wr("op=%s left=%%%u right=%%%u", show_arith_binary_op(data.op), ref(data.left), ref(data.right));
+            SIMJIT_MATCH (StepKind::I128Div)
+                wr("op=%s left_low=%%%u left_high=%%%u right_low=%%%u right_high=%%%u word=%s",
+                   show_arith_binary_op(data.op), ref(data.left_low), ref(data.left_high), ref(data.right_low),
+                   ref(data.right_high), data.high_word ? "high" : "low");
             SIMJIT_MATCH (StepKind::ScalarArithBinaryOverflow) {
                 wr_("op=%s left=%%%u right=%%%u", show_arith_binary_op(data.op), ref(data.left), ref(data.right));
                 if (data.mask != nullptr) wr_(" mask=%%%u", ref(data.mask));
@@ -713,6 +745,7 @@ private:
         case hir::StepKind::Const:
         case hir::StepKind::LoadSplat: return true;
         case hir::StepKind::ArithBinary:
+        case hir::StepKind::I128Div:
         case hir::StepKind::ArithUnary:
         case hir::StepKind::Select:
         case hir::StepKind::Compare:
@@ -772,6 +805,7 @@ struct MirConstructState {
     std::unordered_map<ConstQuotientKey, Step *, ConstQuotientKeyHash> const_quotients{};
     std::vector<SafetyCheckInfo> safety_checks{};
     std::vector<Step *> checked_steps{};
+    std::vector<uint8_t> checked_i128_divs{};
     std::optional<AccId> saved_scalar_safety_check_acc{};
     std::vector<AccGroup> acc_groups{};
     uint32_t special_acc_count = 0;
@@ -1861,6 +1895,27 @@ struct MirConstructState {
         return sm.arith_bin({rhs_zero, overflow, ArithBinaryOp::Or}, ScalarDataType::I8);
     }
 
+    Step *scalar_i128_division_invalid_condition(Step *left_low, Step *left_high, Step *right_low, Step *right_high,
+                                                 ArithBinaryOp op) {
+        Step *zero = make_const(0, ScalarDataType::I64);
+        Step *rhs_low_zero = sm.cmp({right_low, zero, CmpOp::Equal}, ScalarDataType::I1);
+        Step *rhs_high_zero = sm.cmp({right_high, zero, CmpOp::Equal}, ScalarDataType::I1);
+        Step *invalid = sm.arith_bin({rhs_low_zero, rhs_high_zero, ArithBinaryOp::And}, ScalarDataType::I8);
+        if (!is_signed_division_op(op)) { return invalid; }
+
+        Step *lhs_low_zero = sm.cmp({left_low, zero, CmpOp::Equal}, ScalarDataType::I1);
+        Step *lhs_high_min =
+            sm.cmp({left_high, make_const(std::numeric_limits<int64_t>::min(), ScalarDataType::I64), CmpOp::Equal},
+                   ScalarDataType::I1);
+        Step *rhs_low_ones = sm.cmp({right_low, make_const(-1, ScalarDataType::I64), CmpOp::Equal}, ScalarDataType::I1);
+        Step *rhs_high_ones =
+            sm.cmp({right_high, make_const(-1, ScalarDataType::I64), CmpOp::Equal}, ScalarDataType::I1);
+        Step *lhs_min = sm.arith_bin({lhs_low_zero, lhs_high_min, ArithBinaryOp::And}, ScalarDataType::I8);
+        Step *rhs_minus_one = sm.arith_bin({rhs_low_ones, rhs_high_ones, ArithBinaryOp::And}, ScalarDataType::I8);
+        Step *overflow = sm.arith_bin({lhs_min, rhs_minus_one, ArithBinaryOp::And}, ScalarDataType::I8);
+        return sm.arith_bin({invalid, overflow, ArithBinaryOp::Or}, ScalarDataType::I8);
+    }
+
     Step *vec_division_invalid_condition(Step *left, Step *right, ArithBinaryOp op) {
         VecDataType dtype = left->dtype.as_vec();
         MaskDataType mdtype = dtype.mask();
@@ -2558,6 +2613,7 @@ struct MirConstructState {
             }
         case hir::StepKind::Const:
         case hir::StepKind::ArithBinary:
+        case hir::StepKind::I128Div:
         case hir::StepKind::CheckedOp:
         case hir::StepKind::ArithUnary:
         case hir::StepKind::Compare:
@@ -2603,6 +2659,7 @@ struct MirConstructState {
         case hir::StepKind::AccI128:
         case hir::StepKind::Countif:
         case hir::StepKind::StoreInterleave:
+        case hir::StepKind::I128Div:
             SIMJIT_UNREACHABLE();
             SIMJIT_MATCH (hir::StepKind::Const) { return make_const(data, node->dtype); }
             SIMJIT_MATCH (hir::StepKind::CheckedOp) {
@@ -3245,7 +3302,65 @@ struct MirConstructState {
         SIMJIT_UNREACHABLE();
     }
 
-    Step *_lower_hir_non_root(const hir::Step *step, nonstd::span<Step *const> step_map) {
+    Step *lower_i128_div(const hir::Step *step, const hir::I128DivData &data, Step *left_low, Step *left_high,
+                         Step *right_low, Step *right_high, nonstd::span<Step *> step_map) {
+        if (step->dtype != ScalarDataType::I64 || data.partner == nullptr ||
+            data.partner->dtype != ScalarDataType::I64 || data.partner->kind != hir::StepKind::I128Div) {
+            messed_up("malformed paired i128 division");
+        }
+        const auto &partner = data.partner->step_data<hir::StepKind::I128Div>();
+        if (partner.partner != step || partner.high_word == data.high_word || partner.op != data.op ||
+            partner.left_low != data.left_low || partner.left_high != data.left_high ||
+            partner.right_low != data.right_low || partner.right_high != data.right_high) {
+            messed_up("malformed paired i128 division");
+        }
+        if (left_low->dtype != ScalarDataType::I64 || left_high->dtype != ScalarDataType::I64 ||
+            right_low->dtype != ScalarDataType::I64 || right_high->dtype != ScalarDataType::I64) {
+            messed_up("i128 division requires i64 words");
+        }
+        Step *low =
+            sm.i128_div({data.op, left_low, left_high, right_low, right_high, nullptr, false}, ScalarDataType::I64);
+        Step *high = sm.i128_div({data.op, left_low, left_high, right_low, right_high, low, true}, ScalarDataType::I64);
+        low->step_data<StepKind::I128Div>().partner = high;
+        step_map[data.high_word ? data.partner->id : step->id] = low;
+        step_map[data.high_word ? step->id : data.partner->id] = high;
+        return data.high_word ? high : low;
+    }
+
+    Step *lower_checked_i128_div(const hir::CheckedOpData &checked, nonstd::span<Step *> step_map) {
+        const hir::Step *step = checked.op;
+        if (!step->is(hir::StepKind::I128Div)) { messed_up("malformed checked i128 division"); }
+        const auto &data = step->step_data<hir::StepKind::I128Div>();
+
+        Step *left_low = lower_hir(data.left_low, step_map);
+        Step *left_high = lower_hir(data.left_high, step_map);
+        Step *right_low = lower_hir(data.right_low, step_map);
+        Step *right_high = lower_hir(data.right_high, step_map);
+        Step *invalid = scalar_i128_division_invalid_condition(left_low, left_high, right_low, right_high, data.op);
+
+        if (step_map[step->id] == nullptr) {
+            Step *safe_right_low =
+                sm.select({invalid, make_const(1, ScalarDataType::I64), right_low}, ScalarDataType::I64);
+            Step *safe_right_high =
+                sm.select({invalid, make_const(0, ScalarDataType::I64), right_high}, ScalarDataType::I64);
+            lower_i128_div(step, data, left_low, left_high, safe_right_low, safe_right_high, step_map);
+        }
+
+        const hir::Step *low_word = data.high_word ? data.partner : step;
+        if (checked_i128_divs.empty()) { checked_i128_divs.resize(hir->step_id_count); }
+        if (!checked_i128_divs[low_word->id]) {
+            Step *overflow = invalid;
+            if (checked.mask != nullptr) {
+                overflow =
+                    sm.arith_bin({overflow, lower_hir(checked.mask, step_map), ArithBinaryOp::And}, ScalarDataType::I8);
+            }
+            add_scalar_division_overflow_check(overflow);
+            checked_i128_divs[low_word->id] = 1;
+        }
+        return step_map[step->id];
+    }
+
+    Step *_lower_hir_non_root(const hir::Step *step, nonstd::span<Step *> step_map) {
 #define ref(_step) step_map[(_step)->id]
 
         ScalarDataType sdtype = step->dtype;
@@ -3261,6 +3376,10 @@ struct MirConstructState {
         case hir::StepKind::Countif:
         case hir::StepKind::StoreInterleave:
             SIMJIT_UNREACHABLE();
+            SIMJIT_MATCH (hir::StepKind::I128Div) {
+                return lower_i128_div(step, data, ref(data.left_low), ref(data.left_high), ref(data.right_low),
+                                      ref(data.right_high), step_map);
+            }
             SIMJIT_MATCH (hir::StepKind::Const) {
                 ScalarDataType dt = sdtype == ScalarDataType::I1 ? ScalarDataType::I8 : sdtype;
                 return make_const(data, dt);
@@ -3530,6 +3649,12 @@ struct MirConstructState {
 
     Step *lower_hir(const hir::Step *hir_step, nonstd::span<Step *> step_map) {
         if (auto *found = step_map[hir_step->id]) { return found; }
+        if (hir_step->is(hir::StepKind::CheckedOp) &&
+            hir_step->step_data<hir::StepKind::CheckedOp>().op->is(hir::StepKind::I128Div)) {
+            Step *result = lower_checked_i128_div(hir_step->step_data<hir::StepKind::CheckedOp>(), step_map);
+            step_map[hir_step->id] = result;
+            return result;
+        }
         // Unlike vectorized lowering, we eagerly initialize all children node into cache.
         // There is no much reason to do it since we recurse here anyway, but it is just how we do it.
         hir::step_recurse((hir::Step *)hir_step, [&](hir::Step *x) { lower_hir(x, step_map); });

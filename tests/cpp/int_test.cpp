@@ -4072,6 +4072,35 @@ def func(n, x, idx, dst):
          LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector,
                                                 simjit::ErrorSubKind::CoefficientRangeNeedsNormalization)},
     Test{[](FunctionBuilder &b) { b.store(b.gather(b.input_arg(I64), b.arg(I128)), b.arg(I128)); }, PASS_ALL},
+    // i128 division is scalar-only and uses a paired i64 representation.
+    Test{[](FunctionBuilder &b) { b.store(b.div(b.input_arg(I128), b.input_arg(I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) { b.store(b.udiv(b.input_arg(I128), b.input_arg(I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) { b.store(b.mod(b.input_arg(I128), b.input_arg(I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) { b.store(b.umod(b.input_arg(I128), b.input_arg(I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) { b.store(b.div(b.input_arg(I128), b.con(0, I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             Value min = b.sll(b.con(1, I128), b.con(127, I128));
+             b.store(b.div(min, b.con(-1, I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             Value x = b.input_arg(I128);
+             b.store(b.div_checked(x, b.sub(x, x)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             Value min = b.sll(b.con(1, I128), b.con(127, I128));
+             b.store(b.mod_checked(min, b.con(-1, I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             Value x = b.input_arg(I128);
+             b.store(b.umod_checked(x, b.sub(x, x)), b.arg(I128));
+         },
+         ONLY_SCALAR},
     // I128 pack rewrites to one Pack128 root carrying the two i64 words.
     Test{[](FunctionBuilder &b) {
              Value x = b.input_arg(I128);

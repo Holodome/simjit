@@ -1051,6 +1051,7 @@ struct X86CppEmitter : CppEmitterBase {
         case StepKind::ScalarPermute:
         case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             messed_up("this is scalar instruction");
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 if (step->dtype.is_mask()) {

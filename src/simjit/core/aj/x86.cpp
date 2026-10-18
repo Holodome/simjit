@@ -1959,6 +1959,33 @@ struct CompileState {
         return remainder;
     }
 
+    GpR scalar_i128_div(const Step *step, const I128DivData &data) {
+        if (step->dtype != ScalarDataType::I64 || data.partner == nullptr || data.partner->kind != StepKind::I128Div ||
+            data.partner->dtype != ScalarDataType::I64) {
+            messed_up("malformed scalar i128 division");
+        }
+        GpR left_low = int_subexpr(data.left_low);
+        GpR left_high = int_subexpr(data.left_high);
+        GpR right_low = int_subexpr(data.right_low);
+        GpR right_high = int_subexpr(data.right_high);
+        GpR low = cc.new_gp64();
+        GpR high = cc.new_gp64();
+        GpR target = cc.new_gp64();
+        cc.mov(target, (uint64_t)i128_div_helper_address(data.op));
+        aj::InvokeNode *invoke = nullptr;
+        cc.invoke(aj::Out(invoke), target,
+                  aj::FuncSignature::build<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>());
+        invoke->set_arg(0, left_low);
+        invoke->set_arg(1, left_high);
+        invoke->set_arg(2, right_low);
+        invoke->set_arg(3, right_high);
+        invoke->set_ret(0, low);
+        cc.mov(high, ax86::rdx);
+        step_map[data.high_word ? data.partner->id : step->id] = low;
+        step_map[data.high_word ? step->id : data.partner->id] = high;
+        return data.high_word ? high : low;
+    }
+
     void vec_binary(ArithBinaryOp op, VecDataType vdtype, const VecR &result, const VecR &left, const VecR &right,
                     const MaskPushdownInfo *mask_pushdown = nullptr, bool mask_merge_is_left = false) {
         bool repair_minmax =
@@ -2250,6 +2277,7 @@ struct CompileState {
                 return result;
             }
             SIMJIT_MATCH (StepKind::ConstDiv) { return scalar_const_div(data, sdtype); }
+            SIMJIT_MATCH (StepKind::I128Div) { return scalar_i128_div(step, data); }
             SIMJIT_MATCH (StepKind::ArithUnary) {
                 if (is_simple_int_dtype(sdtype)) {
                     GpR arg = int_subexpr(data.arg);
@@ -2879,6 +2907,7 @@ struct CompileState {
         case StepKind::ScalarPermute:
         case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             messed_up("this is scalar instruction");
 
             SIMJIT_MATCH (StepKind::Const) {

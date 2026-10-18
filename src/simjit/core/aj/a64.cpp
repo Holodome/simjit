@@ -1560,6 +1560,32 @@ struct CompileState {
                 emit_scalar_const_div(data, sdtype, result, numerator);
                 return result;
             }
+            SIMJIT_MATCH (StepKind::I128Div) {
+                if (step->dtype != ScalarDataType::I64 || data.partner == nullptr ||
+                    data.partner->kind != StepKind::I128Div || data.partner->dtype != ScalarDataType::I64) {
+                    messed_up("malformed scalar i128 division");
+                }
+                GpR left_low = int_subexpr(data.left_low);
+                GpR left_high = int_subexpr(data.left_high);
+                GpR right_low = int_subexpr(data.right_low);
+                GpR right_high = int_subexpr(data.right_high);
+                GpR low = cc.new_gp64();
+                GpR high = cc.new_gp64();
+                GpR target = cc.new_gp64();
+                cc.mov(target, (uint64_t)i128_div_helper_address(data.op));
+                aj::InvokeNode *invoke = nullptr;
+                cc.invoke(aj::Out(invoke), target,
+                          aj::FuncSignature::build<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>());
+                invoke->set_arg(0, left_low);
+                invoke->set_arg(1, left_high);
+                invoke->set_arg(2, right_low);
+                invoke->set_arg(3, right_high);
+                invoke->set_ret(0, low);
+                cc.mov(high, aja64::x1);
+                step_map[data.high_word ? data.partner->id : step->id] = low;
+                step_map[data.high_word ? step->id : data.partner->id] = high;
+                return data.high_word ? high : low;
+            }
             SIMJIT_MATCH (StepKind::FMA) {
                 VecR x1 = float_subexpr(data.x1);
                 VecR x2 = float_subexpr(data.x2);
@@ -2318,6 +2344,7 @@ struct CompileState {
         case StepKind::ScalarPermute:
         case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             SIMJIT_ASSERT(0);
             messed_up("Unexpected instruction %s", show_step_kind(step->kind));
 

@@ -864,6 +864,33 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
             return cpp_var_decl(step) + scalar_arith_binary_expr(sdtype, data, show_scalar_operand(data.left),
                                                                  show_scalar_operand(data.right));
         }
+        SIMJIT_MATCH (StepKind::I128Div) {
+            if (sdtype != ScalarDataType::I64 || data.partner == nullptr || data.partner->kind != StepKind::I128Div ||
+                data.partner->dtype != ScalarDataType::I64) {
+                messed_up("malformed scalar i128 division");
+            }
+            const Step *low = data.high_word ? data.partner : step;
+            const Step *high = data.high_word ? step : data.partner;
+            const char *wide_type =
+                data.op == ArithBinaryOp::Div || data.op == ArithBinaryOp::Mod ? "__int128" : "unsigned __int128";
+            const char *op = nullptr;
+            switch (data.op) {
+            case ArithBinaryOp::Div:
+            case ArithBinaryOp::UDiv: op = "/"; break;
+            case ArithBinaryOp::Mod:
+            case ArithBinaryOp::UMod: op = "%"; break;
+            default: messed_up("invalid i128 division op %s", show_arith_binary_op(data.op));
+            }
+            std::string value = format("i128div%zu", size_t(step->id));
+            std::string left = format("((unsigned __int128)(uint64_t)%s | ((unsigned __int128)(uint64_t)%s << 64))",
+                                      show_scalar_operand(data.left_low), show_scalar_operand(data.left_high));
+            std::string right = format("((unsigned __int128)(uint64_t)%s | ((unsigned __int128)(uint64_t)%s << 64))",
+                                       show_scalar_operand(data.right_low), show_scalar_operand(data.right_high));
+            return format("%s %s = (%s)%s %s (%s)%s;\nint64_t %s = bit_cast<int64_t>((uint64_t)%s);\n"
+                          "int64_t %s = bit_cast<int64_t>((uint64_t)((unsigned __int128)%s >> 64))",
+                          wide_type, value.c_str(), wide_type, left.c_str(), op, wide_type, right.c_str(), show(low),
+                          value.c_str(), show(high), value.c_str());
+        }
         SIMJIT_MATCH (StepKind::FunnelShift) {
             const char *left = show_scalar_operand(data.left);
             const char *right = show_scalar_operand(data.right);
@@ -1170,8 +1197,19 @@ std::string CppEmitterBase::compile_steps(nonstd::span<Step *const> step_roots, 
         ordered.push_back(x);
     });
 
+    std::vector<uint8_t> ordered_ids(func->step_id_count, 0);
+    for (Step *step : ordered)
+        ordered_ids[step->id] = 1;
+
     ArenaBitmap suppressed = ArenaBitmap::create(func->ctx->arena, func->step_id_count);
     for (Step *step : ordered) {
+        if (step->is(StepKind::I128Div)) {
+            const Step *partner = step->step_data<StepKind::I128Div>().partner;
+            if (partner != nullptr && ordered_ids[partner->id] && partner->id < step->id) {
+                suppressed.set(step->id);
+                continue;
+            }
+        }
         if (step->is(StepKind::AccLoad)) {
             suppressed.set(step->id);
             continue;
@@ -1217,6 +1255,13 @@ std::string CppEmitterBase::compile_steps(nonstd::span<Step *const> step_roots, 
     for (Step *step : ordered) {
         if (suppressed.get(step->id) && !keep_name_for_suppressed(step)) { continue; }
         if (auto name = assign_step_name(step, phase)) { seen[step->id] = std::move(*name); }
+    }
+    for (Step *step : ordered) {
+        if (!step->is(StepKind::I128Div)) { continue; }
+        const Step *partner = step->step_data<StepKind::I128Div>().partner;
+        if (partner != nullptr && seen[partner->id].empty()) {
+            if (auto name = assign_step_name(partner, phase)) { seen[partner->id] = std::move(*name); }
+        }
     }
 
     std::vector<std::optional<std::string>> compacted(func->step_id_count);

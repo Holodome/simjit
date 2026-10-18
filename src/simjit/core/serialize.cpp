@@ -249,6 +249,7 @@ template <> struct hl::from_list<simjit::hir::StepKind> {
         if (s == "load-deinterleave") return simjit::hir::StepKind::LoadDeinterleave;
         if (s == "gather") return simjit::hir::StepKind::Gather;
         if (s == "binary") return simjit::hir::StepKind::ArithBinary;
+        if (s == "i128-div") return simjit::hir::StepKind::I128Div;
         if (s == "checked-op") return simjit::hir::StepKind::CheckedOp;
         if (s == "predicate-binary") return simjit::hir::StepKind::PredicateBinary;
         if (s == "unary") return simjit::hir::StepKind::ArithUnary;
@@ -457,6 +458,11 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
                                    data.flags != ArithBinaryOpFlags::No ? hl::list(data.flags) : nullptr);
             break;
         }
+        SIMJIT_MATCH (StepKind::I128Div) {
+            payload = hl::list(data.op, ref(data.left_low), ref(data.left_high), ref(data.right_low),
+                               ref(data.right_high), data.high_word);
+            break;
+        }
         SIMJIT_MATCH (StepKind::CheckedOp) {
             payload = hl::list_dot(ref(data.op), data.mask ? hl::list(ref(data.mask)) : nullptr);
             break;
@@ -632,6 +638,7 @@ static AccIdx parse_acc_ref(hl::value v) {
 
 static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &builder,
                                               const std::unordered_map<int, DynamicValue> &step_map,
+                                              const std::unordered_map<int, hl::value> &serialized_step_map,
                                               const std::unordered_map<AccIdx, Argument> &acc_arg_map) {
     DebugContextGuard guard{step};
 
@@ -667,10 +674,41 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
             bind_step(hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap, hl::or_nil_as<ArithBinaryOpFlags>);
         return builder.arith_binary(ref_value(l), ref_value(r), op, flags);
     }
+    case StepKind::I128Div: {
+        auto [op, left_low, left_high, right_low, right_high, high_word] =
+            bind_step(hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap, hl::cap, hl::cap, hl::cap_as<bool>);
+        auto join_i128 = [&](hl::value low_word, hl::value high_word_value) {
+            Value low = builder.zext(ref_value(low_word), ScalarDataType::I128);
+            Value high = builder.zext(ref_value(high_word_value), ScalarDataType::I128);
+            return builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+        };
+        Value quotient = builder.arith_binary(join_i128(left_low, left_high), join_i128(right_low, right_high), op);
+        Value selected = high_word ? builder.srl(quotient, builder.con(64, ScalarDataType::I128)) : quotient;
+        return builder.trunc(selected, ScalarDataType::I64);
+    }
     case StepKind::CheckedOp: {
         auto [op, mask] = bind_step(hl::cap, hl::or_nil);
         MaybePredicate predicate{};
         if (!hl::is_nil(mask)) { predicate = ref_predicate(mask); }
+        auto [op_kind, op_dtype, op_payload] =
+            hl::require_match(hl::print(op).c_str(), serialized_step_map.at(parse_step_ref(op)),
+                              hl::cap_as<hir::StepKind>, hl::cap_as<ScalarDataType>, hl::rest);
+        if (op_kind == StepKind::I128Div) {
+            auto [div_op, left_low, left_high, right_low, right_high, high_word] =
+                hl::require_match(hl::print(op).c_str(), op_payload, hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap,
+                                  hl::cap, hl::cap, hl::cap_as<bool>);
+            if (op_dtype != ScalarDataType::I64) { serialization_error("Invalid i128 division word dtype"); }
+            auto join_i128 = [&](hl::value low_word, hl::value high_word_value) {
+                Value low = builder.zext(ref_value(low_word), ScalarDataType::I128);
+                Value high = builder.zext(ref_value(high_word_value), ScalarDataType::I128);
+                return builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+            };
+            Value quotient = builder.checked_op(
+                builder.arith_binary(join_i128(left_low, left_high), join_i128(right_low, right_high), div_op),
+                predicate);
+            Value selected = high_word ? builder.srl(quotient, builder.con(64, ScalarDataType::I128)) : quotient;
+            return builder.trunc(selected, ScalarDataType::I64);
+        }
         return builder.checked_op(ref_value(op), predicate);
     }
     case StepKind::ArithUnary: {
@@ -875,10 +913,12 @@ static void process_deserialized_steps(hl::value steps, FunctionBuilder &builder
 
     int idx = 0;
     std::unordered_map<int, DynamicValue> step_map;
+    std::unordered_map<int, hl::value> serialized_step_map;
     for (auto step : steps.iter()) {
         auto [other] = hl::require_match("invalid step", step, "step", idx, hl::rest);
-        auto v = process_deserialized_step(other, builder, step_map, acc_arg_map);
+        auto v = process_deserialized_step(other, builder, step_map, serialized_step_map, acc_arg_map);
         step_map[idx] = v;
+        serialized_step_map[idx] = other;
 
         idx++;
     }

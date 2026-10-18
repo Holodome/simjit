@@ -2087,6 +2087,7 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
         case StepKind::ScalarPermute:
         case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             messed_up("Unexpected ARM C++ instruction %s", show_step_kind(step->kind));
             SIMJIT_UNREACHABLE();
 
