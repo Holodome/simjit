@@ -118,9 +118,13 @@ namespace simjit {
 namespace mir {
 
 extern "C" {
+// NOLINTNEXTLINE(bugprone-reserved-identifier): compiler-runtime ABI symbol.
 __int128 __divti3(__int128, __int128);
+// NOLINTNEXTLINE(bugprone-reserved-identifier): compiler-runtime ABI symbol.
 unsigned __int128 __udivti3(unsigned __int128, unsigned __int128);
+// NOLINTNEXTLINE(bugprone-reserved-identifier): compiler-runtime ABI symbol.
 __int128 __modti3(__int128, __int128);
+// NOLINTNEXTLINE(bugprone-reserved-identifier): compiler-runtime ABI symbol.
 unsigned __int128 __umodti3(unsigned __int128, unsigned __int128);
 }
 

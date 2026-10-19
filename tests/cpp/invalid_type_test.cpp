@@ -443,9 +443,9 @@ static void add_misc_tests(std::vector<Test> &tests) {
 static void add_checked_tests(std::vector<Test> &tests) {
     for (ScalarDataType dtype : kAllDtypes) {
         bool valid_checked_binary = dtype == I32 || dtype == I64 || dtype == I128;
-        bool valid_checked_add_sub = is_simple_int_dtype(dtype);
-        bool valid_checked_mul = is_simple_int_dtype(dtype);
-        bool valid_checked_shift = is_simple_int_dtype(dtype);
+        bool valid_checked_add_sub = is_simple_int_dtype(dtype) || dtype == I128;
+        bool valid_checked_mul = is_simple_int_dtype(dtype) || dtype == I128;
+        bool valid_checked_shift = is_simple_int_dtype(dtype) || dtype == I128;
         if (dtype == ScalarDataType::I1) continue;
         if (!valid_checked_add_sub) {
             add_unsupported(tests, [dtype](FunctionBuilder &b) {

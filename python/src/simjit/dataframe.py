@@ -41,10 +41,12 @@ I8 = ir.I8
 I16 = ir.I16
 I32 = ir.I32
 I64 = ir.I64
+I128 = ir.I128
 U8 = ir.U8
 U16 = ir.U16
 U32 = ir.U32
 U64 = ir.U64
+U128 = ir.U128
 F32 = ir.F32
 F64 = ir.F64
 I1 = ir.I1
@@ -856,7 +858,7 @@ def _is_timestamp_type(dt: ir.ScalarType | None) -> bool:
 
 
 def _is_int_type(dt: ir.ScalarType | None) -> bool:
-    return dt in {I8, U8, I16, U16, I32, U32, I64, U64}
+    return dt in {I8, U8, I16, U16, I32, U32, I64, U64, I128, U128}
 
 
 def cast(expr: ValueLike, dt: ScalarType) -> Expr:
@@ -893,6 +895,10 @@ def i64(expr: ValueLike) -> Expr:
     return cast(expr, I64)
 
 
+def i128(expr: ValueLike) -> Expr:
+    return cast(expr, I128)
+
+
 def u8(expr: ValueLike) -> Expr:
     return cast(expr, U8)
 
@@ -907,6 +913,10 @@ def u32(expr: ValueLike) -> Expr:
 
 def u64(expr: ValueLike) -> Expr:
     return cast(expr, U64)
+
+
+def u128(expr: ValueLike) -> Expr:
+    return cast(expr, U128)
 
 
 def f32(expr: ValueLike) -> Expr:

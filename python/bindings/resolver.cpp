@@ -155,7 +155,7 @@ const char *LogicalType::name() const {
     case sj::ScalarDataType::I64: return is_unsigned ? "u64" : "i64";
     case sj::ScalarDataType::F32: return "f32";
     case sj::ScalarDataType::F64: return "f64";
-    case sj::ScalarDataType::I128: return "i128";
+    case sj::ScalarDataType::I128: return is_unsigned ? "u128" : "i128";
     }
     SIMJIT_UNREACHABLE();
 }
@@ -188,11 +188,11 @@ struct TypeSlot {
     }
 
     bool is_signed_int() const {
-        return has && type.semantic == SemanticKind::Plain && !type.is_unsigned && sj::is_simple_int_dtype(type.dtype);
+        return has && type.semantic == SemanticKind::Plain && !type.is_unsigned && type.is_int();
     }
 
     bool is_unsigned_int() const {
-        return has && type.semantic == SemanticKind::Plain && type.is_unsigned && sj::is_simple_int_dtype(type.dtype);
+        return has && type.semantic == SemanticKind::Plain && type.is_unsigned && type.is_int();
     }
 
     bool is_int() const { return is_signed_int() || is_unsigned_int(); }
@@ -1329,7 +1329,7 @@ static size_t logical_item_size(const LogicalType &ty) {
     case sj::ScalarDataType::I64: return 8;
     case sj::ScalarDataType::F32: return 4;
     case sj::ScalarDataType::F64: return 8;
-    case sj::ScalarDataType::I128: break;
+    case sj::ScalarDataType::I128: return 16;
     }
     throw std::invalid_argument(sj::format("unsupported simjit scalar type %s", ty.name()));
 }

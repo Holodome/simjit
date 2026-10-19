@@ -86,7 +86,8 @@ struct LogicalType {
 
     bool is_int() const {
         return dtype == sj::ScalarDataType::I8 || dtype == sj::ScalarDataType::I16 ||
-               dtype == sj::ScalarDataType::I32 || dtype == sj::ScalarDataType::I64;
+               dtype == sj::ScalarDataType::I32 || dtype == sj::ScalarDataType::I64 ||
+               dtype == sj::ScalarDataType::I128;
     }
     bool is_float() const { return dtype == sj::ScalarDataType::F32 || dtype == sj::ScalarDataType::F64; }
     bool is_timestamp() const { return semantic == SemanticKind::Timestamp64; }
