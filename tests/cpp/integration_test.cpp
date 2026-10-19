@@ -994,6 +994,86 @@ static void add_commutative_cse_tests(std::vector<IntegrationTest> &tests) {
     });
 }
 
+static void add_i128_hir_peephole_shape_tests(std::vector<IntegrationTest> &tests) {
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        FunctionBuilder local{ctx};
+
+        Value x = local.input_arg(I128);
+        Value zero = local.con(0, I128);
+        Value ones = local.con(-1, I128);
+        SIMJIT_ASSERT(local.add(x, zero).step_ == x.step_);
+        SIMJIT_ASSERT(local.sub(x, zero).step_ == x.step_);
+        SIMJIT_ASSERT(local.mul(x, zero).step_ == zero.step_);
+        SIMJIT_ASSERT(local.mul(x, local.con(1, I128)).step_ == x.step_);
+        SIMJIT_ASSERT(local.div(x, local.con(1, I128)).step_ == x.step_);
+        SIMJIT_ASSERT(local.and_(x, ones).step_ == x.step_);
+        SIMJIT_ASSERT(local.or_(x, zero).step_ == x.step_);
+        SIMJIT_ASSERT(local.xor_(x, zero).step_ == x.step_);
+        SIMJIT_ASSERT(local.sll(x, zero).step_ == x.step_);
+
+        Value self_xor = local.xor_(x, x);
+        SIMJIT_ASSERT(self_xor.step_->is(hir::StepKind::Const));
+        SIMJIT_ASSERT(self_xor.step_->dtype == I128);
+        SIMJIT_ASSERT(is_const_zero(self_xor.step_));
+
+        SIMJIT_ASSERT(is_const_i1(local.cmp_eq(x, x).step_, true));
+        SIMJIT_ASSERT(is_const_i1(local.cmp_ne(x, x).step_, false));
+        SIMJIT_ASSERT(is_const_i1(local.cmp_uge(x, zero).step_, true));
+        SIMJIT_ASSERT(is_const_i1(local.cmp_ult(x, zero).step_, false));
+        local.store(self_xor, local.arg(I128));
+        (void)local.build();
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        FunctionBuilder local{ctx};
+
+        Value x = local.input_arg(I128);
+        Value y = local.input_arg(I128);
+        Value result = x;
+        for (ArithBinaryOp op :
+             {ArithBinaryOp::Add, ArithBinaryOp::Mul, ArithBinaryOp::Min, ArithBinaryOp::Max, ArithBinaryOp::UMin,
+              ArithBinaryOp::UMax, ArithBinaryOp::And, ArithBinaryOp::Or, ArithBinaryOp::Xor}) {
+            Value xy = local.arith_binary(x, y, op);
+            Value yx = local.arith_binary(y, x, op);
+            SIMJIT_ASSERT(xy.step_ == yx.step_);
+            result = xy;
+        }
+        local.store(result, local.arg(I128));
+        (void)local.build();
+    });
+
+    for (bool is_signed : {false, true}) {
+        tests.emplace_back([is_signed] {
+            MemoryArena arena;
+            Context ctx{arena};
+            FunctionBuilder local{ctx};
+
+            Value x = local.input_arg(I64);
+            Value wide = is_signed ? local.sext(x, I128) : local.zext(x, I128);
+            Value roundtrip = local.trunc(wide, I64);
+            SIMJIT_ASSERT(roundtrip.step_ == x.step_);
+            local.store(roundtrip, local.arg(I64));
+            (void)local.build();
+        });
+    }
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        FunctionBuilder local{ctx};
+
+        Value product = local.mul(local.input_arg(I128), local.con(13, I128));
+        SIMJIT_ASSERT(product.step_->is(hir::StepKind::ArithBinary));
+        SIMJIT_ASSERT(product.step_->step_data<hir::StepKind::ArithBinary>().op == ArithBinaryOp::Add);
+        local.store(product, local.arg(I128));
+        (void)local.build();
+    });
+}
+
 static void add_const_div_quotient_cache_tests(std::vector<IntegrationTest> &tests) {
 #if SIMJIT_USE_LIBDIVIDE
     for (bool vectorized : {false, true}) {
@@ -2906,6 +2986,7 @@ static std::vector<IntegrationTest> make_integration_tests() {
     add_pack_tests(tests);
     add_checked_op_shape_tests(tests);
     add_commutative_cse_tests(tests);
+    add_i128_hir_peephole_shape_tests(tests);
     add_const_div_quotient_cache_tests(tests);
     add_logical_peephole_shape_tests(tests);
     add_binary_identity_peephole_shape_tests(tests);

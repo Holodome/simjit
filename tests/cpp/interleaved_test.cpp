@@ -490,6 +490,35 @@ def func(n, src, dst):
                              PASS_ALL});
     }
 
+    // HIR i128 identities are applied before pair desugaring.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Value x = b.input_arg(I128);
+                             Value zero = b.con(0, I128);
+                             Value value = b.and_(b.or_(b.add(x, zero), zero), b.con(-1, I128));
+                             b.store(b.sll(value, zero), b.arg(I128));
+                         },
+                         PASS_ALL});
+
+    // Commutative CSE must share public i128 expressions before their pairs are created.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Value x = b.input_arg(I128);
+                             Value y = b.input_arg(I128);
+                             b.store(b.sub(b.add(x, y), b.add(y, x)), b.arg(I128));
+                         },
+                         PASS_ALL});
+
+    // CastPeephole eliminates these public i128 round trips before desugaring.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Value x = b.input_arg(I64);
+                             b.store(b.trunc(b.sext(x, I128), I64), b.arg(I64));
+                         },
+                         PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Value x = b.input_arg(I64);
+                             b.store(b.trunc(b.zext(x, I128), I64), b.arg(I64));
+                         },
+                         PASS_ALL});
+
     // Keep two constant funnel shifts live at once. This exercises the AArch64
     // register-allocation pressure that previously exposed the AsmJit SRI bug.
     tests.push_back(Test{[](FunctionBuilder &b) {

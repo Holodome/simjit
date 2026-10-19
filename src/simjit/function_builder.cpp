@@ -222,7 +222,7 @@ static StepPair ordered_step_pair(Step *left, Step *right) noexcept {
 }
 
 static bool is_commutative_arith_cse_op(ArithBinaryOp op, ScalarDataType dtype) noexcept {
-    if (!is_simple_int_dtype(dtype)) { return false; }
+    if (!is_int_dtype(dtype)) { return false; }
     switch (op) {
     case ArithBinaryOp::Add:
     case ArithBinaryOp::Mul:
@@ -416,7 +416,10 @@ struct FunctionBuilderImpl {
         case I64:
         case F32:
         case F64: return sm.con(ConstData::u64(0).retag(dtype), dtype);
-        case I128: return nullptr;
+        // Public i128 constants carry a signed i64 payload until I128Rewrite
+        // expands them to {low, high}. Zero is representable without losing
+        // that invariant.
+        case I128: return sm.con(ConstData::i64(0), I128);
         }
         SIMJIT_UNREACHABLE();
     }
@@ -486,7 +489,7 @@ struct FunctionBuilderImpl {
     Step *binary_identity_peephole(const Step *left, const Step *right, CmpOp op, bool is_unsigned) {
         ConstClass left_class = classify_const(left);
         ConstClass right_class = classify_const(right);
-        if (is_simple_int_dtype(left->dtype) && left == right) {
+        if (is_int_dtype(left->dtype) && left == right) {
             switch (op) {
             case CmpOp::Equal:
             case CmpOp::LessEqual:
@@ -497,7 +500,7 @@ struct FunctionBuilderImpl {
             }
             SIMJIT_UNREACHABLE();
         }
-        if (is_unsigned && is_simple_int_dtype(left->dtype)) {
+        if (is_unsigned && is_int_dtype(left->dtype)) {
             if (op == CmpOp::GreaterEqual && right_class == ConstClass::Zero) return bool_const(true);
             if (op == CmpOp::Less && right_class == ConstClass::Zero) return bool_const(false);
             if (op == CmpOp::LessEqual && left_class == ConstClass::Zero) return bool_const(true);
