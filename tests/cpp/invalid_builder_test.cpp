@@ -234,11 +234,13 @@ static void add_low_level_api_tests(std::vector<Test> &tests) {
         Argument src = b.arg(I128);
         b.store(b.mul(b.load(src), b.load(src)), b.arg(I128));
     });
-    add_unsupported(tests, [](FunctionBuilder &b) {
+    add_valid(tests, [](FunctionBuilder &b) {
+        b.arg_safety_check();
         Argument src = b.arg(I128);
         b.store(b.mul_checked(b.load(src), b.load(src)), b.arg(I128));
     });
-    add_unsupported(tests, [](FunctionBuilder &b) {
+    add_valid(tests, [](FunctionBuilder &b) {
+        b.arg_safety_check();
         Argument src = b.arg(I128);
         b.store(b.sll_checked(b.load(src), b.load(src)), b.arg(I128));
     });

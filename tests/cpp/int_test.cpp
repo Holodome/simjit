@@ -4101,6 +4101,58 @@ def func(n, x, idx, dst):
              b.store(b.umod_checked(x, b.sub(x, x)), b.arg(I128));
          },
          ONLY_SCALAR},
+    // Checked i128 operations use paired i64 checked roots and remain scalar-only.
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.add_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             Predicate active = b.input_predicate_arg();
+             b.store(b.checked_op(b.add(b.input_arg(I128), b.input_arg(I128)), active), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.sub_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.mul_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.sll_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.sra_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.rotl_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.negate_checked(b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.abs_checked(b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.trunc_checked(b.input_arg(I128), I32), b.arg(I32));
+         },
+         ONLY_SCALAR},
     // I128 pack rewrites to one Pack128 root carrying the two i64 words.
     Test{[](FunctionBuilder &b) {
              Value x = b.input_arg(I128);

@@ -42,6 +42,27 @@ enum class CheckedOpKind : uint8_t {
     Mod,
     UMod,
     I128Div,
+    I128AddLow,
+    I128AddHigh,
+    I128SubLow,
+    I128SubHigh,
+    I128MulLow,
+    I128MulHigh,
+    I128SllLow,
+    I128SllHigh,
+    I128SrlLow,
+    I128SrlHigh,
+    I128SraLow,
+    I128SraHigh,
+    I128RotlLow,
+    I128RotlHigh,
+    I128RotrLow,
+    I128RotrHigh,
+    I128NegateLow,
+    I128NegateHigh,
+    I128AbsLow,
+    I128AbsHigh,
+    I128Trunc,
     ShiftRightArith,
     ShiftRightLogical,
     ShiftLeftLogical,
@@ -58,6 +79,15 @@ struct CheckedOpData {
     CheckedOpKind kind{};
     Step *op{};
     Step *mask{};
+    // The other result word of an i128 checked operation.  This deliberately
+    // isn't a dependency: lowering emits and caches both words together.
+    Step *partner{};
+    // Explicit source words for a checked i128 operation.  They are regular
+    // dependencies, so the check never has to recover them from `op`.
+    Step *left_low{};
+    Step *left_high{};
+    Step *right_low{};
+    Step *right_high{};
 };
 
 struct ArithUnaryData {
@@ -465,6 +495,14 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
         SIMJIT_MATCH (StepKind::CheckedOp) {
             process(data.op);
             if (data.mask) { process(data.mask); }
+            if (data.left_low) {
+                process(data.left_low);
+                process(data.left_high);
+            }
+            if (data.right_low) {
+                process(data.right_low);
+                process(data.right_high);
+            }
             break;
         }
         SIMJIT_MATCH (StepKind::ArithUnary) {

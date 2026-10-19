@@ -58,6 +58,27 @@ const char *show_checked_op_kind(CheckedOpKind kind) noexcept {
     case CheckedOpKind::Mod: return "mod";
     case CheckedOpKind::UMod: return "umod";
     case CheckedOpKind::I128Div: return "i128-div";
+    case CheckedOpKind::I128AddLow: return "i128-add-low";
+    case CheckedOpKind::I128AddHigh: return "i128-add-high";
+    case CheckedOpKind::I128SubLow: return "i128-sub-low";
+    case CheckedOpKind::I128SubHigh: return "i128-sub-high";
+    case CheckedOpKind::I128MulLow: return "i128-mul-low";
+    case CheckedOpKind::I128MulHigh: return "i128-mul-high";
+    case CheckedOpKind::I128SllLow: return "i128-sll-low";
+    case CheckedOpKind::I128SllHigh: return "i128-sll-high";
+    case CheckedOpKind::I128SrlLow: return "i128-srl-low";
+    case CheckedOpKind::I128SrlHigh: return "i128-srl-high";
+    case CheckedOpKind::I128SraLow: return "i128-sra-low";
+    case CheckedOpKind::I128SraHigh: return "i128-sra-high";
+    case CheckedOpKind::I128RotlLow: return "i128-rotl-low";
+    case CheckedOpKind::I128RotlHigh: return "i128-rotl-high";
+    case CheckedOpKind::I128RotrLow: return "i128-rotr-low";
+    case CheckedOpKind::I128RotrHigh: return "i128-rotr-high";
+    case CheckedOpKind::I128NegateLow: return "i128-neg-low";
+    case CheckedOpKind::I128NegateHigh: return "i128-neg-high";
+    case CheckedOpKind::I128AbsLow: return "i128-abs-low";
+    case CheckedOpKind::I128AbsHigh: return "i128-abs-high";
+    case CheckedOpKind::I128Trunc: return "i128-trunc";
     case CheckedOpKind::ShiftRightArith: return "shra";
     case CheckedOpKind::ShiftRightLogical: return "shrl";
     case CheckedOpKind::ShiftLeftLogical: return "shll";
@@ -274,6 +295,10 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
         SIMJIT_MATCH (StepKind::CheckedOp) {
             wr_("kind=%s op=%%%u", show_checked_op_kind(data.kind), ref(data.op));
             if (data.mask != nullptr) wr_(" mask=%%%u", ref(data.mask));
+            if (data.left_low != nullptr) {
+                wr_(" left={%%%u,%%%u}", ref(data.left_low), ref(data.left_high));
+                if (data.right_low != nullptr) wr_(" right={%%%u,%%%u}", ref(data.right_low), ref(data.right_high));
+            }
             return;
         }
         SIMJIT_MATCH (StepKind::PredicateBinary)

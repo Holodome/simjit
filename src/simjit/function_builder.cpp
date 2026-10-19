@@ -18,8 +18,6 @@
 #include <utility>
 #include <vector>
 
-#define messed_up(...) simjit_messed_up_m(ErrorModule::HIR, __VA_ARGS__)
-
 #define unsupported(...) \
     simjit_exception(ErrorModule::HIR, ErrorKind::Unsupported, ErrorSubKind::UnsupportedFeature, __VA_ARGS__)
 #define unsupported_limit(...) \
@@ -1286,9 +1284,8 @@ struct I128RewriteState {
 
     I128Pair rewrite_pair_child(Step *child, const Step *consumer) {
         RewrittenStep rewritten_child = rewrite(child);
-        if (!rewritten_child.is_pair()) {
-            unsupported("i128 rewrite expected i128 input for %s", show_step_kind(consumer->kind));
-        }
+        (void)consumer;
+        SIMJIT_ASSERT(rewritten_child.is_pair());
         return rewritten_child.pair;
     }
 
@@ -1379,6 +1376,16 @@ struct I128RewriteState {
         Step *low = sm.i128_div({op, left.low, left.high, right.low, right.high, nullptr, false}, I64);
         Step *high = sm.i128_div({op, left.low, left.high, right.low, right.high, low, true}, I64);
         low->step_data<StepKind::I128Div>().partner = high;
+        return {low, high};
+    }
+
+    I128Pair checked_i128_pair(CheckedOpKind low_kind, CheckedOpKind high_kind, I128Pair result, Step *mask,
+                               I128Pair left, I128Pair right = {}) {
+        Step *low =
+            sm.checked_op({low_kind, result.low, mask, nullptr, left.low, left.high, right.low, right.high}, I64);
+        Step *high =
+            sm.checked_op({high_kind, result.high, mask, low, left.low, left.high, right.low, right.high}, I64);
+        low->step_data<StepKind::CheckedOp>().partner = high;
         return {low, high};
     }
 
@@ -1784,24 +1791,93 @@ struct I128RewriteState {
                 break;
             }
             SIMJIT_MATCH (StepKind::CheckedOp) {
-                if (step->dtype != I128) break;
-                if (!data.op->is(StepKind::ArithBinary)) {
-                    unsupported("i128 rewrite does not support checked %s", show_step_kind(data.op->kind));
-                }
-                const auto &op = data.op->step_data<StepKind::ArithBinary>();
-                bool is_division = op.op == ArithBinaryOp::Div || op.op == ArithBinaryOp::UDiv ||
-                                   op.op == ArithBinaryOp::Mod || op.op == ArithBinaryOp::UMod;
-                bool matching_kind = (data.kind == CheckedOpKind::Div && op.op == ArithBinaryOp::Div) ||
-                                     (data.kind == CheckedOpKind::UDiv && op.op == ArithBinaryOp::UDiv) ||
-                                     (data.kind == CheckedOpKind::Mod && op.op == ArithBinaryOp::Mod) ||
-                                     (data.kind == CheckedOpKind::UMod && op.op == ArithBinaryOp::UMod);
-                if (!is_division || !matching_kind || op.flags != ArithBinaryOpFlags::No) {
-                    unsupported("i128 rewrite does not support checked %s", show_arith_binary_op(op.op));
-                }
-                I128Pair result = rewrite_pair_child(data.op, step);
                 Step *mask = data.mask == nullptr ? nullptr : rewrite_scalar(data.mask, step);
-                return RewrittenStep::make_pair({sm.checked_op({CheckedOpKind::I128Div, result.low, mask}, I64),
-                                                 sm.checked_op({CheckedOpKind::I128Div, result.high, mask}, I64)});
+                if (data.op->is(StepKind::IntCast)) {
+                    const auto &cast = data.op->step_data<StepKind::IntCast>();
+                    if (cast.arg->dtype != I128) { break; }
+                    SIMJIT_ASSERT(data.kind == CheckedOpKind::Trunc);
+                    SIMJIT_ASSERT(cast.kind == IntCastKind::Trunc);
+                    SIMJIT_ASSERT(is_simple_int_dtype(step->dtype));
+                    SIMJIT_ASSERT(step->dtype != I128);
+                    I128Pair source = rewrite_pair_child(cast.arg, step);
+                    Step *result = source.low;
+                    if (step->dtype != I64) { result = sm.int_cast({IntCastKind::Trunc, result}, step->dtype); }
+                    return RewrittenStep::make_scalar(sm.checked_op(
+                        {CheckedOpKind::I128Trunc, result, mask, nullptr, source.low, source.high}, step->dtype));
+                }
+                if (step->dtype != I128) break;
+                if (data.op->is(StepKind::ArithUnary)) {
+                    const auto &op = data.op->step_data<StepKind::ArithUnary>();
+                    SIMJIT_ASSERT(op.op == ArithUnaryOp::Abs || op.op == ArithUnaryOp::Negate);
+                    I128Pair arg = rewrite_pair_child(op.arg, step);
+                    I128Pair result =
+                        op.op == ArithUnaryOp::Abs
+                            ? select_i128(sm.cmp({CmpOp::Less, arg.high, get_i64_zero()}, I1), negate_i128(arg), arg)
+                            : negate_i128(arg);
+                    return RewrittenStep::make_pair(checked_i128_pair(
+                        op.op == ArithUnaryOp::Abs ? CheckedOpKind::I128AbsLow : CheckedOpKind::I128NegateLow,
+                        op.op == ArithUnaryOp::Abs ? CheckedOpKind::I128AbsHigh : CheckedOpKind::I128NegateHigh, result,
+                        mask, arg));
+                }
+                SIMJIT_ASSERT(data.op->is(StepKind::ArithBinary));
+                const auto &op = data.op->step_data<StepKind::ArithBinary>();
+                SIMJIT_ASSERT(op.flags == ArithBinaryOpFlags::No);
+                I128Pair left = rewrite_pair_child(op.left, step);
+                I128Pair right = rewrite_pair_child(op.right, step);
+                I128Pair result{};
+                CheckedOpKind low_kind{};
+                CheckedOpKind high_kind{};
+                switch (op.op) {
+                case ArithBinaryOp::Add:
+                    result = add_i128(left, right);
+                    low_kind = CheckedOpKind::I128AddLow;
+                    high_kind = CheckedOpKind::I128AddHigh;
+                    break;
+                case ArithBinaryOp::Sub:
+                    result = sub_i128(left, right);
+                    low_kind = CheckedOpKind::I128SubLow;
+                    high_kind = CheckedOpKind::I128SubHigh;
+                    break;
+                case ArithBinaryOp::Mul:
+                    result = multiply_i128(left, right);
+                    low_kind = CheckedOpKind::I128MulLow;
+                    high_kind = CheckedOpKind::I128MulHigh;
+                    break;
+                case ArithBinaryOp::Div:
+                case ArithBinaryOp::UDiv:
+                case ArithBinaryOp::Mod:
+                case ArithBinaryOp::UMod:
+                    result = i128_div(left, right, op.op);
+                    return RewrittenStep::make_pair(
+                        checked_i128_pair(CheckedOpKind::I128Div, CheckedOpKind::I128Div, result, mask, left, right));
+                case ArithBinaryOp::ShiftLeftLogical:
+                    result = shift_i128(op.op, left, right.low);
+                    low_kind = CheckedOpKind::I128SllLow;
+                    high_kind = CheckedOpKind::I128SllHigh;
+                    break;
+                case ArithBinaryOp::ShiftRightLogical:
+                    result = shift_i128(op.op, left, right.low);
+                    low_kind = CheckedOpKind::I128SrlLow;
+                    high_kind = CheckedOpKind::I128SrlHigh;
+                    break;
+                case ArithBinaryOp::ShiftRightArith:
+                    result = shift_i128(op.op, left, right.low);
+                    low_kind = CheckedOpKind::I128SraLow;
+                    high_kind = CheckedOpKind::I128SraHigh;
+                    break;
+                case ArithBinaryOp::RotateLeft:
+                    result = shift_i128(op.op, left, right.low);
+                    low_kind = CheckedOpKind::I128RotlLow;
+                    high_kind = CheckedOpKind::I128RotlHigh;
+                    break;
+                case ArithBinaryOp::RotateRight:
+                    result = shift_i128(op.op, left, right.low);
+                    low_kind = CheckedOpKind::I128RotrLow;
+                    high_kind = CheckedOpKind::I128RotrHigh;
+                    break;
+                default: SIMJIT_UNREACHABLE();
+                }
+                return RewrittenStep::make_pair(checked_i128_pair(low_kind, high_kind, result, mask, left, right));
             }
             SIMJIT_MATCH (StepKind::Select) {
                 if (step->dtype != I128) break;
@@ -2480,8 +2556,7 @@ Value FunctionBuilder::checked_op(Value value, MaybePredicate mask) {
         }
         bool supports_all_int_widths =
             op == ArithBinaryOp::Add || op == ArithBinaryOp::Sub || op == ArithBinaryOp::Mul || is_shift_or_rotate;
-        bool supported_type = value.dtype() == I32 || value.dtype() == I64 ||
-                              (is_division_op && value.dtype() == I128) ||
+        bool supported_type = value.dtype() == I32 || value.dtype() == I64 || value.dtype() == I128 ||
                               (supports_all_int_widths && is_simple_int_dtype(value.dtype()));
         if (!supported_type) {
             if (supports_all_int_widths) {
@@ -2500,13 +2575,16 @@ Value FunctionBuilder::checked_op(Value value, MaybePredicate mask) {
             invalid_input("Do not support safety checking for %s cast. Only truncate cast can be unsafe",
                           show_int_cast_kind(data.kind));
         }
+        if (data.arg->dtype == I128 && !is_simple_int_dtype(value.dtype())) {
+            unsupported("safety checking i128 truncation only supports integer destinations");
+        }
     } else if (operation->is(StepKind::ArithUnary)) {
         auto &data = operation->step_data<StepKind::ArithUnary>();
         if (data.op != ArithUnaryOp::Abs && data.op != ArithUnaryOp::Negate) {
             invalid_input("safety checking is not supported for unary arithmetic operation %s",
                           show_arith_unary_op(data.op));
         }
-        if (!is_simple_int_dtype(value.dtype())) {
+        if (!is_simple_int_dtype(value.dtype()) && value.dtype() != I128) {
             unsupported("safety checking is not supported for op %s type %s; Only integer types are supported",
                         show_arith_unary_op(data.op), show_scalar_dtype(value.dtype()));
         }
@@ -2541,6 +2619,10 @@ Value FunctionBuilder::checked_op(Value value, MaybePredicate mask) {
     }
 
     impl_->ensure_has_safety_check_arg();
+    if (value.dtype() == I128 ||
+        (operation->is(StepKind::IntCast) && operation->step_data<StepKind::IntCast>().arg->dtype == I128)) {
+        impl_->vectorization_hint = VectorizationHint::ScalarOnly;
+    }
 
     Step *mask_step = mask.is_valid() ? mask.value().step_ : nullptr;
     mask_step = simplify_optional_cond(impl_->ctx, mask_step);

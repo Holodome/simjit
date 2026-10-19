@@ -685,6 +685,40 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
 
 #if SIMJIT_ENABLE_SERIALIZATION
     tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "checked_i128_pair_shape", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        builder.arg_safety_check();
+        builder.store(builder.add_checked(builder.input_arg(I128), builder.input_arg(I128)), builder.arg(I128));
+        hir::Function *function = builder.build();
+        std::vector<uint8_t> state(function->step_id_count);
+        size_t checked_count = 0;
+        for (hir::Step *root : function->step_roots) {
+            hir::traverse_steps_postorder_unique(root, state, [&](hir::Step *step) {
+                SIMJIT_ASSERT(step->dtype != I128);
+                if (!step->is(hir::StepKind::CheckedOp)) { return; }
+                const auto &data = step->step_data<hir::StepKind::CheckedOp>();
+                if (data.kind != hir::CheckedOpKind::I128AddLow && data.kind != hir::CheckedOpKind::I128AddHigh) {
+                    return;
+                }
+                ++checked_count;
+                SIMJIT_ASSERT(data.partner != nullptr);
+                const auto &partner = data.partner->step_data<hir::StepKind::CheckedOp>();
+                SIMJIT_ASSERT(partner.partner == step);
+                SIMJIT_ASSERT(data.left_low != nullptr && data.left_high != nullptr);
+                SIMJIT_ASSERT(data.right_low != nullptr && data.right_high != nullptr);
+            });
+        }
+        SIMJIT_ASSERT(checked_count == 2);
+        std::string serialized = serialize(function);
+        MemoryArena roundtrip_arena;
+        Context roundtrip_ctx{roundtrip_arena, "checked_i128_pair_shape", CodeTransformations::All, Arch::Native};
+        FunctionBuilder roundtrip{roundtrip_ctx};
+        deserialize(serialized, roundtrip);
+        (void)roundtrip.build();
+    });
+
+    tests.emplace_back([] {
         MemoryArena source_arena;
         Context source_ctx{source_arena, "checked_i128_div_serialize", CodeTransformations::All, Arch::Native};
         FunctionBuilder source{source_ctx};

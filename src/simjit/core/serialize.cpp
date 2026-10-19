@@ -235,6 +235,27 @@ template <> struct hl::from_list<simjit::hir::CheckedOpKind> {
         if (s == "mod") return Kind::Mod;
         if (s == "umod") return Kind::UMod;
         if (s == "i128-div") return Kind::I128Div;
+        if (s == "i128-add-low") return Kind::I128AddLow;
+        if (s == "i128-add-high") return Kind::I128AddHigh;
+        if (s == "i128-sub-low") return Kind::I128SubLow;
+        if (s == "i128-sub-high") return Kind::I128SubHigh;
+        if (s == "i128-mul-low") return Kind::I128MulLow;
+        if (s == "i128-mul-high") return Kind::I128MulHigh;
+        if (s == "i128-sll-low") return Kind::I128SllLow;
+        if (s == "i128-sll-high") return Kind::I128SllHigh;
+        if (s == "i128-srl-low") return Kind::I128SrlLow;
+        if (s == "i128-srl-high") return Kind::I128SrlHigh;
+        if (s == "i128-sra-low") return Kind::I128SraLow;
+        if (s == "i128-sra-high") return Kind::I128SraHigh;
+        if (s == "i128-rotl-low") return Kind::I128RotlLow;
+        if (s == "i128-rotl-high") return Kind::I128RotlHigh;
+        if (s == "i128-rotr-low") return Kind::I128RotrLow;
+        if (s == "i128-rotr-high") return Kind::I128RotrHigh;
+        if (s == "i128-neg-low") return Kind::I128NegateLow;
+        if (s == "i128-neg-high") return Kind::I128NegateHigh;
+        if (s == "i128-abs-low") return Kind::I128AbsLow;
+        if (s == "i128-abs-high") return Kind::I128AbsHigh;
+        if (s == "i128-trunc") return Kind::I128Trunc;
         if (s == "shra") return Kind::ShiftRightArith;
         if (s == "shrl") return Kind::ShiftRightLogical;
         if (s == "shll") return Kind::ShiftLeftLogical;
@@ -489,7 +510,17 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             break;
         }
         SIMJIT_MATCH (StepKind::CheckedOp) {
-            payload = hl::list_dot(data.kind, ref(data.op), data.mask ? hl::list(ref(data.mask)) : nullptr);
+            if (data.kind >= CheckedOpKind::I128AddLow && data.kind <= CheckedOpKind::I128Trunc) {
+                if (data.right_low != nullptr) {
+                    payload = hl::list_dot(data.kind, ref(data.left_low), ref(data.left_high), ref(data.right_low),
+                                           ref(data.right_high), data.mask ? hl::list(ref(data.mask)) : nullptr);
+                } else {
+                    payload = hl::list_dot(data.kind, ref(data.left_low), ref(data.left_high),
+                                           data.mask ? hl::list(ref(data.mask)) : nullptr);
+                }
+            } else {
+                payload = hl::list_dot(data.kind, ref(data.op), data.mask ? hl::list(ref(data.mask)) : nullptr);
+            }
             break;
         }
         SIMJIT_MATCH (StepKind::ArithUnary) {
@@ -712,7 +743,79 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         return builder.trunc(selected, ScalarDataType::I64);
     }
     case StepKind::CheckedOp: {
-        auto [checked_kind, op, mask] = bind_step(hl::cap_as<hir::CheckedOpKind>, hl::cap, hl::or_nil);
+        auto [checked_kind, checked_payload] = bind_step(hl::cap_as<hir::CheckedOpKind>, hl::rest);
+        if (checked_kind >= hir::CheckedOpKind::I128AddLow && checked_kind <= hir::CheckedOpKind::I128Trunc) {
+            auto join_i128 = [&](hl::value low_word, hl::value high_word_value) {
+                Value low = builder.zext(ref_value(low_word), ScalarDataType::I128);
+                Value high = builder.zext(ref_value(high_word_value), ScalarDataType::I128);
+                return builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+            };
+            bool unary =
+                checked_kind == hir::CheckedOpKind::I128NegateLow ||
+                checked_kind == hir::CheckedOpKind::I128NegateHigh || checked_kind == hir::CheckedOpKind::I128AbsLow ||
+                checked_kind == hir::CheckedOpKind::I128AbsHigh || checked_kind == hir::CheckedOpKind::I128Trunc;
+            hl::value left_low{};
+            hl::value left_high{};
+            hl::value right_low{};
+            hl::value right_high{};
+            hl::value mask{};
+            if (unary) {
+                std::tie(left_low, left_high, mask) =
+                    hl::require_match(hl::print(step).c_str(), checked_payload, hl::cap, hl::cap, hl::or_nil);
+            } else {
+                std::tie(left_low, left_high, right_low, right_high, mask) = hl::require_match(
+                    hl::print(step).c_str(), checked_payload, hl::cap, hl::cap, hl::cap, hl::cap, hl::or_nil);
+            }
+            MaybePredicate predicate{};
+            if (!hl::is_nil(mask)) { predicate = ref_predicate(mask); }
+            Value left = join_i128(left_low, left_high);
+            if (checked_kind == hir::CheckedOpKind::I128Trunc) {
+                return builder.checked_op(builder.trunc(left, dtype), predicate);
+            }
+            std::optional<Value> checked;
+            if (unary) {
+                checked.emplace(
+                    builder.checked_op(builder.arith_unary(left, checked_kind == hir::CheckedOpKind::I128AbsLow ||
+                                                                         checked_kind == hir::CheckedOpKind::I128AbsHigh
+                                                                     ? ArithUnaryOp::Abs
+                                                                     : ArithUnaryOp::Negate),
+                                       predicate));
+            } else {
+                ArithBinaryOp op{};
+                switch (checked_kind) {
+                case hir::CheckedOpKind::I128AddLow:
+                case hir::CheckedOpKind::I128AddHigh: op = ArithBinaryOp::Add; break;
+                case hir::CheckedOpKind::I128SubLow:
+                case hir::CheckedOpKind::I128SubHigh: op = ArithBinaryOp::Sub; break;
+                case hir::CheckedOpKind::I128MulLow:
+                case hir::CheckedOpKind::I128MulHigh: op = ArithBinaryOp::Mul; break;
+                case hir::CheckedOpKind::I128SllLow:
+                case hir::CheckedOpKind::I128SllHigh: op = ArithBinaryOp::ShiftLeftLogical; break;
+                case hir::CheckedOpKind::I128SrlLow:
+                case hir::CheckedOpKind::I128SrlHigh: op = ArithBinaryOp::ShiftRightLogical; break;
+                case hir::CheckedOpKind::I128SraLow:
+                case hir::CheckedOpKind::I128SraHigh: op = ArithBinaryOp::ShiftRightArith; break;
+                case hir::CheckedOpKind::I128RotlLow:
+                case hir::CheckedOpKind::I128RotlHigh: op = ArithBinaryOp::RotateLeft; break;
+                case hir::CheckedOpKind::I128RotrLow:
+                case hir::CheckedOpKind::I128RotrHigh: op = ArithBinaryOp::RotateRight; break;
+                default: SIMJIT_UNREACHABLE();
+                }
+                checked.emplace(
+                    builder.checked_op(builder.arith_binary(left, join_i128(right_low, right_high), op), predicate));
+            }
+            bool high =
+                checked_kind == hir::CheckedOpKind::I128AddHigh || checked_kind == hir::CheckedOpKind::I128SubHigh ||
+                checked_kind == hir::CheckedOpKind::I128MulHigh || checked_kind == hir::CheckedOpKind::I128SllHigh ||
+                checked_kind == hir::CheckedOpKind::I128SrlHigh || checked_kind == hir::CheckedOpKind::I128SraHigh ||
+                checked_kind == hir::CheckedOpKind::I128RotlHigh || checked_kind == hir::CheckedOpKind::I128RotrHigh ||
+                checked_kind == hir::CheckedOpKind::I128NegateHigh || checked_kind == hir::CheckedOpKind::I128AbsHigh;
+            if (high) {
+                return builder.trunc(builder.srl(*checked, builder.con(64, ScalarDataType::I128)), ScalarDataType::I64);
+            }
+            return builder.trunc(*checked, ScalarDataType::I64);
+        }
+        auto [op, mask] = hl::require_match(hl::print(step).c_str(), checked_payload, hl::cap, hl::or_nil);
         MaybePredicate predicate{};
         if (!hl::is_nil(mask)) { predicate = ref_predicate(mask); }
         auto [op_kind, op_dtype, op_payload] =
