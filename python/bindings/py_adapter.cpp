@@ -632,11 +632,18 @@ static NameMap<PyBufferHandle> parse_buffers(const py::dict &buffers) {
         LogicalType ty = parse_type(v.attr("ty"));
         py::buffer_info info = buf.request();
         if (ty.dtype == sj::ScalarDataType::I128) {
-            if (info.ndim != 1) { throw py::value_error(sj::format("i128 buffer %.*s must be a 1D buffer", SV(key))); }
-            if (!info.strides.empty() && info.shape[0] > 1 && info.strides[0] != info.itemsize) {
-                throw py::value_error(sj::format("i128 buffer %.*s must be C-contiguous", SV(key)));
-            }
-            if (info.itemsize != 16) {
+            if (info.itemsize == 16) {
+                if (info.ndim != 1) { throw py::value_error(sj::format("i128 buffer %.*s must be a 1D buffer", SV(key))); }
+                if (!info.strides.empty() && info.shape[0] > 1 && info.strides[0] != info.itemsize) {
+                    throw py::value_error(sj::format("i128 buffer %.*s must be C-contiguous", SV(key)));
+                }
+            } else if (info.itemsize == 1) {
+                // Raw byte carrier (Arrow data buffers): element count comes only from the explicit length.
+                if (v.attr("length").is_none()) {
+                    throw py::value_error(
+                        sj::format("i128 byte buffer %.*s requires an explicit length", SV(key)));
+                }
+            } else {
                 throw py::value_error(sj::format("i128 buffer %.*s must have 16-byte elements, got %zd", SV(key),
                                                  static_cast<Py_ssize_t>(info.itemsize)));
             }
@@ -649,9 +656,10 @@ static NameMap<PyBufferHandle> parse_buffers(const py::dict &buffers) {
         } else {
             length = info.size;
         }
-        if (ty.dtype == sj::ScalarDataType::I128 && length > static_cast<size_t>(info.size)) {
+        if (ty.dtype == sj::ScalarDataType::I128 &&
+            length * 16 > static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize)) {
             throw py::value_error(sj::format("i128 buffer %.*s length %zu exceeds its %zd elements", SV(key), length,
-                                             static_cast<Py_ssize_t>(info.size)));
+                                             static_cast<Py_ssize_t>(info.size * info.itemsize / 16)));
         }
         PyBufferHandle::NullEncoding null{};
         py::object null_buf = py::none();
@@ -979,6 +987,19 @@ static LogicalType arrow_type_to_ir(std::string_view name, py::handle arrow_type
         return {sj::ScalarDataType::I64, false, SemanticKind::Timestamp64, unit, timezone};
     }
     if (types.attr("is_boolean")(arrow_type).cast<bool>()) { return LogicalType::simple(sj::ScalarDataType::I1); }
+    if (types.attr("is_decimal")(arrow_type).cast<bool>()) {
+        if (types.attr("is_decimal256")(arrow_type).cast<bool>()) {
+            throw py::type_error(sj::format("input %.*s uses unsupported Arrow type %s: decimal256 is not supported",
+                                            SV(name), py::str(arrow_type).cast<std::string>().c_str()));
+        }
+        int scale = arrow_type.attr("scale").cast<int>();
+        if (scale != 0) {
+            throw py::type_error(sj::format(
+                "input %.*s uses unsupported Arrow type %s: only scale-0 decimal128 maps to i128", SV(name),
+                py::str(arrow_type).cast<std::string>().c_str()));
+        }
+        return LogicalType::simple(sj::ScalarDataType::I128);
+    }
     if (types.attr("is_int8")(arrow_type).cast<bool>()) { return LogicalType::simple(sj::ScalarDataType::I8); }
     if (types.attr("is_int16")(arrow_type).cast<bool>()) { return LogicalType::simple(sj::ScalarDataType::I16); }
     if (types.attr("is_int32")(arrow_type).cast<bool>()) { return LogicalType::simple(sj::ScalarDataType::I32); }
@@ -1682,7 +1703,13 @@ static py::object pyarrow_type(const LogicalType &ty, py::handle pa) {
     case sj::ScalarDataType::I64: return ty.is_unsigned ? pa.attr("uint64")() : pa.attr("int64")();
     case sj::ScalarDataType::F32: return pa.attr("float32")();
     case sj::ScalarDataType::F64: return pa.attr("float64")();
-    case sj::ScalarDataType::I128: break;
+    case sj::ScalarDataType::I128:
+        if (ty.is_unsigned) {
+            throw py::type_error(
+                "unsigned 128-bit pyarrow output is not supported: Arrow Decimal128 is signed and must not "
+                "reinterpret high-bit unsigned values as negative");
+        }
+        return pa.attr("decimal128")(38, 0);
     }
     throw py::type_error(sj::format("unsupported simjit scalar type %s", ty.name()));
 }

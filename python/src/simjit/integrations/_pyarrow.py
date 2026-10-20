@@ -23,6 +23,11 @@ class _TimestampType(Protocol):
     tz: object | None
 
 
+class _DecimalType(Protocol):
+    precision: int
+    scale: int
+
+
 class _Field(Protocol):
     name: str
     type: object
@@ -53,6 +58,15 @@ def _arrow_type_to_ir(name: str, arrow_type: object) -> ir.ScalarType:
         )
     if pa.types.is_boolean(arrow_type):
         return ir.I1
+    if pa.types.is_decimal(arrow_type):
+        if pa.types.is_decimal256(arrow_type):
+            raise TypeError(f"column {name!r} uses unsupported Arrow type {arrow_type}: decimal256 is not supported")
+        decimal_type = cast(_DecimalType, arrow_type)
+        if decimal_type.scale != 0:
+            raise TypeError(
+                f"column {name!r} uses unsupported Arrow type {arrow_type}: only scale-0 decimal128 maps to i128"
+            )
+        return ir.I128
     if pa.types.is_int8(arrow_type):
         return ir.I8
     if pa.types.is_int16(arrow_type):

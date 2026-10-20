@@ -182,7 +182,7 @@ py-release:
 	$(PYTHON_EXECUTABLE) -m build --wheel --no-isolation --outdir "$(PYTHON_DIST_DIR)" "$(PYTHON_DIR)"
 
 py-test: py
-	$(PY_SCRIPT) -m pytest -q "$(PYTHON_DIR)/tests/test.py"
+	$(PY_SCRIPT) -m pytest -q "$(PYTHON_DIR)/tests/test.py" "$(PYTHON_DIR)/tests/pyarrow_compat_test.py"
 
 py-typecheck:
 	cd "$(ROOT)" && "$(PYTHON_EXECUTABLE)" -m basedpyright
