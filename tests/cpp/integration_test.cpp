@@ -179,7 +179,6 @@ static void add_checked_op_shape_tests(std::vector<IntegrationTest> &tests) {
     }
 }
 
-#if SIMJIT_LLVM_BACKEND
 template <typename Predicate> static bool mir_has_step(mir::Function *fn, Predicate predicate) {
     bool found = false;
     std::vector<uint8_t> state(fn->step_id_count);
@@ -203,6 +202,7 @@ static bool mir_has_arith_op(mir::Function *fn, ArithBinaryOp op) {
     });
 }
 
+#if SIMJIT_LLVM_BACKEND
 static size_t count_substrings(std::string_view haystack, std::string_view needle) {
     size_t result = 0;
     size_t pos = 0;
@@ -575,6 +575,44 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
 
         mir::Function *vector_mir = lower_vectorized(hir);
         SIMJIT_ASSERT(mir_has_step(vector_mir, [](mir::Step *step) { return step->is(mir::StepKind::VecExtract); }));
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_to_float_fma_shape", CodeTransformations::All, Arch::Native};
+        auto has_positive_fma = [](mir::Function *mir) {
+            return mir_has_step(mir, [](mir::Step *step) {
+                return step->is(mir::StepKind::FMA) && step->step_data<mir::StepKind::FMA>().kind == mir::FmaKind::FMA;
+            });
+        };
+        auto has_float_mul_or_add = [](mir::Function *mir) {
+            return mir_has_step(mir, [](mir::Step *step) {
+                if (!step->is(mir::StepKind::ArithBinary)) { return false; }
+                const auto &data = step->step_data<mir::StepKind::ArithBinary>();
+                if (data.op != ArithBinaryOp::Mul && data.op != ArithBinaryOp::Add) { return false; }
+                return step->dtype.is_scalar() ? is_float_dtype(step->dtype.as_scalar())
+                                               : step->dtype.as_vec().is_float();
+            });
+        };
+
+        for (ScalarDataType dtype : {F32, F64}) {
+            for (bool is_unsigned : {false, true}) {
+                FunctionBuilder builder{ctx};
+                Argument src = builder.arg(I128);
+                builder.store(builder.float_cast(builder.load(src), dtype, is_unsigned), builder.arg(dtype));
+                hir::Function *hir = builder.build();
+
+                mir::Function *scalar_mir = lower_scalar(hir);
+                SIMJIT_ASSERT(has_positive_fma(scalar_mir));
+                SIMJIT_ASSERT(!has_float_mul_or_add(scalar_mir));
+
+                // Signed i128 to f32 vectorization is a recorded arm limitation.
+                if (dtype == F32 && !is_unsigned && ctx.arch == Arch::Arm64_NEON) { continue; }
+                mir::Function *vector_mir = lower_vectorized(hir);
+                SIMJIT_ASSERT(has_positive_fma(vector_mir));
+                SIMJIT_ASSERT(!has_float_mul_or_add(vector_mir));
+            }
+        }
     });
 
     tests.emplace_back([] {
