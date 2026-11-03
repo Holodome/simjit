@@ -288,6 +288,13 @@ def test_sample_catalog_is_grouped_and_parseable():
             assert lowered.program.to_dsl()
 
 
+@pytest.mark.parametrize("arch", ["x86", "arm"])
+def test_every_sample_compiles(arch):
+    for sample in SAMPLES:
+        result = compile_query(sample.query, arch=arch)
+        assert result.ok, f"{sample.id}: {result.error}"
+
+
 def test_compile_query_reports_outputs():
     result = compile_query(DEFAULT_QUERY)
     assert result.ok, result.error
