@@ -252,7 +252,7 @@ Coverage intentionally excludes:
 - `simjit-cli/`: CLI parser and driver.
 - `benchmarks/`: Python, Arrow/Gandiva, and DuckDB benchmark entry points.
 - `benchmarks/duckdb/`: DuckDB extension, benchmark drivers, and benchmark assets.
-- `explorer/`: local web explorer service, LLVM probe module, and Docker packaging.
+- `explorer/`: local web explorer service and LLVM probe module. Deployment lives in a separate infra repo.
 - `fuzz/`: fuzzing driver, report rendering, and generated-program workflow.
 - `scripts/`: developer orchestration and utilities, including `scripts/dev` for benchmarks and Explorer tasks.
 - `cmake/`: reusable CMake modules for the library and LTO setup.

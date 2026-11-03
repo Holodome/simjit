@@ -21,15 +21,11 @@ Benchmarks:
 Explorer and tools:
   explorer-probe          Build the optional Explorer LLVM probe
   explorer-serve          Run the Explorer development server
-  explorer-docker-build   Build the Explorer runtime image
-  explorer-docker-run     Start the Explorer container
-  explorer-docker-smoke   Smoke-test the running Explorer container
-  explorer-docker-stop    Remove the Explorer container
   results-serve           Serve the local JSONL/code viewer
 
 Arguments after COMMAND are forwarded to Python benchmark runners or uvicorn.
 Configuration uses the existing NO_LTO, LTO_MODE, WORKERS, SIMJIT_PYTHON,
-PYTHON_DEMO_BENCH_*, and DOCKER_EXPLORER_* environment variables.
+and PYTHON_DEMO_BENCH_* environment variables.
 EOF
 }
 
@@ -144,46 +140,6 @@ case "$command_name" in
     ;;
   explorer-serve)
     exec "$repo_root/scripts/py" -m uvicorn explorer.app:app --host 127.0.0.1 --port 8001 "$@"
-    ;;
-  explorer-docker-build)
-    image="${DOCKER_EXPLORER_IMAGE:-simjit-explorer:local}"
-    platform="${DOCKER_EXPLORER_PLATFORM:-linux/amd64}"
-    platform_args=()
-    [[ -z "$platform" ]] || platform_args=(--platform "$platform")
-    docker build "${platform_args[@]}" \
-      --build-arg "PYTHON_IMAGE=${DOCKER_EXPLORER_PYTHON_IMAGE:-python:3.13-slim-bookworm}" \
-      --build-arg "BUILD_WORKERS=${DOCKER_EXPLORER_BUILD_WORKERS:-2}" \
-      --build-arg "LLVM_MAJOR=${DOCKER_EXPLORER_LLVM_MAJOR:-23}" \
-      --build-arg "LLVM_DEBIAN_CODENAME=${DOCKER_EXPLORER_LLVM_DEBIAN_CODENAME:-bookworm}" \
-      --build-arg "LLVM_CONFIG=${DOCKER_EXPLORER_LLVM_CONFIG:-llvm-config-${DOCKER_EXPLORER_LLVM_MAJOR:-23}}" \
-      --build-arg "LLVM_CLANG=${DOCKER_EXPLORER_LLVM_CLANG:-clang-${DOCKER_EXPLORER_LLVM_MAJOR:-23}}" \
-      --build-arg "EXTRA_APT_PACKAGES=${DOCKER_EXPLORER_EXTRA_APT_PACKAGES:-}" \
-      -f "$repo_root/explorer/docker/Dockerfile" --target runtime -t "$image" "$repo_root"
-    ;;
-  explorer-docker-run)
-    container="${DOCKER_EXPLORER_CONTAINER:-simjit-explorer-local}"
-    image="${DOCKER_EXPLORER_IMAGE:-simjit-explorer:local}"
-    port="${DOCKER_EXPLORER_PORT:-8080}"
-    platform="${DOCKER_EXPLORER_PLATFORM:-linux/amd64}"
-    platform_args=()
-    [[ -z "$platform" ]] || platform_args=(--platform "$platform")
-    docker rm -f "$container" >/dev/null 2>&1 || true
-    docker run -d "${platform_args[@]}" --name "$container" -p "127.0.0.1:$port:80" "$image"
-    ;;
-  explorer-docker-smoke)
-    port="${DOCKER_EXPLORER_PORT:-8080}"
-    base_url="http://127.0.0.1:$port"
-    curl -fsS -o /dev/null "$base_url/"
-    curl -fsS -o /dev/null "$base_url/explorer/"
-    curl -fsS -D - -o /dev/null "$base_url/" | grep -qi "Content-Security-Policy: default-src 'self'"
-    curl -fsS -D - -o /dev/null "$base_url/explorer/" | grep -qi "Content-Security-Policy: default-src 'self'"
-    curl -fsS -D - -o /dev/null "$base_url/robots.txt" | grep -qi "X-Robots-Tag: noindex"
-    curl -fsS -H 'X-Simjit-Explorer-Fragment: results' \
-      --data-urlencode 'query=INPUT t (x i32); SELECT x + 1 AS y;' \
-      "$base_url/explorer/compile" >/dev/null
-    ;;
-  explorer-docker-stop)
-    docker rm -f "${DOCKER_EXPLORER_CONTAINER:-simjit-explorer-local}" >/dev/null 2>&1 || true
     ;;
   results-serve)
     exec "$python_bin" "$repo_root/tests/scripts/server.py" "$@"
