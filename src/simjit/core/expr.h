@@ -49,6 +49,11 @@ constexpr bool is_simple_int_dtype(ScalarDataType dtype) noexcept {
            dtype == ScalarDataType::I64;
 }
 
+constexpr bool is_int_dtype(ScalarDataType dtype) noexcept {
+    return dtype == ScalarDataType::I8 || dtype == ScalarDataType::I16 || dtype == ScalarDataType::I32 ||
+           dtype == ScalarDataType::I64 || dtype == ScalarDataType::I128;
+}
+
 constexpr bool is_float_dtype(ScalarDataType dtype) noexcept {
     return dtype == ScalarDataType::F32 || dtype == ScalarDataType::F64;
 }
@@ -296,9 +301,10 @@ struct DataType {
 };
 
 struct ArgumentDecl {
-    ScalarDataType dtype;
-    ArgumentIdx idx;
-    ArgumentKind kind;
+    ScalarDataType dtype{};
+    ArgumentIdx idx{};
+    bool interleaved = false;
+    ScalarDataType interleaved_half_dtype = ScalarDataType::I1;
 };
 
 ConstData scalar_dtype_max(ScalarDataType dt);
@@ -319,7 +325,7 @@ const char *show_arith_agg_kind(ArithBinaryOp op) noexcept;
 const char *show_predicate_agg_kind(PredicateBinaryOp op) noexcept;
 const char *show_int_cast_kind(IntCastKind kind) noexcept;
 const char *show_load_store_kind(LoadStoreKind kind) noexcept;
-std::string show_argument_kind(ArgumentKind kind);
+const char *show_funnel_shift_kind(FunnelShiftKind kind) noexcept;
 std::string show_fpclass(FpClass flags);
 std::string show_arith_binary_flags(ArithBinaryOpFlags flags);
 

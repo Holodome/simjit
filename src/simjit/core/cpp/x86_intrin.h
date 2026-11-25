@@ -195,7 +195,7 @@ using ScalarIntrinsicUnaryMap = UnaryIntrinsicMap<ScalarDataType>;
 using VecIntrinsicUnaryMap = UnaryIntrinsicMap<VecDataType>;
 
 template <typename D> struct BinaryContainer {
-    VecDataType vdtype;
+    VecDataType vdtype{};
     D d;
 };
 
@@ -245,8 +245,8 @@ private:
 
     struct Tagged {
         Intrinsic i;
-        VecDataType x;
-        VecDataType y;
+        VecDataType x{};
+        VecDataType y{};
     };
     const char *name_;
     std::vector<Tagged> tagged_;
@@ -345,6 +345,7 @@ extern const MaskIntrinsicUnaryMap store_mask_map;
 
 extern const VecIntrinsicUnaryMap gp2affine_map;
 extern const VecIntrinsicUnaryMap permb_map;
+extern const VecIntrinsicUnaryMap permutex2var_map;
 extern const VecIntrinsicUnaryMap shuffle8_map;
 
 extern const VecIntrinsicUnaryMap roundscale_map;

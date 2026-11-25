@@ -6,6 +6,7 @@
 #include "simjit/core/x86.h"
 #include "simjit/asmjit.h"
 #include "simjit/core/expr.h"
+#include "simjit/core/hir.h"
 #include "simjit/core/mir.h"
 #include "simjit/simjit.h"
 
@@ -54,9 +55,10 @@ using AnyR = aj::Reg;
 
 namespace {
 struct ArgInfo {
-    const ArgumentDecl *arg;
+    const ArgumentDecl *arg = nullptr;
     GpR gp;
     ax86::Mem spilled{};
+    bool is_spilled = false;
 };
 
 struct MaskPushdownInfo {
@@ -133,6 +135,32 @@ static void scalar_mov(ax86::Compiler &cc, const ax86::Mem &a, const AnyR &b, Sc
     }
 }
 
+template <typename T, typename U>
+static void vec_mov(ax86::Compiler &cc, const T &lhs, const U &rhs, LoadStoreKind kind, VecDataType vdtype) {
+    switch (kind) {
+    case LoadStoreKind::Aligned:
+        switch (vdtype.elem) {
+        case VecElemType::I8: cc.vmovdqu8(lhs, rhs); break;
+        case VecElemType::I16: cc.vmovdqu16(lhs, rhs); break;
+        case VecElemType::I32: cc.vmovdqa32(lhs, rhs); break;
+        case VecElemType::I64: cc.vmovdqa64(lhs, rhs); break;
+        case VecElemType::F32: cc.vmovaps(lhs, rhs); break;
+        case VecElemType::F64: cc.vmovapd(lhs, rhs); break;
+        }
+        break;
+    case LoadStoreKind::Unaligned:
+        switch (vdtype.elem) {
+        case VecElemType::I8: cc.vmovdqu8(lhs, rhs); break;
+        case VecElemType::I16: cc.vmovdqu16(lhs, rhs); break;
+        case VecElemType::I32: cc.vmovdqu32(lhs, rhs); break;
+        case VecElemType::I64: cc.vmovdqu64(lhs, rhs); break;
+        case VecElemType::F32: cc.vmovups(lhs, rhs); break;
+        case VecElemType::F64: cc.vmovupd(lhs, rhs); break;
+        }
+        break;
+    }
+}
+
 static void broadcast_f64(ax86::Compiler &cc, const VecR &dst, const ax86::Mem &src) {
     // VEX VBROADCASTSD has no XMM destination form. For two-lane F64 vectors
     // VMOVDDUP is the valid equivalent.
@@ -179,28 +207,13 @@ static size_t mask_valid_bits_u32(MaskDataType mdtype) noexcept {
 }
 
 static ax86::Mem mem_offset(const GpR &base, const GpR &i, ScalarDataType dtype, int32_t offset = 0) {
-    switch (dtype) {
-    case ScalarDataType::I1: messed_up("can't have i1 mem");
-    case ScalarDataType::I8: return ax86::byte_ptr(base, i, 0, offset);
-    case ScalarDataType::I16: return ax86::word_ptr(base, i, 1, offset);
-    case ScalarDataType::I32:
-    case ScalarDataType::F32: return ax86::dword_ptr(base, i, 2, offset);
-    case ScalarDataType::I64:
-    case ScalarDataType::F64: return ax86::qword_ptr(base, i, 3, offset);
-    case ScalarDataType::I128: messed_up("can't have i128 mem");
-    }
-    SIMJIT_UNREACHABLE();
+    if (dtype == ScalarDataType::I1) { messed_up("can't have i1 mem"); }
+    if (dtype == ScalarDataType::I128) { messed_up("can't have i128 mem"); }
+    return ax86::Mem(base, i, scalar_dtype_size_log2(dtype), offset, scalar_dtype_size(dtype));
 }
 
 static ax86::Mem vec_mem_offset(const GpR &base, const GpR &i, size_t offset, VecDataType dtype) {
-    x86::Vector vec = x86::vec_to_x86(dtype);
-    size_t log2_size = dtype.element_size_bytes_log2();
-    switch (vec.reg) {
-    case x86::VecRegisterKind::XMM: return ax86::xmmword_ptr(base, i, log2_size, (int)offset); break;
-    case x86::VecRegisterKind::YMM: return ax86::ymmword_ptr(base, i, log2_size, (int)offset); break;
-    case x86::VecRegisterKind::ZMM: return ax86::zmmword_ptr(base, i, log2_size, (int)offset); break;
-    }
-    SIMJIT_UNREACHABLE();
+    return ax86::Mem(base, i, dtype.element_size_bytes_log2(), (int)offset, dtype.size_bytes());
 }
 
 template <typename T>
@@ -844,6 +857,65 @@ static void vec_shift_imm(ax86::Compiler &cc, ArithBinaryOp op, VecElemType type
     }
 }
 
+static void vec_funnel_imm(ax86::Compiler &cc, FunnelShiftKind kind, VecElemType type, const VecR &result,
+                           const VecR &left, const VecR &right, const aj::Imm &imm) {
+    switch (type) {
+        INVALID_FLOAT_CASES;
+    case VecElemType::I8: unsupported("Do not support i8 funnel shift");
+    case VecElemType::I16:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldw(result, left, right, imm);
+        } else {
+            cc.vpshrdw(result, left, right, imm);
+        }
+        break;
+    case VecElemType::I32:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldd(result, left, right, imm);
+        } else {
+            cc.vpshrdd(result, left, right, imm);
+        }
+        break;
+    case VecElemType::I64:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldq(result, left, right, imm);
+        } else {
+            cc.vpshrdq(result, left, right, imm);
+        }
+        break;
+    }
+}
+
+template <typename T>
+static void vec_funnel_var(ax86::Compiler &cc, FunnelShiftKind kind, VecElemType type, const VecR &result,
+                           const VecR &right, const T &amount) {
+    switch (type) {
+        INVALID_FLOAT_CASES;
+    case VecElemType::I8: unsupported("Do not support i8 funnel shift");
+    case VecElemType::I16:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldvw(result, right, amount);
+        } else {
+            cc.vpshrdvw(result, right, amount);
+        }
+        break;
+    case VecElemType::I32:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldvd(result, right, amount);
+        } else {
+            cc.vpshrdvd(result, right, amount);
+        }
+        break;
+    case VecElemType::I64:
+        if (kind == FunnelShiftKind::Left) {
+            cc.vpshldvq(result, right, amount);
+        } else {
+            cc.vpshrdvq(result, right, amount);
+        }
+        break;
+    }
+}
+
 template <typename T>
 static void vec_fma(ax86::Compiler &cc, FmaKind kind, VecElemType type, const VecR &x1, const VecR &x2, const T &x3) {
     bool is_f32 = type == VecElemType::F32;
@@ -935,6 +1007,17 @@ static void vec_fma_acc(ax86::Compiler &cc, FmaKind kind, VecElemType type, cons
         else
             cc.vfnmsub231pd(acc, x1, x2);
         break;
+    }
+}
+
+static void vec_permute2(ax86::Compiler &cc, const VecR &lo_dst, const VecR &idx, const VecR &hi, VecDataType vdtype) {
+    switch (vdtype.elem) {
+    case VecElemType::I8: cc.vpermt2b(lo_dst, idx, hi); break;
+    case VecElemType::I16: cc.vpermt2w(lo_dst, idx, hi); break;
+    case VecElemType::I32: cc.vpermt2d(lo_dst, idx, hi); break;
+    case VecElemType::I64: cc.vpermt2q(lo_dst, idx, hi); break;
+    case VecElemType::F32: cc.vpermt2ps(lo_dst, idx, hi); break;
+    case VecElemType::F64: cc.vpermt2pd(lo_dst, idx, hi); break;
     }
 }
 
@@ -1064,6 +1147,7 @@ static bool scalar_const_binary_can_fold(ScalarDataType sdtype, ArithBinaryOp op
 namespace {
 struct CompileState {
     MemoryArena *arena;
+    // cppcheck-suppress uninitMemberVarNoCtor
     ax86::Compiler &cc;
     GpR counter{};
     GpR row_count{};
@@ -1081,6 +1165,25 @@ struct CompileState {
     GpR shifted_counter[7]{};
 
     std::unordered_map<uint64_t, aj::Label> bit_permute_luts{};
+    std::unordered_map<uint32_t, ax86::Mem> vec_extract_spills{};
+
+    struct DeinterleaveIdxTable {
+        VecDataType dtype{};
+        VecR even;
+        VecR odd;
+        ax86::Mem even_mem;
+        ax86::Mem odd_mem;
+    };
+    std::vector<DeinterleaveIdxTable> deinterleave_tables{};
+
+    struct InterleaveIdxTable {
+        VecDataType dtype{};
+        VecR lo;
+        VecR hi;
+        ax86::Mem lo_mem;
+        ax86::Mem hi_mem;
+    };
+    std::vector<InterleaveIdxTable> interleave_tables{};
 
     aj::Label remainder_label{};
     aj::Label end_label{};
@@ -1109,6 +1212,97 @@ struct CompileState {
         return vec_mem_offset(args[addr.arg].gp, counter, addr.offset * dtype.element_size_bytes(), dtype);
     }
 
+    ax86::Mem pair_mem(const ArgumentAddress &addr, size_t access_size, size_t lane_offset) {
+        const ArgumentDecl &arg = *args[addr.arg].arg;
+        size_t stride_log2 = scalar_dtype_size_log2(arg.dtype);
+        size_t stride = scalar_dtype_size(arg.dtype);
+        int32_t displacement = (int32_t)(addr.offset * stride + lane_offset);
+        // x86 addressing modes only encode scales through 8. For an i128
+        // carrier, materialize 2 * row and retain the normal base+index*8 form.
+        if (stride_log2 >= 4) {
+            GpR doubled_counter = cc.new_gp64();
+            cc.lea(doubled_counter, ax86::ptr(counter, counter, 0));
+            return ax86::Mem(args[addr.arg].gp, doubled_counter, 3, displacement, access_size);
+        }
+        return ax86::Mem(args[addr.arg].gp, counter, stride_log2, displacement, access_size);
+    }
+
+    ax86::Mem vec_pair_mem(const ArgumentAddress &addr, VecDataType vdtype, size_t half) {
+        return pair_mem(addr, vdtype.size_bytes(), half * vdtype.size_bytes());
+    }
+
+    ax86::Mem scalar_pair_mem(const ArgumentAddress &addr, ScalarDataType half_dtype, uint8_t lane) {
+        size_t half_size = scalar_dtype_size(half_dtype);
+        return pair_mem(addr, half_size, lane * half_size);
+    }
+    void prepare_deinterleave_tables() {
+        for (VecDataType vdtype : mir_func->interleave.deinterleave_dtypes) {
+            size_t esz = vdtype.element_size_bytes();
+            size_t width = vdtype.nelems();
+            size_t reg_bytes = vdtype.size_bytes();
+            uint8_t even_idx[64] = {};
+            uint8_t odd_idx[64] = {};
+            for (size_t i = 0; i < width; ++i) {
+                for (size_t byte = 0; byte < esz; ++byte) {
+                    even_idx[i * esz + byte] = uint8_t((2 * i) >> (8 * byte));
+                    odd_idx[i * esz + byte] = uint8_t((2 * i + 1) >> (8 * byte));
+                }
+            }
+            deinterleave_tables.push_back(
+                DeinterleaveIdxTable{vdtype, create_vec_reg(vdtype), create_vec_reg(vdtype),
+                                     cc.new_const(aj::ConstPoolScope::kLocal, even_idx, reg_bytes),
+                                     cc.new_const(aj::ConstPoolScope::kLocal, odd_idx, reg_bytes)});
+        }
+    }
+
+    void prepare_interleave_tables() {
+        for (VecDataType vdtype : mir_func->interleave.interleave_dtypes) {
+            size_t esz = vdtype.element_size_bytes();
+            size_t width = vdtype.nelems();
+            size_t reg_bytes = vdtype.size_bytes();
+            size_t half_width = width / 2;
+            uint8_t lo_idx[64] = {};
+            uint8_t hi_idx[64] = {};
+            for (size_t k = 0; k < width; ++k) {
+                size_t lo_value = (k % 2 == 0) ? k / 2 : half_width + (k - 1) / 2;
+                size_t hi_value = (k % 2 == 0) ? half_width + k / 2 : width + half_width + (k - 1) / 2;
+                for (size_t byte = 0; byte < esz; ++byte) {
+                    lo_idx[k * esz + byte] = uint8_t(lo_value >> (8 * byte));
+                    hi_idx[k * esz + byte] = uint8_t(hi_value >> (8 * byte));
+                }
+            }
+            interleave_tables.push_back(
+                InterleaveIdxTable{vdtype, create_vec_reg(vdtype), create_vec_reg(vdtype),
+                                   cc.new_const(aj::ConstPoolScope::kLocal, lo_idx, reg_bytes),
+                                   cc.new_const(aj::ConstPoolScope::kLocal, hi_idx, reg_bytes)});
+        }
+    }
+
+    void load_interleave_tables() {
+        for (const DeinterleaveIdxTable &t : deinterleave_tables) {
+            cc.vmovdqu8(t.even, t.even_mem);
+            cc.vmovdqu8(t.odd, t.odd_mem);
+        }
+        for (const InterleaveIdxTable &t : interleave_tables) {
+            cc.vmovdqu8(t.lo, t.lo_mem);
+            cc.vmovdqu8(t.hi, t.hi_mem);
+        }
+    }
+
+    const DeinterleaveIdxTable *deinterleave_table(VecDataType vdtype) const {
+        for (const DeinterleaveIdxTable &t : deinterleave_tables) {
+            if (t.dtype == vdtype) { return &t; }
+        }
+        return nullptr;
+    }
+
+    const InterleaveIdxTable *interleave_table(VecDataType vdtype) const {
+        for (const InterleaveIdxTable &t : interleave_tables) {
+            if (t.dtype == vdtype) { return &t; }
+        }
+        return nullptr;
+    }
+
     bool step_supports_mask_pushdown(const Step *step) const noexcept {
         if (refcounts[step->id] > 1) return false;
         return step_has_mask_form(step);
@@ -1126,7 +1320,7 @@ struct CompileState {
         return refcounts[step->id] != 0 && refcounts[step->id] == folded_const_refcounts[step->id];
     }
 
-    void record_folded_const_ref(Step *step) noexcept {
+    void record_folded_const_ref(const Step *step) noexcept {
         switch (step->kind) {
             SIMJIT_MATCH (StepKind::AccStore) {
                 if (!SIMJIT_X64_ASMJIT_INLINE_ACC_INIT || !data.arg->is(StepKind::Const)) { return; }
@@ -1547,9 +1741,9 @@ struct CompileState {
             const auto &right_data = right_step->step_data<StepKind::Const>();
             // Only allow 32 bit operands
             if ((int64_t)(int32_t)right_data.as_signed() == right_data.as_signed()) {
-                int64_t imm_value = right_data.as_signed();
+                uint64_t imm_value = right_data.as_unsigned();
                 if ((sdtype == ScalarDataType::I8 || sdtype == ScalarDataType::I16) && is_shift_rotate(op)) {
-                    imm_value &= (int64_t)scalar_dtype_bits(sdtype) - 1;
+                    imm_value &= scalar_dtype_bits(sdtype) - 1;
                 }
                 aj::Imm imm = imm_value;
                 switch (op) {
@@ -1579,9 +1773,28 @@ struct CompileState {
         switch (op) {
         case ArithBinaryOp::Add: cc.add(left, right); break;
         case ArithBinaryOp::Sub: cc.sub(left, right); break;
-        case ArithBinaryOp::Mul:
-        case ArithBinaryOp::Mul64SE:
-        case ArithBinaryOp::Mul64ZE: cc.imul(left, right); break;
+        case ArithBinaryOp::Mul: cc.imul(left, right); break;
+        case ArithBinaryOp::Mul64SE: {
+            SIMJIT_ASSERT(sdtype == ScalarDataType::I64);
+            GpR left_extended = cc.new_gp64();
+            GpR right_extended = cc.new_gp64();
+            cc.movsxd(left_extended, left.r32());
+            cc.movsxd(right_extended, right.r32());
+            cc.imul(left_extended, right_extended);
+            cc.mov(left, left_extended);
+            break;
+        }
+        case ArithBinaryOp::Mul64ZE: {
+            SIMJIT_ASSERT(sdtype == ScalarDataType::I64);
+            GpR left_extended = cc.new_gp64();
+            GpR right_extended = cc.new_gp64();
+            // Writing a 32-bit register zero-extends it to 64 bits.
+            cc.mov(left_extended.r32(), left.r32());
+            cc.mov(right_extended.r32(), right.r32());
+            cc.imul(left_extended, right_extended);
+            cc.mov(left, left_extended);
+            break;
+        }
         case ArithBinaryOp::Div: {
             GpR tmp = create_int_reg(sdtype);
             // Asmjit uses unconventional syntax for idiv instruction (and cwd for that matter)
@@ -1744,6 +1957,33 @@ struct CompileState {
         cc.mov(remainder, numerator);
         cc.sub(remainder, product);
         return remainder;
+    }
+
+    GpR scalar_i128_div(const Step *step, const I128DivData &data) {
+        if (step->dtype != ScalarDataType::I64 || data.partner == nullptr || data.partner->kind != StepKind::I128Div ||
+            data.partner->dtype != ScalarDataType::I64) {
+            messed_up("malformed scalar i128 division");
+        }
+        GpR left_low = int_subexpr(data.left_low);
+        GpR left_high = int_subexpr(data.left_high);
+        GpR right_low = int_subexpr(data.right_low);
+        GpR right_high = int_subexpr(data.right_high);
+        GpR low = cc.new_gp64();
+        GpR high = cc.new_gp64();
+        GpR target = cc.new_gp64();
+        cc.mov(target, (uint64_t)i128_div_helper_address(data.op));
+        aj::InvokeNode *invoke = nullptr;
+        cc.invoke(aj::Out(invoke), target,
+                  aj::FuncSignature::build<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>());
+        invoke->set_arg(0, left_low);
+        invoke->set_arg(1, left_high);
+        invoke->set_arg(2, right_low);
+        invoke->set_arg(3, right_high);
+        invoke->set_ret(0, low);
+        cc.mov(high, ax86::rdx);
+        step_map[data.high_word ? data.partner->id : step->id] = low;
+        step_map[data.high_word ? step->id : data.partner->id] = high;
+        return data.high_word ? high : low;
     }
 
     void vec_binary(ArithBinaryOp op, VecDataType vdtype, const VecR &result, const VecR &left, const VecR &right,
@@ -1913,20 +2153,35 @@ struct CompileState {
                 scalar_mov(cc, result, mem, sdtype);
                 return result;
             }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (data.lane_count != 2 || data.lane >= data.lane_count || sdtype == ScalarDataType::I1) {
+                    unsupported("Unsupported scalar load-deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                AnyR result = create_scalar_reg(sdtype);
+                scalar_mov(cc, result, scalar_pair_mem(data.addr, sdtype, data.lane), sdtype);
+                return result;
+            }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                if (sdtype == ScalarDataType::I1) { messed_up("..."); }
+                aj::Label skip_label{};
+                if (data.cond != nullptr) {
+                    GpR cond = int_subexpr(data.cond);
+                    skip_label = cc.new_anonymous_label("skip");
+                    cc.test(cond, cond);
+                    cc.jz(skip_label);
+                }
+                AnyR even = subexpr(data.even);
+                AnyR odd = subexpr(data.odd);
+                scalar_mov(cc, scalar_pair_mem(data.dst, sdtype, 0), even, sdtype);
+                scalar_mov(cc, scalar_pair_mem(data.dst, sdtype, 1), odd, sdtype);
+                if (skip_label.is_valid()) cc.bind(skip_label);
+                return {};
+            }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 const ArgInfo &arg = args[data.addr.arg];
                 AnyR result = create_scalar_reg(sdtype);
-                ax86::Mem mem{};
-                switch (sdtype) {
-                case ScalarDataType::I128: messed_up("can't do i128 LoadSplat");
-                case ScalarDataType::I1: mem = asmjit::x86::byte_ptr(arg.gp); break;
-                case ScalarDataType::I8: mem = asmjit::x86::byte_ptr(arg.gp); break;
-                case ScalarDataType::I16: mem = asmjit::x86::word_ptr(arg.gp); break;
-                case ScalarDataType::I32:
-                case ScalarDataType::F32: mem = asmjit::x86::dword_ptr(arg.gp); break;
-                case ScalarDataType::I64:
-                case ScalarDataType::F64: mem = asmjit::x86::qword_ptr(arg.gp); break;
-                }
+                if (sdtype == ScalarDataType::I128) { messed_up("can't do i128 LoadSplat"); }
+                ax86::Mem mem = ax86::Mem(arg.gp, (int32_t)data.byte_offset, scalar_dtype_size(sdtype));
                 scalar_mov(cc, result, mem, sdtype == ScalarDataType::I1 ? ScalarDataType::I8 : sdtype);
                 if (sdtype == ScalarDataType::I1) { cc.and_(result.as<GpR>(), 1); }
                 return result;
@@ -1974,6 +2229,41 @@ struct CompileState {
 
                 return result;
             }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                GpR left = int_subexpr(data.left);
+                GpR right = int_subexpr(data.right);
+                GpR result = create_int_reg(sdtype);
+                // shld shifts dst left with src filling from the right (dst is the high half);
+                // shrd shifts dst right with src filling from the left (dst is the low half)
+                if (data.kind == FunnelShiftKind::Left) {
+                    cc.mov(result, left);
+                } else {
+                    cc.mov(result, right);
+                }
+
+                if (SIMJIT_X64_ASMJIT_CONST_OPS && data.amount->is(StepKind::Const)) {
+                    aj::Imm imm = data.amount->step_data<StepKind::Const>().as_unsigned();
+                    if (data.kind == FunnelShiftKind::Left) {
+                        cc.shld(result, right, imm);
+                    } else {
+                        cc.shrd(result, left, imm);
+                    }
+                    return result;
+                }
+                GpR amount = int_subexpr(data.amount);
+                if (sdtype == ScalarDataType::I16) {
+                    GpR masked = cc.new_gp32();
+                    cc.mov(masked, amount.r32());
+                    cc.and_(masked, 15);
+                    amount = masked;
+                }
+                if (data.kind == FunnelShiftKind::Left) {
+                    cc.shld(result, right, amount.r8());
+                } else {
+                    cc.shrd(result, left, amount.r8());
+                }
+                return result;
+            }
             SIMJIT_MATCH (StepKind::FMA) {
                 VecR x1 = float_subexpr(data.x1);
                 VecR x2 = float_subexpr(data.x2);
@@ -1987,6 +2277,7 @@ struct CompileState {
                 return result;
             }
             SIMJIT_MATCH (StepKind::ConstDiv) { return scalar_const_div(data, sdtype); }
+            SIMJIT_MATCH (StepKind::I128Div) { return scalar_i128_div(step, data); }
             SIMJIT_MATCH (StepKind::ArithUnary) {
                 if (is_simple_int_dtype(sdtype)) {
                     GpR arg = int_subexpr(data.arg);
@@ -2245,52 +2536,25 @@ struct CompileState {
             SIMJIT_MATCH (StepKind::AggResult) {
                 const ArgInfo &info = args[data.dst];
                 AnyR arg = subexpr(data.arg);
-                ax86::Mem mem{};
-                switch (step->dtype.as_scalar()) {
-                case ScalarDataType::I8: mem = ax86::byte_ptr(info.gp); break;
-                case ScalarDataType::I16: mem = ax86::word_ptr(info.gp); break;
-                case ScalarDataType::I32:
-                case ScalarDataType::F32: mem = ax86::dword_ptr(info.gp); break;
-                case ScalarDataType::I64:
-                case ScalarDataType::F64: mem = ax86::qword_ptr(info.gp); break;
-                case ScalarDataType::I1: messed_up("i1 aggs should've been rewritten to use i8");
-                case ScalarDataType::I128: messed_up("i128 aggs should've been handled with special opcodes");
-                }
+                ScalarDataType dst_dtype = step->dtype.as_scalar();
+                if (dst_dtype == ScalarDataType::I1) { messed_up("i1 aggs should've been rewritten to use i8"); }
+                SIMJIT_ASSERT(data.byte_offset <= INT32_MAX);
+                ax86::Mem mem =
+                    ax86::Mem(info.gp, static_cast<int32_t>(data.byte_offset), scalar_dtype_size(dst_dtype));
                 scalar_mov(cc, mem, arg, sdtype);
                 return {};
             }
-            SIMJIT_MATCH (StepKind::StoreSum128) {
-                const ArgInfo &info = args[data.dst];
-                GpR zero = cc.new_gp64();
-                cc.mov(zero, 0);
-                GpR high = int_subexpr(data.hi_combined);
-                GpR low = cc.new_gp64();
-                cc.mov(low, 0);
-                for (Step *lo_step : data.low_steps) {
-                    if (lo_step->dtype.is_scalar()) {
-                        GpR lo_val = int_subexpr(lo_step);
-                        cc.add(low, lo_val);
-                        cc.adc(high, 0);
-                    } else {
-                        VecDataType vdtype = lo_step->dtype.as_vec();
-                        VecR vec = vec_subexpr(lo_step);
-                        ax86::Mem mem = cc.new_stack(vdtype.size_bytes(), 8);
-                        GpR lo_val = cc.new_gp64();
-                        cc.vmovdqu64(mem, vec);
-                        for (size_t i = 0; i < vdtype.nelems(); ++i) {
-                            int64_t off = (int64_t)(i * vdtype.element_size_bytes());
-                            cc.mov(lo_val, mem.clone_adjusted(off));
-                            cc.add(low, lo_val);
-                            cc.adc(high, 0);
-                        }
-                    }
+            SIMJIT_MATCH (StepKind::VecExtract) {
+                VecDataType vdtype = data.arg->dtype.as_vec();
+                SIMJIT_ASSERT(vdtype.elem == VecElemType::I64 && data.lane < vdtype.nelems());
+                auto [it, inserted] = vec_extract_spills.emplace(data.arg->id, ax86::Mem{});
+                if (inserted) {
+                    it->second = cc.new_stack(vdtype.size_bytes(), 8);
+                    cc.vmovdqu64(it->second, vec_subexpr(data.arg));
                 }
-
-                ax86::Mem low_mem = ax86::qword_ptr(info.gp);
-                ax86::Mem high_mem = ax86::qword_ptr(info.gp, 8);
-                cc.mov(low_mem, low);
-                cc.mov(high_mem, high);
-                return {};
+                GpR result = create_int_reg(sdtype);
+                cc.mov(result, it->second.clone_adjusted(int64_t(data.lane) * 8));
+                return result;
             }
             SIMJIT_MATCH (StepKind::AccLoad) {
                 require_acc_initialized(data);
@@ -2482,6 +2746,24 @@ struct CompileState {
                 cc.bind(skip_label);
                 return {};
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                const ArgInfo &arg_info = args[data.dst];
+                require_acc_initialized(data.acc);
+                GpR acc = accs[mir_func->accs.index(data.acc)].as<GpR>();
+                GpR low = int_subexpr(data.low);
+                GpR high = int_subexpr(data.high);
+                GpR cond = int_subexpr(data.cond);
+                aj::Label skip_label = cc.new_anonymous_label("skip");
+                cc.test(cond, cond);
+                cc.jz(skip_label);
+                GpR word_index = cc.new_gp64();
+                cc.lea(word_index, ax86::ptr(acc, acc, 0));
+                cc.mov(mem_offset(arg_info.gp, word_index, ScalarDataType::I64), low);
+                cc.mov(mem_offset(arg_info.gp, word_index, ScalarDataType::I64, 8), high);
+                cc.inc(acc);
+                cc.bind(skip_label);
+                return {};
+            }
             SIMJIT_MATCH (StepKind::CondStore) {
                 const ArgInfo &arg_info = args[data.addr.arg];
                 AnyR arg = subexpr(data.arg);
@@ -2623,8 +2905,9 @@ struct CompileState {
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
-        case StepKind::StoreSum128:
+        case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             messed_up("this is scalar instruction");
 
             SIMJIT_MATCH (StepKind::Const) {
@@ -2717,7 +3000,7 @@ struct CompileState {
                     MaskDataType mdtype = step->dtype.as_mask();
                     MaskR reg = create_mask_reg(mdtype);
                     GpR gp = cc.new_gp8();
-                    cc.mov(gp, ax86::byte_ptr(arg.gp));
+                    cc.mov(gp, ax86::byte_ptr(arg.gp, (int32_t)data.byte_offset));
                     cc.and_(gp.r64(), 1);
                     cc.neg(gp.r64());
                     switch (mdtype) {
@@ -2740,12 +3023,14 @@ struct CompileState {
                 VecDataType vdtype = step->dtype.as_vec();
                 VecR reg = create_vec_reg(vdtype);
                 switch (vdtype.elem) {
-                case VecElemType::I8: cc.vpbroadcastb(reg, ax86::byte_ptr(arg.gp)); break;
-                case VecElemType::I16: cc.vpbroadcastw(reg, ax86::word_ptr(arg.gp)); break;
-                case VecElemType::I32: cc.vpbroadcastd(reg, ax86::dword_ptr(arg.gp)); break;
-                case VecElemType::I64: cc.vpbroadcastq(reg, ax86::qword_ptr(arg.gp)); break;
-                case VecElemType::F32: cc.vbroadcastss(reg, ax86::dword_ptr(arg.gp)); break;
-                case VecElemType::F64: broadcast_f64(cc, reg, ax86::qword_ptr(arg.gp)); break;
+                case VecElemType::I8: cc.vpbroadcastb(reg, ax86::byte_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::I16: cc.vpbroadcastw(reg, ax86::word_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::I32: cc.vpbroadcastd(reg, ax86::dword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::I64: cc.vpbroadcastq(reg, ax86::qword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::F32: cc.vbroadcastss(reg, ax86::dword_ptr(arg.gp, (int32_t)data.byte_offset)); break;
+                case VecElemType::F64:
+                    broadcast_f64(cc, reg, ax86::qword_ptr(arg.gp, (int32_t)data.byte_offset));
+                    break;
                 }
                 return reg;
             }
@@ -2872,6 +3157,31 @@ struct CompileState {
                 vec_arith_binary(vdtype, data.op, result, data.left, data.right, data.right != data.left,
                                  mask_pushdown);
 
+                return result;
+            }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                VecDataType vdtype = step->dtype.as_vec();
+
+                if (SIMJIT_X64_ASMJIT_CONST_OPS && data.amount->is(StepKind::Const)) {
+                    VecR left = vec_subexpr(data.left);
+                    VecR right = vec_subexpr(data.right);
+                    VecR result = create_vec_reg(vdtype);
+                    aj::Imm imm = data.amount->step_data<StepKind::Const>().as_unsigned();
+                    vec_funnel_imm(cc, data.kind, vdtype.elem, result, left, right, imm);
+                    return result;
+                }
+                VecR left = vec_subexpr(data.left);
+                VecR right = vec_subexpr(data.right);
+                VecR result = create_vec_reg(vdtype);
+                cc.vmovdqa64(result, left);
+                if (data.amount->is(StepKind::Load) && should_inline_mem(data.amount)) {
+                    const auto &arg_data = data.amount->step_data<StepKind::Load>();
+                    ax86::Mem mem = vec_load_mem(arg_data.addr, vdtype);
+                    vec_funnel_var(cc, data.kind, vdtype.elem, result, right, mem);
+                    return result;
+                }
+                VecR amount = vec_subexpr(data.amount);
+                vec_funnel_var(cc, data.kind, vdtype.elem, result, right, amount);
                 return result;
             }
             SIMJIT_MATCH (StepKind::FMA) {
@@ -3748,6 +4058,63 @@ struct CompileState {
                 cc.add(acc, popcnt_gp.r64());
                 return {};
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                ArgInfo &info = args[data.dst];
+                require_acc_initialized(data.acc);
+                GpR acc = accs[mir_func->accs.index(data.acc)].as<GpR>();
+                VecR low = vec_subexpr(data.low);
+                VecR high = vec_subexpr(data.high);
+                MaskR cond = mask_subexpr(data.cond);
+                VecDataType dtype = step->dtype.as_vec();
+                if (dtype.elem != VecElemType::I64) { messed_up("i128 vector pack has non-i64 lanes"); }
+                const InterleaveIdxTable *table = interleave_table(dtype);
+                if (table == nullptr) { messed_up("missing i128 pack interleave table"); }
+                MaskDataType mdtype = data.cond->dtype.as_mask();
+                SIMJIT_ASSERT(mask_dtype_bits(mdtype) <= 8);
+                size_t half_width = dtype.nelems() / 2;
+                GpR cond_bits = cc.new_gp32();
+                mask_to_gp(cc, mdtype, cond_bits, cond);
+                GpR low_bits = cc.new_gp32();
+                GpR high_bits = cc.new_gp32();
+                cc.mov(low_bits, cond_bits);
+                cc.and_(low_bits, (1u << half_width) - 1);
+                cc.mov(high_bits, cond_bits);
+                cc.shr(high_bits, half_width);
+                // Do the counts before the independent vector permutes and compresses.
+                cc.popcnt(low_bits, low_bits);
+                cc.popcnt(high_bits, high_bits);
+                cc.add(high_bits.r64(), low_bits.r64());
+                cc.add(low_bits.r64(), low_bits.r64());
+
+                GpR deposit_mask = cc.new_gp32();
+                GpR duplicate_bits = cc.new_gp32();
+                cc.mov(deposit_mask, 0x55555555u);
+                // Deposit every condition bit into the first position of its pair, then x + 2*x
+                // duplicates every bit.  One widened mask holds the low and high packed masks.
+                cc.pdep(duplicate_bits, cond_bits, deposit_mask);
+                cc.lea(duplicate_bits, ax86::ptr(duplicate_bits, duplicate_bits, 1));
+                MaskR low_mask = create_mask_reg(MaskDataType::M16);
+                gp_to_mask(MaskDataType::M16, low_mask, duplicate_bits);
+                MaskR high_mask = create_mask_reg(MaskDataType::M16);
+                cc.kshiftrw(high_mask, low_mask, dtype.nelems());
+
+                VecR packed_low = create_vec_reg(dtype);
+                VecR packed_high = create_vec_reg(dtype);
+                cc.vmovdqu64(packed_low, low);
+                cc.vmovdqu64(packed_high, low);
+                vec_permute2(cc, packed_low, table->lo, high, dtype);
+                vec_permute2(cc, packed_high, table->hi, high, dtype);
+                cc.k(low_mask).vpcompressq(packed_low, packed_low);
+                cc.k(high_mask).vpcompressq(packed_high, packed_high);
+
+                GpR addr = cc.new_gp64();
+                cc.lea(addr, ax86::ptr(acc, acc, 0));
+                cc.lea(addr, ax86::ptr(info.gp, addr, 3));
+                cc.vmovdqu64(ax86::ptr(addr), packed_low);
+                cc.vmovdqu64(ax86::ptr(addr, low_bits.r64(), 3), packed_high);
+                cc.add(acc, high_bits.r64());
+                return {};
+            }
             SIMJIT_MATCH (StepKind::Scatter) {
                 VecDataType vdtype = step->dtype.as_vec();
                 const ArgInfo &arg_info = args[data.dst];
@@ -3882,6 +4249,92 @@ struct CompileState {
                 }
                 return result;
             }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask load-deinterleave"); }
+                if (data.lane_count != 2 || data.lane >= data.lane_count) {
+                    unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                VecDataType vdtype = step->dtype.as_vec();
+                const DeinterleaveIdxTable *table = deinterleave_table(vdtype);
+                if (table == nullptr) {
+                    unsupported("Unsupported %s load-deinterleave outside the main loop", show_vec_dtype(vdtype));
+                }
+                VecR lo = create_vec_reg(vdtype);
+                vec_mov(cc, lo, vec_pair_mem(data.addr, vdtype, 0), data.kind, vdtype);
+                VecR hi = create_vec_reg(vdtype);
+                vec_mov(cc, hi, vec_pair_mem(data.addr, vdtype, 1), data.kind, vdtype);
+
+                Step *partner = mir_func->interleave.by_argument[data.addr.arg].find_partner(step);
+                if (partner != nullptr) {
+                    VecR lo_copy = create_vec_reg(vdtype);
+                    cc.vmovdqa64(lo_copy, lo);
+                    vec_permute2(cc, lo_copy, table->even, hi, vdtype);
+                    vec_permute2(cc, lo, table->odd, hi, vdtype);
+                    step_map[partner->id] = data.lane == 0 ? lo : lo_copy;
+                    return data.lane == 0 ? lo_copy : lo;
+                }
+                vec_permute2(cc, lo, data.lane == 0 ? table->even : table->odd, hi, vdtype);
+                return lo;
+            }
+
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
+                VecDataType vdtype = step->dtype.as_vec();
+                const InterleaveIdxTable *table = interleave_table(vdtype);
+                if (table == nullptr) {
+                    unsupported("Unsupported %s store-interleave outside the main loop", show_vec_dtype(vdtype));
+                }
+                GpR base = args[data.dst.arg].gp;
+                VecR even = vec_subexpr(data.even);
+                VecR odd = vec_subexpr(data.odd);
+
+                VecR lo = create_vec_reg(vdtype);
+                VecR hi = create_vec_reg(vdtype);
+                cc.vmovdqa64(lo, even);
+                cc.vmovdqa64(hi, even);
+                vec_permute2(cc, lo, table->lo, odd, vdtype);
+                vec_permute2(cc, hi, table->hi, odd, vdtype);
+                if (data.cond == nullptr) {
+                    vec_mov(cc, vec_pair_mem(data.dst, vdtype, 0), lo, data.kind, vdtype);
+                    vec_mov(cc, vec_pair_mem(data.dst, vdtype, 1), hi, data.kind, vdtype);
+                    return {};
+                }
+
+                MaskR cond = mask_subexpr(data.cond);
+                MaskDataType mdtype = data.cond->dtype.as_mask();
+                size_t width = vdtype.nelems();
+                size_t half_width = width / 2;
+                GpR cond_bits = width > 32 ? cc.new_gp64() : cc.new_gp32();
+                mask_to_gp(cc, mdtype, cond_bits, cond);
+                GpR deposit_mask = width > 32 ? cc.new_gp64() : cc.new_gp32();
+                cc.mov(deposit_mask, 0x55555555u);
+                if (width > 32) {
+                    GpR upper = cc.new_gp64();
+                    cc.mov(upper, deposit_mask);
+                    cc.shl(upper, 32);
+                    cc.or_(deposit_mask, upper);
+                }
+                GpR src = width > 32 ? cc.new_gp64() : cc.new_gp32();
+                GpR expanded = width > 32 ? cc.new_gp64() : cc.new_gp32();
+                cc.mov(src, cond_bits);
+                // Deposit into each pair's first bit, then x + 2*x duplicates it for both stores.
+                cc.pdep(expanded, src, deposit_mask);
+                cc.lea(expanded, ax86::ptr(expanded, expanded, 1));
+                MaskR lo_cond = create_mask_reg(mdtype);
+                gp_to_mask(mdtype, lo_cond, expanded);
+
+                cc.mov(src, cond_bits);
+                cc.shr(src, half_width);
+                cc.pdep(expanded, src, deposit_mask);
+                cc.lea(expanded, ax86::ptr(expanded, expanded, 1));
+                MaskR hi_cond = create_mask_reg(mdtype);
+                gp_to_mask(mdtype, hi_cond, expanded);
+                cc.k(lo_cond);
+                vec_mov(cc, vec_pair_mem(data.dst, vdtype, 0), lo, data.kind, vdtype);
+                cc.k(hi_cond);
+                vec_mov(cc, vec_pair_mem(data.dst, vdtype, 1), hi, data.kind, vdtype);
+                return {};
+            }
         }
         SIMJIT_UNREACHABLE();
     }
@@ -3893,7 +4346,7 @@ struct CompileState {
         }
     }
 
-    bool prologue_root_is_delayed(Step *root) const {
+    bool prologue_root_is_delayed(const Step *root) const {
         if (!SIMJIT_X64_ASMJIT_DELAY_SCALAR_ACC_INIT) { return false; }
         if (!has_main_loop) { return false; }
         if (!root->is(StepKind::AccStore)) { return false; }
@@ -3944,6 +4397,8 @@ struct CompileState {
                     main_loop_acc_uses[mir_func->accs.index(x->step_data<StepKind::VecIndex>().acc)] = 1;
                 } else if (x->is(StepKind::Pack)) {
                     main_loop_acc_uses[mir_func->accs.index(x->step_data<StepKind::Pack>().acc)] = 1;
+                } else if (x->is(StepKind::Pack128)) {
+                    main_loop_acc_uses[mir_func->accs.index(x->step_data<StepKind::Pack128>().acc)] = 1;
                 } else if (x->is(StepKind::ScalarArithBinaryOverflow)) {
                     main_loop_acc_uses[mir_func->accs.index(
                         x->step_data<StepKind::ScalarArithBinaryOverflow>().overflow_flag)] = 1;
@@ -3981,7 +4436,8 @@ struct CompileState {
         spill_epilogue_args = !func->main_loop_roots.empty();
     }
 
-    void init_args(nonstd::span<ArgumentDecl const> func_args, aj::FuncNode *func_node) {
+    void init_args(nonstd::span<ArgumentDecl const> func_args, nonstd::span<const hir::ArgumentUsage> usages,
+                   aj::FuncNode *func_node) {
         func_node->set_arg(0, row_count);
 
         for (const ArgumentDecl &arg : func_args) {
@@ -3997,10 +4453,12 @@ struct CompileState {
             // these arguments came from stack, where we load them from stack just to put back again. But this should
             // not matter in performance sense, mostly because we do this stuff only once, and have no dependencies on
             // these values.
-            if (spill_epilogue_args && (arg.kind == ArgumentKind::DstSafetyCheck || arg.kind == ArgumentKind::DstAgg)) {
+            if (spill_epilogue_args && (bool(usages[arg.idx] & hir::ArgumentUsage::SafetyCheck) ||
+                                        bool(usages[arg.idx] & hir::ArgumentUsage::AggregateWrite))) {
                 ax86::Mem mem = cc.new_stack(8, 8);
                 cc.mov(mem, gp);
                 args[arg.idx].spilled = mem;
+                args[arg.idx].is_spilled = true;
             }
         }
     }
@@ -4035,7 +4493,7 @@ struct CompileState {
 
         for (auto it = func_args.rbegin(); it < func_args.rend(); ++it) {
             const ArgumentDecl &arg = *it;
-            if (arg.kind != ArgumentKind::DstSafetyCheck && arg.kind != ArgumentKind::DstAgg) { continue; }
+            if (!args[arg.idx].is_spilled) { continue; }
 
             // Allocate new virtual register instead of using old one.
             // Asmjit register allocator is very happy about this approach.
@@ -4069,9 +4527,12 @@ static void compile_asmjit(const mir::Function *func, ax86::Compiler &cc) {
     func_node->frame().set_avx_cleanup();
 
     CompileState state{func->ctx->arena, cc};
+    const auto &usages = func->source_hir->argument_usage;
     state.init(func);
-    state.init_args(func->args, func_node);
+    state.init_args(func->args, usages, func_node);
     state.init_accs(func->prologue_roots);
+    state.prepare_deinterleave_tables();
+    state.prepare_interleave_tables();
     bool has_delayed_prologue = state.has_delayed_prologue_steps(func->prologue_roots);
     aj::Label delayed_prologue_label{};
     if (has_delayed_prologue) {
@@ -4085,6 +4546,7 @@ static void compile_asmjit(const mir::Function *func, ax86::Compiler &cc) {
     cc.xor_(state.counter, state.counter);
     cc.test(state.row_count, state.row_count);
     cc.je(has_delayed_prologue ? delayed_prologue_label : state.end_label);
+    state.load_interleave_tables();
 
     // Main loop
 

@@ -329,6 +329,7 @@ extern std::vector<Test> invalid_type_tests;
 extern std::vector<Test> invalid_builder_tests;
 extern std::vector<Test> misc_tests;
 extern std::vector<Test> ternarylogic_tests;
+extern std::vector<Test> interleaved_tests;
 
 inline void add_valid(std::vector<Test> &tests, FuncType builder,
                       const char *file = relative_test_file(__builtin_FILE()), int line = __builtin_LINE()) {

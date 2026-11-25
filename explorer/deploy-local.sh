@@ -169,7 +169,7 @@ discover_llvm_config() {
     printf '%s\n' "$LLVM_CONFIG"
     return 0
   fi
-  first_command llvm-config-22 llvm-config-21 llvm-config-20 llvm-config-19 llvm-config \
+  first_command llvm-config-23 llvm-config-22 llvm-config-21 llvm-config-20 llvm-config-19 llvm-config \
     || first_executable \
       /opt/homebrew/opt/llvm/bin/llvm-config \
       /opt/homebrew/bin/llvm-config \
@@ -183,7 +183,7 @@ discover_llvm_clang() {
     printf '%s\n' "$LLVM_CLANG"
     return 0
   fi
-  first_command clang-22 clang-21 clang-20 clang-19 clang \
+  first_command llvm-config-23 clang-22 clang-21 clang-20 clang-19 clang \
     || first_executable \
       /opt/homebrew/opt/llvm/bin/clang \
       /opt/homebrew/bin/clang \

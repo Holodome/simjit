@@ -350,6 +350,7 @@ struct X86CppEmitter : CppEmitterBase {
     };
 
     static std::optional<ZeroCompareTestArgs> zero_compare_test_args(const Step *step) {
+        SIMJIT_ASSERT(step != nullptr);
         if (!step->is(StepKind::Compare) || !step->dtype.is_mask()) { return std::nullopt; }
         const auto &data = step->step_data<StepKind::Compare>();
         if (data.op != CmpOp::Equal && data.op != CmpOp::NotEqual) { return std::nullopt; }
@@ -919,14 +920,19 @@ struct X86CppEmitter : CppEmitterBase {
 
         if (arg->is(StepKind::LoadSplat)) {
             const auto &data = arg->step_data<StepKind::LoadSplat>();
-            if (arg->dtype.is_scalar()) { return format("*arg%zu", data.addr.arg); }
+            if (arg->dtype.is_scalar()) {
+                return format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(arg->dtype), data.addr.arg,
+                              data.byte_offset);
+            }
             if (arg->dtype.is_mask()) {
-                return format("(*arg%zu & 1) ? %s : 0", data.addr.arg, mask_all_ones(arg->dtype.as_mask()));
+                return format("(*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0", data.addr.arg,
+                              data.byte_offset, mask_all_ones(arg->dtype.as_mask()));
             }
 
             VecDataType dtype = arg->dtype.as_vec();
             const auto &intrin = x86::set1_map.lookup(dtype);
-            return unsafe_intrin_call(intrin, format("*arg%zu", data.addr.arg));
+            return unsafe_intrin_call(intrin, format("*(const %s *)((const char *)arg%zu + %zu)",
+                                                     cpp_dtype(dtype.to_scalar()), data.addr.arg, data.byte_offset));
         }
 
         SIMJIT_UNREACHABLE();
@@ -1020,51 +1026,21 @@ struct X86CppEmitter : CppEmitterBase {
         return std::nullopt;
     }
 
-    std::string store_sum128_to_cpp(const StoreSum128Data &data) override {
-        std::string result = "{\n"
-                             "uint64_t sum128_low = 0;\n"
-                             "uint64_t sum128_carry = 0;\n"
-                             "uint64_t sum128_prev = 0;\n";
-        size_t low_idx = 0;
-        for (auto *low : data.low_steps) {
-            if (low->dtype.is_vec()) {
-                VecDataType vdtype = low->dtype.as_vec();
-                std::string values = format("sum128_values_%zu", low_idx++);
-                const auto &storeu = x86::storeu_map.lookup(vdtype);
-                format_to(result, "alignas(64) uint64_t %s[%zu];\n", values.c_str(), vdtype.nelems());
-                result +=
-                    unsafe_intrin_call(storeu, format("(%s *)%s", dtype_to_cpp(vdtype), values.c_str()), show(low)) +
-                    ";\n";
-                format_to(result,
-                          "for (size_t sum128_i = 0; "
-                          "sum128_i < %zu; "
-                          "++sum128_i) {\n"
-                          "sum128_prev = sum128_low;\n"
-                          "sum128_low += %s[sum128_i];\n"
-                          "sum128_carry += (sum128_low < sum128_prev);\n"
-                          "}\n",
-                          vdtype.nelems(), //
-                          values.c_str());
-                continue;
-            }
-            format_to(result,
-                      "sum128_prev = sum128_low;\n"
-                      "sum128_low += (uint64_t)%s;\n"
-                      "sum128_carry += (sum128_low < sum128_prev);\n",
-                      show_scalar_operand(low));
-        }
-        format_to(result,
-                  "__int128 sum128_hi = (__int128)%s + "
-                  "(__int128)sum128_carry;\n"
-                  "*arg%zu = (sum128_hi << 64) + "
-                  "(unsigned __int128)sum128_low;\n",
-                  show_scalar_operand(data.hi_combined), //
-                  data.dst);
-        result += "}";
-        return result;
+    std::string vec_extract_to_cpp(const Step *step, const VecExtractData &data) {
+        VecDataType dtype = data.arg->dtype.as_vec();
+        SIMJIT_ASSERT(dtype.elem == VecElemType::I64 && data.lane < dtype.nelems());
+        std::string values = format("vec_extract_values_%u", step->id);
+        const auto &storeu = x86::storeu_map.lookup(dtype);
+        return format("alignas(64) uint64_t %s[%zu];\n", values.c_str(), dtype.nelems()) +
+               unsafe_intrin_call(storeu, format("(%s *)%s", dtype_to_cpp(dtype), values.c_str()), show(data.arg)) +
+               format(";\n%s(int64_t)%s[%u]", cpp_var_decl(step).c_str(), values.c_str(), data.lane);
     }
 
     std::string backend_step_to_cpp(const Step *step, const MaskPushdownInfo *mask_pushdown) override {
+        if (step->is(StepKind::VecExtract)) {
+            SIMJIT_ASSERT(mask_pushdown == nullptr);
+            return vec_extract_to_cpp(step, step->step_data<StepKind::VecExtract>());
+        }
         const Step *result_step = mask_pushdown == nullptr ? step : mask_pushdown->result;
         SIMJIT_ASSERT(step->dtype == result_step->dtype);
         if (step->dtype.is_scalar() && is_scalar_step(step->kind)) { return scalar_step_to_cpp(step); }
@@ -1073,17 +1049,22 @@ struct X86CppEmitter : CppEmitterBase {
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
-        case StepKind::StoreSum128:
+        case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             messed_up("this is scalar instruction");
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 if (step->dtype.is_mask()) {
-                    return cpp_var_decl(step) +
-                           format("(*arg%zu & 1) ? %s : 0", data.addr.arg, mask_all_ones(step->dtype.as_mask()));
+                    return cpp_var_decl(step) + format("(*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0",
+                                                       data.addr.arg, data.byte_offset,
+                                                       mask_all_ones(step->dtype.as_mask()));
                 }
                 VecDataType dtype = step->dtype.as_vec();
                 const auto &intrin = x86::set1_map.lookup(dtype);
-                return cpp_var_decl(step) + unsafe_intrin_call(intrin, format("*arg%zu", data.addr.arg));
+                return cpp_var_decl(step) +
+                       unsafe_intrin_call(intrin,
+                                          format("*(const %s *)((const char *)arg%zu + %zu)",
+                                                 cpp_dtype(dtype.to_scalar()), data.addr.arg, data.byte_offset));
             }
             SIMJIT_MATCH (StepKind::Const) {
                 if (step->dtype.is_mask()) {
@@ -1180,6 +1161,115 @@ struct X86CppEmitter : CppEmitterBase {
                 }
                 return cpp_var_decl(step) +
                        unsafe_intrin_call(intrin, format("arg%zu + i%s", data.addr.arg, offset_str.c_str()));
+            }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask load-deinterleave"); }
+                if (data.lane_count != 2 || data.lane >= data.lane_count) {
+                    unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                VecDataType vdtype = step->dtype.as_vec();
+                size_t width = vdtype.nelems();
+                const ArgumentDecl &arg = func->args[data.addr.arg];
+                const auto &loadu = x86::loadu_map.lookup(vdtype);
+                const auto &permute = x86::permutex2var_map.lookup(vdtype);
+                std::string half_ptr = cpp_dtype(vdtype.to_scalar());
+                size_t stride = scalar_dtype_size(arg.dtype);
+                std::string lo = unsafe_intrin_call(loadu, format("(const %s *)((const char *)arg%zu + i * %zu + %zu)",
+                                                                  half_ptr.c_str(), data.addr.arg, stride,
+                                                                  data.addr.offset * stride));
+                std::string hi = unsafe_intrin_call(
+                    loadu, format("(const %s *)((const char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.addr.arg,
+                                  stride, data.addr.offset * stride + width * vdtype.element_size_bytes()));
+
+                size_t esz = vdtype.element_size_bytes();
+                size_t reg_bytes = vdtype.size_bytes();
+                const char *set_name =
+                    x86::vec_to_x86(vdtype).reg == x86::VecRegisterKind::XMM
+                        ? "_mm_set_epi64x"
+                        : (x86::vec_to_x86(vdtype).reg == x86::VecRegisterKind::YMM ? "_mm256_set_epi64x"
+                                                                                    : "_mm512_set_epi64");
+                std::string idx = format("%s(", set_name);
+                size_t qwords = reg_bytes / 8;
+                for (size_t qi = 0; qi < qwords; ++qi) {
+                    size_t q = qwords - 1 - qi;
+                    uint64_t chunk = 0;
+                    for (size_t byte = 0; byte < 8; ++byte) {
+                        size_t pos = q * 8 + byte;
+                        chunk |= uint64_t(((2 * (pos / esz) + data.lane) >> (8 * (pos % esz))) & 0xff) << (8 * byte);
+                    }
+                    if (qi != 0) { idx += ", "; }
+                    simjit::format_to(idx, "0x%016llxull", (unsigned long long)chunk);
+                }
+                idx += ')';
+                return cpp_var_decl(step) + unsafe_intrin_call(permute, lo, idx, hi);
+            }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                VecDataType vdtype = step->dtype.as_vec();
+                if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
+                const ArgumentDecl &arg = func->args[data.dst.arg];
+                const auto &permute = x86::permutex2var_map.lookup(vdtype);
+                const auto &storeu =
+                    (data.kind == LoadStoreKind::Aligned ? x86::storea_map : x86::storeu_map).lookup(vdtype);
+                size_t width = vdtype.nelems();
+                size_t esz = vdtype.element_size_bytes();
+                size_t reg_bytes = vdtype.size_bytes();
+                size_t half_width = width / 2;
+                const char *set_name =
+                    x86::vec_to_x86(vdtype).reg == x86::VecRegisterKind::XMM
+                        ? "_mm_set_epi64x"
+                        : (x86::vec_to_x86(vdtype).reg == x86::VecRegisterKind::YMM ? "_mm256_set_epi64x"
+                                                                                    : "_mm512_set_epi64");
+                auto interleave_idx = [=](size_t parity_base) {
+                    std::string idx = format("%s(", set_name);
+                    size_t qwords = reg_bytes / 8;
+                    for (size_t qi = 0; qi < qwords; ++qi) {
+                        size_t q = qwords - 1 - qi;
+                        uint64_t chunk = 0;
+                        for (size_t byte = 0; byte < 8; ++byte) {
+                            size_t pos = q * 8 + byte;
+                            size_t k = pos / esz;
+                            size_t value = (k % 2 == 0) ? parity_base + k / 2 : half_width + parity_base + (k - 1) / 2;
+                            chunk |= uint64_t((value >> (8 * (pos % esz))) & 0xff) << (8 * byte);
+                        }
+                        if (qi != 0) { idx += ", "; }
+                        simjit::format_to(idx, "0x%016llxull", (unsigned long long)chunk);
+                    }
+                    return idx + ")";
+                };
+                std::string idx_lo = interleave_idx(0);
+                std::string idx_hi = interleave_idx(half_width);
+                std::string lo = unsafe_intrin_call(permute, show(data.even), idx_lo, show(data.odd));
+                std::string hi = unsafe_intrin_call(permute, show(data.even), idx_hi, show(data.odd));
+                size_t stride = scalar_dtype_size(arg.dtype);
+                std::string half_ptr = cpp_dtype(vdtype.to_scalar());
+                std::string lo_ptr = format("(%s *)((char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.dst.arg,
+                                            stride, data.dst.offset * stride);
+                std::string hi_ptr = format("(%s *)((char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.dst.arg,
+                                            stride, data.dst.offset * stride + width * esz);
+                if (data.cond != nullptr) {
+                    uint64_t even_bits = UINT64_C(0x5555555555555555);
+                    if (width < 64) even_bits &= (uint64_t{1} << width) - 1;
+                    const auto &mask_storeu =
+                        (data.kind == LoadStoreKind::Aligned ? x86::mask_storea_map : x86::mask_storeu_map)
+                            .lookup(vdtype);
+                    const auto &pdep = x86::pdep_map.lookup(width > 32 ? ScalarDataType::I64 : ScalarDataType::I32);
+                    std::string mask_type = cpp_dtype(data.cond->dtype);
+                    const char *bits_type = width > 32 ? "uint64_t" : "uint32_t";
+                    std::string deposit_mask =
+                        format(width > 32 ? "0x%llxull" : "0x%llxu", (unsigned long long)even_bits);
+                    std::string lo_pdep =
+                        unsafe_intrin_call(pdep, format("(%s)%s", bits_type, show(data.cond)), deposit_mask);
+                    std::string hi_pdep = unsafe_intrin_call(
+                        pdep, format("(%s)%s >> %zu", bits_type, show(data.cond), half_width), deposit_mask);
+                    std::string lo_cond = format("(%s)(%s * 3)", mask_type.c_str(), lo_pdep.c_str());
+                    std::string hi_cond = format("(%s)(%s * 3)", mask_type.c_str(), hi_pdep.c_str());
+                    std::string result = unsafe_intrin_call(mask_storeu, lo_ptr, lo_cond, lo);
+                    result += ";\n" + unsafe_intrin_call(mask_storeu, hi_ptr, hi_cond, hi) + ";";
+                    return result;
+                }
+                std::string result = unsafe_intrin_call(storeu, lo_ptr, lo);
+                result += ";\n" + unsafe_intrin_call(storeu, hi_ptr, hi) + ";";
+                return result;
             }
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 VecDataType vdtype = step->dtype.as_vec();
@@ -1397,17 +1487,40 @@ struct X86CppEmitter : CppEmitterBase {
 
                 return result;
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                VecDataType vdtype = step->dtype.as_vec();
+                size_t id = step->id;
+                std::string result = format("{\nint64_t pack_low_%zu[%zu];\nint64_t pack_high_%zu[%zu];\n", id,
+                                            vdtype.nelems(), id, vdtype.nelems());
+                const auto &storeu = x86::storeu_map.lookup(vdtype);
+                result += unsafe_intrin_call(storeu, format("pack_low_%zu", id), data.low) + ";\n";
+                result += unsafe_intrin_call(storeu, format("pack_high_%zu", id), data.high) + ";\n";
+                for (size_t lane = 0; lane < vdtype.nelems(); ++lane) {
+                    format_to(result,
+                              "if ((%s >> %zu) & 1) { size_t pack_pos_%zu_%zu = acc%zu++; ((int64_t *)arg%zu)[2 * "
+                              "pack_pos_%zu_%zu] = pack_low_%zu[%zu]; ((int64_t *)arg%zu)[2 * pack_pos_%zu_%zu + 1] = "
+                              "pack_high_%zu[%zu]; }\n",
+                              show(data.cond), lane, id, lane, func->accs.index(data.acc), data.dst, id, lane, id, lane,
+                              data.dst, id, lane, id, lane);
+                }
+                result += '}';
+                return result;
+            }
             SIMJIT_MATCH (StepKind::Gather) {
                 VecDataType vec_dtype = step->dtype.as_vec();
                 MaskDataType mdtype = vec_dtype.mask();
+                const ArgumentDecl &data_arg = func->args[data.data];
+                ScalarDataType element_dtype = vec_dtype.to_scalar();
+                std::string data_ptr = data_arg.dtype == element_dtype
+                                           ? format("arg%zu", data.data)
+                                           : format("(const %s *)arg%zu", cpp_dtype(element_dtype), data.data);
                 const auto &intrin = data.idx->dtype.as_vec().elem == VecElemType::I32
                                          ? x86::mask_i32gather_map.lookup(vec_dtype)
                                          : x86::mask_i64gather_map.lookup(vec_dtype);
 
                 if (mask_pushdown != nullptr && mask_pushdown->merge != nullptr) {
                     return cpp_var_decl(result_step) +
-                           unsafe_intrin_call(intrin, mask_pushdown->merge, mask_pushdown->mask, data.idx,
-                                              format("arg%zu", data.data),
+                           unsafe_intrin_call(intrin, mask_pushdown->merge, mask_pushdown->mask, data.idx, data_ptr,
                                               std::to_string(vec_dtype.element_size_bytes()));
                 }
 
@@ -1415,32 +1528,39 @@ struct X86CppEmitter : CppEmitterBase {
                     const auto &setzero_intrin = x86::setzero_map.lookup(vec_dtype);
                     return cpp_var_decl(result_step) +
                            unsafe_intrin_call(intrin, unsafe_intrin_call(setzero_intrin), mask_pushdown->mask, data.idx,
-                                              format("arg%zu", data.data),
-                                              std::to_string(vec_dtype.element_size_bytes()));
+                                              data_ptr, std::to_string(vec_dtype.element_size_bytes()));
                 }
 
                 const auto &undefined_intrin = x86::undefined_map.lookup(vec_dtype);
-                return cpp_var_decl(step) +
-                       unsafe_intrin_call(intrin, unsafe_intrin_call(undefined_intrin), mask_all_ones(mdtype), data.idx,
-                                          format("arg%zu", data.data), std::to_string(vec_dtype.element_size_bytes()));
+                return cpp_var_decl(step) + unsafe_intrin_call(intrin, unsafe_intrin_call(undefined_intrin),
+                                                               mask_all_ones(mdtype), data.idx, data_ptr,
+                                                               std::to_string(vec_dtype.element_size_bytes()));
             }
             SIMJIT_MATCH (StepKind::Scatter) {
                 VecDataType vdtype = step->dtype.as_vec();
                 const ArgumentDecl &data_arg = func->args[data.dst];
+                ScalarDataType element_dtype = vdtype.to_scalar();
                 const auto &intrin = data.idx->dtype.as_vec().elem == VecElemType::I32
                                          ? x86::i32scatter_map.lookup(vdtype)
                                          : x86::i64scatter_map.lookup(vdtype);
                 auto caller =
-                    typecheck_intrin_call(intrin, step, data_arg.dtype, data.idx, data.arg, ScalarDataType::I32);
-                return caller.call(format("arg%zu", data.dst), data.idx, data.arg,
-                                   std::to_string(vdtype.element_size_bytes()));
+                    typecheck_intrin_call(intrin, step, element_dtype, data.idx, data.arg, ScalarDataType::I32);
+                std::string dst = data_arg.dtype == element_dtype
+                                      ? format("arg%zu", data.dst)
+                                      : format("(%s *)arg%zu", cpp_dtype(element_dtype), data.dst);
+                return caller.call(dst, data.idx, data.arg, std::to_string(vdtype.element_size_bytes()));
             }
             SIMJIT_MATCH (StepKind::CondScatter) {
                 VecDataType vdtype = step->dtype.as_vec();
+                const ArgumentDecl &data_arg = func->args[data.dst];
+                ScalarDataType element_dtype = vdtype.to_scalar();
                 const auto &intrin = data.idx->dtype.as_vec().elem == VecElemType::I32
                                          ? x86::mask_i32scatter_map.lookup(vdtype)
                                          : x86::mask_i64scatter_map.lookup(vdtype);
-                return unsafe_intrin_call(intrin, format("arg%zu", data.dst), data.cond, data.idx, data.arg,
+                std::string dst = data_arg.dtype == element_dtype
+                                      ? format("arg%zu", data.dst)
+                                      : format("(%s *)arg%zu", cpp_dtype(element_dtype), data.dst);
+                return unsafe_intrin_call(intrin, dst, data.cond, data.idx, data.arg,
                                           std::to_string(vdtype.element_size_bytes()));
             }
             SIMJIT_MATCH (StepKind::Compare) {
@@ -1727,6 +1847,11 @@ __m128i reduced128_1_%u = _mm_xor_si128(%s, shifted64_%u);
                 const auto &intrin = x86::ternarylogic_map.lookup(data.lookup_type);
                 return cpp_var_decl(step) +
                        unsafe_intrin_call(intrin, data.a, data.b, data.c, std::to_string(data.fun));
+            }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                const auto &intrin = (data.kind == FunnelShiftKind::Left ? x86::funnel_left_map : x86::funnel_right_map)
+                                         .lookup(step->dtype.as_vec());
+                return call_intrin_var(intrin, step, data.left, data.right, data.amount);
             }
             SIMJIT_MATCH (StepKind::VecConst) {
                 VecDataType vdtype = step->dtype.as_vec();

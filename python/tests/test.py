@@ -161,11 +161,23 @@ def test_unsigned_types_and_helpers_are_public():
     assert ir.U16.name == "u16"
     assert ir.U32.name == "u32"
     assert ir.U64.name == "u64"
+    assert ir.I128.name == "i128"
+    assert ir.U128.name == "u128"
     assert_is(expr, ir.ArithBinaryExpr, None)
     assert_is(signed, ir.IntCastExpr, ir.I32)
     assert signed.kind is ir.IntCastKind.Signed
     assert_is(unsigned, ir.IntCastExpr, ir.U32)
     assert unsigned.kind is ir.IntCastKind.Unsigned
+
+
+def test_i128_cast_helpers_are_public():
+    signed = sdf.i128(sdf.load("x", ir.I64)).to_dsl()
+    unsigned = sdf.u128(sdf.load("x", ir.U64)).to_dsl()
+
+    assert_is(signed, ir.IntCastExpr, ir.I128)
+    assert signed.kind is ir.IntCastKind.Cast
+    assert_is(unsigned, ir.IntCastExpr, ir.U128)
+    assert unsigned.kind is ir.IntCastKind.Cast
 
 
 def test_native_enums_are_imported_through_ir():

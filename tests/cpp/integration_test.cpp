@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <functional>
@@ -34,6 +35,37 @@ static hir::Step *single_stored_step(hir::Function *fn) {
     hir::Step *root = fn->step_roots[0];
     SIMJIT_ASSERT(root->is(hir::StepKind::Store));
     return root->step_data<hir::StepKind::Store>().what;
+}
+
+static void add_argument_usage_tests(std::vector<IntegrationTest> &tests) {
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "argument_usage", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument index_input = builder.arg(I32);
+        Argument table = builder.arg(I32);
+        Argument output = builder.arg(I32);
+        Value index = builder.add(builder.load(index_input), builder.i32(1));
+        builder.store(builder.gather(index, table), output);
+
+        const auto &usages = builder.build()->argument_usage;
+        SIMJIT_ASSERT(bool(usages[index_input.idx_] & hir::ArgumentUsage::BoundedIndex));
+        SIMJIT_ASSERT(bool(usages[table.idx_] & hir::ArgumentUsage::RandomRead));
+        SIMJIT_ASSERT(bool(usages[output.idx_] & hir::ArgumentUsage::SequentialWrite));
+    });
+
+#if SIMJIT_ENABLE_SERIALIZATION
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        FunctionBuilder builder{ctx};
+        bool rejected = false;
+        try {
+            deserialize("(func (args (arg 0 i32 src-arr)) (steps) (roots))", builder);
+        } catch (const SimjitException &) { rejected = true; }
+        SIMJIT_ASSERT(rejected);
+    });
+#endif
 }
 
 static void add_pack_tests(std::vector<IntegrationTest> &tests) {
@@ -69,7 +101,9 @@ static void add_checked_op_shape_tests(std::vector<IntegrationTest> &tests) {
 
             hir::Step *step = single_stored_step(builder.build());
             SIMJIT_ASSERT(step->is(hir::StepKind::CheckedOp));
-            hir::Step *operation = step->step_data<hir::StepKind::CheckedOp>().op;
+            const auto &checked_data = step->step_data<hir::StepKind::CheckedOp>();
+            SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Mul);
+            hir::Step *operation = checked_data.op;
             SIMJIT_ASSERT(operation->is(hir::StepKind::ArithBinary));
             SIMJIT_ASSERT(operation->step_data<hir::StepKind::ArithBinary>().op == ArithBinaryOp::Mul);
         });
@@ -89,7 +123,18 @@ static void add_checked_op_shape_tests(std::vector<IntegrationTest> &tests) {
 
             hir::Step *step = single_stored_step(builder.build());
             SIMJIT_ASSERT(step->is(hir::StepKind::CheckedOp));
-            hir::Step *operation = step->step_data<hir::StepKind::CheckedOp>().op;
+            const auto &checked_data = step->step_data<hir::StepKind::CheckedOp>();
+            switch (op) {
+            case ArithBinaryOp::Add: SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Add); break;
+            case ArithBinaryOp::Sub: SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Sub); break;
+            case ArithBinaryOp::Mul: SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Mul); break;
+            case ArithBinaryOp::ShiftLeftLogical:
+                SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::ShiftLeftLogical);
+                break;
+            case ArithBinaryOp::Div: SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Div); break;
+            default: SIMJIT_UNREACHABLE();
+            }
+            hir::Step *operation = checked_data.op;
             SIMJIT_ASSERT(operation->is(hir::StepKind::ArithBinary));
             const auto &arith = operation->step_data<hir::StepKind::ArithBinary>();
             SIMJIT_ASSERT(arith.op == op);
@@ -107,7 +152,9 @@ static void add_checked_op_shape_tests(std::vector<IntegrationTest> &tests) {
 
         hir::Step *step = single_stored_step(builder.build());
         SIMJIT_ASSERT(step->is(hir::StepKind::CheckedOp));
-        hir::Step *operation = step->step_data<hir::StepKind::CheckedOp>().op;
+        const auto &checked_data = step->step_data<hir::StepKind::CheckedOp>();
+        SIMJIT_ASSERT(checked_data.kind == hir::CheckedOpKind::Trunc);
+        hir::Step *operation = checked_data.op;
         SIMJIT_ASSERT(operation->is(hir::StepKind::IntCast));
         SIMJIT_ASSERT(operation->step_data<hir::StepKind::IntCast>().kind == IntCastKind::Trunc);
     });
@@ -132,7 +179,6 @@ static void add_checked_op_shape_tests(std::vector<IntegrationTest> &tests) {
     }
 }
 
-#if SIMJIT_LLVM_BACKEND
 template <typename Predicate> static bool mir_has_step(mir::Function *fn, Predicate predicate) {
     bool found = false;
     std::vector<uint8_t> state(fn->step_id_count);
@@ -156,6 +202,7 @@ static bool mir_has_arith_op(mir::Function *fn, ArithBinaryOp op) {
     });
 }
 
+#if SIMJIT_LLVM_BACKEND
 static size_t count_substrings(std::string_view haystack, std::string_view needle) {
     size_t result = 0;
     size_t pos = 0;
@@ -475,6 +522,421 @@ static void add_llvm_session_execution_tests(std::vector<IntegrationTest> &tests
     });
 
     tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_aggregate_shape", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument dst = builder.arg(I128);
+        builder.sum_if(builder.input_arg(I64), builder.input_predicate_arg(), dst);
+
+        hir::Function *hir = builder.build();
+        SIMJIT_ASSERT(hir->accs.size() == 1);
+        SIMJIT_ASSERT(hir->accs[0].agg_expr->is(hir::StepKind::AccI128));
+        const auto &agg = hir->accs[0].agg_expr->step_data<hir::StepKind::AccI128>();
+        SIMJIT_ASSERT(agg.op == ArithBinaryOp::Add);
+        SIMJIT_ASSERT(agg.low->dtype == I64 && agg.high->dtype == I64);
+
+        mir::Function *mir = lower_scalar(hir);
+        SIMJIT_ASSERT(mir->accs.group_offsets.size() == 2);
+        SIMJIT_ASSERT(mir->accs.group_offsets[1] == 2);
+        size_t i128_result_words = 0;
+        for (mir::Step *step : mir->epilogue_roots) {
+            if (!step->is(mir::StepKind::AggResult)) continue;
+            const auto &result = step->step_data<mir::StepKind::AggResult>();
+            if (result.dst != dst.idx_ || step->dtype != ScalarDataType::I64) continue;
+            SIMJIT_ASSERT(result.byte_offset == i128_result_words * 8);
+            ++i128_result_words;
+        }
+        SIMJIT_ASSERT(i128_result_words == 2);
+
+        mir::Function *vector_mir = lower_vectorized(hir);
+        SIMJIT_ASSERT(mir_has_step(vector_mir, [](mir::Step *step) { return step->is(mir::StepKind::VecExtract); }));
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_aggregate_pair_lowering", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Value value = builder.input_arg(I128);
+        builder.min_agg(value, builder.arg(I128));
+        builder.andnot_agg(value, builder.arg(I128));
+
+        hir::Function *hir = builder.build();
+        SIMJIT_ASSERT(hir->accs.size() == 2);
+        for (const hir::Accumulator &acc : hir->accs) {
+            SIMJIT_ASSERT(acc.agg_expr->is(hir::StepKind::AccI128));
+            const auto &agg = acc.agg_expr->step_data<hir::StepKind::AccI128>();
+            SIMJIT_ASSERT(agg.low->dtype == I64 && agg.high->dtype == I64);
+        }
+
+        mir::Function *scalar_mir = lower_scalar(hir);
+        SIMJIT_ASSERT(mir_has_step(scalar_mir, [](mir::Step *step) { return step->is(mir::StepKind::Compare); }));
+        SIMJIT_ASSERT(mir_has_step(scalar_mir, [](mir::Step *step) { return step->is(mir::StepKind::Select); }));
+        SIMJIT_ASSERT(mir_has_arith_op(scalar_mir, ArithBinaryOp::AndNot));
+
+        mir::Function *vector_mir = lower_vectorized(hir);
+        SIMJIT_ASSERT(mir_has_step(vector_mir, [](mir::Step *step) { return step->is(mir::StepKind::VecExtract); }));
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_to_float_fma_shape", CodeTransformations::All, Arch::Native};
+        auto has_positive_fma = [](mir::Function *mir) {
+            return mir_has_step(mir, [](mir::Step *step) {
+                return step->is(mir::StepKind::FMA) && step->step_data<mir::StepKind::FMA>().kind == mir::FmaKind::FMA;
+            });
+        };
+        auto has_float_mul_or_add = [](mir::Function *mir) {
+            return mir_has_step(mir, [](mir::Step *step) {
+                if (!step->is(mir::StepKind::ArithBinary)) { return false; }
+                const auto &data = step->step_data<mir::StepKind::ArithBinary>();
+                if (data.op != ArithBinaryOp::Mul && data.op != ArithBinaryOp::Add) { return false; }
+                return step->dtype.is_scalar() ? is_float_dtype(step->dtype.as_scalar())
+                                               : step->dtype.as_vec().is_float();
+            });
+        };
+
+        for (ScalarDataType dtype : {F32, F64}) {
+            for (bool is_unsigned : {false, true}) {
+                FunctionBuilder builder{ctx};
+                Argument src = builder.arg(I128);
+                builder.store(builder.float_cast(builder.load(src), dtype, is_unsigned), builder.arg(dtype));
+                hir::Function *hir = builder.build();
+
+                mir::Function *scalar_mir = lower_scalar(hir);
+                SIMJIT_ASSERT(has_positive_fma(scalar_mir));
+                SIMJIT_ASSERT(!has_float_mul_or_add(scalar_mir));
+
+                // Signed i128 to f32 vectorization is a recorded arm limitation.
+                if (dtype == F32 && !is_unsigned && ctx.arch == Arch::Arm64_NEON) { continue; }
+                mir::Function *vector_mir = lower_vectorized(hir);
+                SIMJIT_ASSERT(has_positive_fma(vector_mir));
+                SIMJIT_ASSERT(!has_float_mul_or_add(vector_mir));
+            }
+        }
+    });
+
+    tests.emplace_back([] {
+        using U128 = unsigned __int128;
+        constexpr size_t count = 9;
+        constexpr U128 all_ones = ~U128{0};
+        const U128 values[count] = {0,
+                                    1,
+                                    all_ones,
+                                    U128{1} << 63,
+                                    U128{1} << 64,
+                                    U128{1} << 127,
+                                    (U128{0x0123456789abcdefull} << 64) | 0xfedcba9876543210ull,
+                                    (U128{0x8000000000000000ull} << 64) | 7,
+                                    (U128{0x7fffffffffffffffull} << 64) | all_ones};
+        const uint64_t low_counts[count] = {0, 1, 63, 64, 65, 127, 128, 129, uint64_t(-1)};
+        U128 counts[count]{};
+        for (size_t i = 0; i < count; ++i) {
+            counts[i] = (U128{0x9e3779b97f4a7c15ull + i} << 64) | low_counts[i];
+        }
+
+        enum class Op : uint8_t {
+            ShiftLeft,
+            ShiftRightLogical,
+            ShiftRightArith,
+            RotateLeft,
+            RotateRight,
+            Multiply,
+        };
+        auto expected = [](Op op, U128 value, U128 count_value) {
+            size_t shift = (size_t)(count_value & 127);
+            switch (op) {
+            case Op::ShiftLeft: return value << shift;
+            case Op::ShiftRightLogical: return value >> shift;
+            case Op::ShiftRightArith: {
+                if (shift == 0) { return value; }
+                U128 result = value >> shift;
+                if ((value >> 127) != 0) { result |= all_ones << (128 - shift); }
+                return result;
+            }
+            case Op::RotateLeft: return shift == 0 ? value : (value << shift) | (value >> (128 - shift));
+            case Op::RotateRight: return shift == 0 ? value : (value >> shift) | (value << (128 - shift));
+            case Op::Multiply: return value * count_value;
+            }
+            SIMJIT_UNREACHABLE();
+        };
+
+        for (Op op : {Op::ShiftLeft, Op::ShiftRightLogical, Op::ShiftRightArith, Op::RotateLeft, Op::RotateRight,
+                      Op::Multiply}) {
+            MemoryArena arena;
+            Context ctx{arena, "i128_rewrite_execution", CodeTransformations::All, Arch::Native};
+            FunctionBuilder builder{ctx};
+            Argument value_arg = builder.arg(I128);
+            Argument count_arg = builder.arg(I128);
+            Value value = builder.load(value_arg);
+            Value rhs = builder.load(count_arg);
+            Argument dst_arg = builder.arg(I128);
+            switch (op) {
+            case Op::ShiftLeft: builder.store(builder.sll(value, rhs), dst_arg); break;
+            case Op::ShiftRightLogical: builder.store(builder.srl(value, rhs), dst_arg); break;
+            case Op::ShiftRightArith: builder.store(builder.sra(value, rhs), dst_arg); break;
+            case Op::RotateLeft: builder.store(builder.rotl(value, rhs), dst_arg); break;
+            case Op::RotateRight: builder.store(builder.rotr(value, rhs), dst_arg); break;
+            case Op::Multiply: builder.store(builder.mul(value, rhs), dst_arg); break;
+            }
+
+            U128 output[count]{};
+            void *args[] = {const_cast<U128 *>(values), counts, output};
+            llvm_backend::LLVMSession session{Arch::Native, LLVMOptLevel::O1};
+            void *fn = llvm_backend::compile_hir(builder.build(), session, jit::CompilePolicy::Vectorized);
+            jit::call_fn_ptr(fn, count, args);
+            for (size_t i = 0; i < count; ++i) {
+                SIMJIT_ASSERT(output[i] == expected(op, values[i], counts[i]));
+            }
+        }
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_splat_rewrite", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument src = builder.arg(I128);
+        builder.store(builder.load_splat(src, 16), builder.arg(I128));
+        hir::Function *function = builder.build();
+
+        SIMJIT_ASSERT(function->args[src.idx_].interleaved);
+        SIMJIT_ASSERT(function->args[src.idx_].interleaved_half_dtype == I64);
+        std::vector<size_t> offsets;
+        std::vector<uint8_t> state(function->step_id_count);
+        for (hir::Step *root : function->step_roots) {
+            hir::traverse_steps_postorder_unique(root, state, [&](hir::Step *step) {
+                SIMJIT_ASSERT(step->dtype != I128);
+                if (!step->is(hir::StepKind::LoadSplat)) { return; }
+                SIMJIT_ASSERT(step->dtype == I64);
+                offsets.push_back(step->step_data<hir::StepKind::LoadSplat>().byte_offset);
+            });
+        }
+        std::sort(offsets.begin(), offsets.end());
+        std::vector<size_t> expected_offsets{16, 24};
+        SIMJIT_ASSERT(offsets == expected_offsets);
+
+#if SIMJIT_ENABLE_SERIALIZATION
+        std::string serialized = serialize(function);
+        SIMJIT_ASSERT(serialized.find("load-splat i64 (arg 0) 16") != std::string::npos);
+        SIMJIT_ASSERT(serialized.find("load-splat i64 (arg 0) 24") != std::string::npos);
+#endif
+    });
+
+#if SIMJIT_ENABLE_SERIALIZATION
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "checked_i128_pair_shape", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        builder.arg_safety_check();
+        builder.store(builder.add_checked(builder.input_arg(I128), builder.input_arg(I128)), builder.arg(I128));
+        hir::Function *function = builder.build();
+        std::vector<uint8_t> state(function->step_id_count);
+        size_t checked_count = 0;
+        for (hir::Step *root : function->step_roots) {
+            hir::traverse_steps_postorder_unique(root, state, [&](hir::Step *step) {
+                SIMJIT_ASSERT(step->dtype != I128);
+                if (!step->is(hir::StepKind::CheckedOp)) { return; }
+                const auto &data = step->step_data<hir::StepKind::CheckedOp>();
+                if (data.kind != hir::CheckedOpKind::I128AddLow && data.kind != hir::CheckedOpKind::I128AddHigh) {
+                    return;
+                }
+                ++checked_count;
+                SIMJIT_ASSERT(data.partner != nullptr);
+                const auto &partner = data.partner->step_data<hir::StepKind::CheckedOp>();
+                SIMJIT_ASSERT(partner.partner == step);
+                SIMJIT_ASSERT(data.left_low != nullptr && data.left_high != nullptr);
+                SIMJIT_ASSERT(data.right_low != nullptr && data.right_high != nullptr);
+            });
+        }
+        SIMJIT_ASSERT(checked_count == 2);
+        std::string serialized = serialize(function);
+        MemoryArena roundtrip_arena;
+        Context roundtrip_ctx{roundtrip_arena, "checked_i128_pair_shape", CodeTransformations::All, Arch::Native};
+        FunctionBuilder roundtrip{roundtrip_ctx};
+        deserialize(serialized, roundtrip);
+        (void)roundtrip.build();
+    });
+
+    tests.emplace_back([] {
+        MemoryArena source_arena;
+        Context source_ctx{source_arena, "checked_i128_div_serialize", CodeTransformations::All, Arch::Native};
+        FunctionBuilder source{source_ctx};
+        source.arg_safety_check();
+        Argument numerator = source.arg(I128);
+        Argument denominator = source.arg(I128);
+        source.store(source.mod_checked(source.load(numerator), source.load(denominator)), source.arg(I128));
+        std::string serialized = serialize(source.build());
+
+        MemoryArena roundtrip_arena;
+        Context roundtrip_ctx{roundtrip_arena, "checked_i128_div_serialize", CodeTransformations::All, Arch::Native};
+        FunctionBuilder roundtrip{roundtrip_ctx};
+        deserialize(serialized, roundtrip);
+        hir::Function *function = roundtrip.build();
+        std::vector<uint8_t> state(function->step_id_count);
+        for (hir::Step *root : function->step_roots) {
+            hir::traverse_steps_postorder_unique(root, state, [](hir::Step *step) {
+                SIMJIT_ASSERT(step->dtype != I128);
+                if (step->is(hir::StepKind::CheckedOp)) {
+                    SIMJIT_ASSERT(step->step_data<hir::StepKind::CheckedOp>().kind == hir::CheckedOpKind::I128Div);
+                }
+            });
+        }
+        (void)lower_scalar(function);
+    });
+#endif
+
+    tests.emplace_back([] {
+        using U128 = unsigned __int128;
+        constexpr size_t count = 7;
+        const U128 values[count] = {0,
+                                    1,
+                                    ~U128{0},
+                                    U128{1} << 64,
+                                    U128{1} << 127,
+                                    (U128{1} << 64) - 1,
+                                    (U128{0x123456789abcdef0ull} << 64) | 0xfedcba9876543210ull};
+        float signed_f32[count]{};
+        float unsigned_f32[count]{};
+        double signed_f64[count]{};
+        double unsigned_f64[count]{};
+
+        MemoryArena arena;
+        Context ctx{arena, "i128_float_to_float", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument value_arg = builder.arg(I128);
+        Argument signed_f32_arg = builder.arg(F32);
+        Argument unsigned_f32_arg = builder.arg(F32);
+        Argument signed_f64_arg = builder.arg(F64);
+        Argument unsigned_f64_arg = builder.arg(F64);
+        Value value = builder.load(value_arg);
+        builder.store(builder.float_cast(value, F32), signed_f32_arg);
+        builder.store(builder.float_cast(value, F32, true), unsigned_f32_arg);
+        builder.store(builder.float_cast(value, F64), signed_f64_arg);
+        builder.store(builder.float_cast(value, F64, true), unsigned_f64_arg);
+
+        void *args[] = {const_cast<U128 *>(values), signed_f32, unsigned_f32, signed_f64, unsigned_f64};
+        llvm_backend::LLVMSession session{Arch::Native, LLVMOptLevel::O1};
+        void *fn = llvm_backend::compile_hir(builder.build(), session, jit::CompilePolicy::Scalar);
+        jit::call_fn_ptr(fn, count, args);
+
+        for (size_t i = 0; i < count; ++i) {
+            auto magnitude = [](U128 value) { return (value >> 127) != 0 ? U128{0} - value : value; };
+            auto signed_f32_expected = [magnitude](U128 value) {
+                float result = float(uint64_t(magnitude(value) >> 64)) * 0x1p64f + float(uint64_t(magnitude(value)));
+                return (value >> 127) != 0 ? -result : result;
+            };
+            auto unsigned_f32_expected = [](U128 value) {
+                return float(uint64_t(value >> 64)) * 0x1p64f + float(uint64_t(value));
+            };
+            auto signed_f64_expected = [magnitude](U128 value) {
+                double result = double(uint64_t(magnitude(value) >> 64)) * 0x1p64 + double(uint64_t(magnitude(value)));
+                return (value >> 127) != 0 ? -result : result;
+            };
+            auto unsigned_f64_expected = [](U128 value) {
+                return double(uint64_t(value >> 64)) * 0x1p64 + double(uint64_t(value));
+            };
+            SIMJIT_ASSERT(signed_f32[i] == signed_f32_expected(values[i]));
+            SIMJIT_ASSERT(unsigned_f32[i] == unsigned_f32_expected(values[i]));
+            SIMJIT_ASSERT(signed_f64[i] == signed_f64_expected(values[i]));
+            SIMJIT_ASSERT(unsigned_f64[i] == unsigned_f64_expected(values[i]));
+        }
+    });
+
+    tests.emplace_back([] {
+        using U128 = unsigned __int128;
+        constexpr size_t count = 6;
+        const float signed_f32_values[count] = {0.0f, 1.75f, -1.75f, -0x1p64f, 0x1p64f, -0x1p80f};
+        const float unsigned_f32_values[count] = {0.0f, 1.75f, 0x1p64f, 0x1p80f, 0x1p96f, 0x1p120f};
+        const double signed_f64_values[count] = {0.0, 1.75, -1.75, -0x1p64, 0x1p64, -0x1p80};
+        const double unsigned_f64_values[count] = {0.0, 1.75, 0x1p64, 0x1p80, 0x1p96, 0x1p120};
+        U128 signed_f32[count]{};
+        U128 unsigned_f32[count]{};
+        U128 signed_f64[count]{};
+        U128 unsigned_f64[count]{};
+
+        MemoryArena arena;
+        Context ctx{arena, "float_to_i128", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument signed_f32_input = builder.arg(F32);
+        Argument unsigned_f32_input = builder.arg(F32);
+        Argument signed_f64_input = builder.arg(F64);
+        Argument unsigned_f64_input = builder.arg(F64);
+        Argument signed_f32_output = builder.arg(I128);
+        Argument unsigned_f32_output = builder.arg(I128);
+        Argument signed_f64_output = builder.arg(I128);
+        Argument unsigned_f64_output = builder.arg(I128);
+        builder.store(builder.float_cast(builder.load(signed_f32_input), I128), signed_f32_output);
+        builder.store(builder.float_cast(builder.load(unsigned_f32_input), I128, true), unsigned_f32_output);
+        builder.store(builder.float_cast(builder.load(signed_f64_input), I128), signed_f64_output);
+        builder.store(builder.float_cast(builder.load(unsigned_f64_input), I128, true), unsigned_f64_output);
+
+        void *args[] = {const_cast<float *>(signed_f32_values),
+                        const_cast<float *>(unsigned_f32_values),
+                        const_cast<double *>(signed_f64_values),
+                        const_cast<double *>(unsigned_f64_values),
+                        signed_f32,
+                        unsigned_f32,
+                        signed_f64,
+                        unsigned_f64};
+        llvm_backend::LLVMSession session{Arch::Native, LLVMOptLevel::O1};
+        void *fn = llvm_backend::compile_hir(builder.build(), session, jit::CompilePolicy::Scalar);
+        jit::call_fn_ptr(fn, count, args);
+
+        auto f32_unsigned = [](float value) {
+            uint64_t high = uint64_t(value * 0x1p-64f);
+            uint64_t low = uint64_t(value - float(high) * 0x1p64f);
+            return (U128{high} << 64) | low;
+        };
+        auto f64_unsigned = [](double value) {
+            uint64_t high = uint64_t(value * 0x1p-64);
+            uint64_t low = uint64_t(value - double(high) * 0x1p64);
+            return (U128{high} << 64) | low;
+        };
+        for (size_t i = 0; i < count; ++i) {
+            U128 expected_signed_f32 = signed_f32_values[i] < 0 ? U128{0} - f32_unsigned(-signed_f32_values[i])
+                                                                : f32_unsigned(signed_f32_values[i]);
+            U128 expected_signed_f64 = signed_f64_values[i] < 0 ? U128{0} - f64_unsigned(-signed_f64_values[i])
+                                                                : f64_unsigned(signed_f64_values[i]);
+            SIMJIT_ASSERT(signed_f32[i] == expected_signed_f32);
+            SIMJIT_ASSERT(unsigned_f32[i] == f32_unsigned(unsigned_f32_values[i]));
+            SIMJIT_ASSERT(signed_f64[i] == expected_signed_f64);
+            SIMJIT_ASSERT(unsigned_f64[i] == f64_unsigned(unsigned_f64_values[i]));
+        }
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena, "i128_shift_scalar_lowering", CodeTransformations::All, Arch::Native};
+        FunctionBuilder builder{ctx};
+        Argument value_arg = builder.arg(I128);
+        Argument dst_arg = builder.arg(I128);
+        builder.store(builder.sll(builder.load(value_arg), builder.con(13, I128)), dst_arg);
+        mir::Function *fixed = lower_scalar(builder.build());
+        bool saw_fixed_funnel = false;
+        bool fixed_counts_are_valid = true;
+        mir_has_step(fixed, [&](mir::Step *step) {
+            if (!step->is(mir::StepKind::FunnelShift)) { return false; }
+            const auto &data = step->step_data<mir::StepKind::FunnelShift>();
+            saw_fixed_funnel = true;
+            fixed_counts_are_valid &= data.amount->is(mir::StepKind::Const) &&
+                                      data.amount->step_data<mir::StepKind::Const>().as_unsigned() < 64;
+            return false;
+        });
+        SIMJIT_ASSERT(saw_fixed_funnel && fixed_counts_are_valid);
+
+        MemoryArena variable_arena;
+        Context variable_ctx{variable_arena, "i128_shift_scalar_lowering", CodeTransformations::All, Arch::Native};
+        FunctionBuilder variable_builder{variable_ctx};
+        Argument variable_value = variable_builder.arg(I128);
+        Argument variable_count = variable_builder.arg(I128);
+        variable_builder.store(
+            variable_builder.sll(variable_builder.load(variable_value), variable_builder.load(variable_count)),
+            variable_builder.arg(I128));
+        mir::Function *variable = lower_scalar(variable_builder.build());
+        SIMJIT_ASSERT(mir_has_arith_op(variable, ArithBinaryOp::ShiftLeftLogical));
+        SIMJIT_ASSERT(mir_has_step(variable, [](mir::Step *step) { return step->is(mir::StepKind::FunnelShift); }));
+    });
+
+    tests.emplace_back([] {
         llvm_backend::LLVMSession session{Arch::Native, LLVMOptLevel::O1};
         expect_exception([&] { (void)llvm_backend::compile_ir("not llvm ir", "expr", session); });
     });
@@ -567,6 +1029,86 @@ static void add_commutative_cse_tests(std::vector<IntegrationTest> &tests) {
         SIMJIT_ASSERT(first.step_ != second.step_);
 
         local.store(second, local.arg(I32));
+    });
+}
+
+static void add_i128_hir_peephole_shape_tests(std::vector<IntegrationTest> &tests) {
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        FunctionBuilder local{ctx};
+
+        Value x = local.input_arg(I128);
+        Value zero = local.con(0, I128);
+        Value ones = local.con(-1, I128);
+        SIMJIT_ASSERT(local.add(x, zero).step_ == x.step_);
+        SIMJIT_ASSERT(local.sub(x, zero).step_ == x.step_);
+        SIMJIT_ASSERT(local.mul(x, zero).step_ == zero.step_);
+        SIMJIT_ASSERT(local.mul(x, local.con(1, I128)).step_ == x.step_);
+        SIMJIT_ASSERT(local.div(x, local.con(1, I128)).step_ == x.step_);
+        SIMJIT_ASSERT(local.and_(x, ones).step_ == x.step_);
+        SIMJIT_ASSERT(local.or_(x, zero).step_ == x.step_);
+        SIMJIT_ASSERT(local.xor_(x, zero).step_ == x.step_);
+        SIMJIT_ASSERT(local.sll(x, zero).step_ == x.step_);
+
+        Value self_xor = local.xor_(x, x);
+        SIMJIT_ASSERT(self_xor.step_->is(hir::StepKind::Const));
+        SIMJIT_ASSERT(self_xor.step_->dtype == I128);
+        SIMJIT_ASSERT(is_const_zero(self_xor.step_));
+
+        SIMJIT_ASSERT(is_const_i1(local.cmp_eq(x, x).step_, true));
+        SIMJIT_ASSERT(is_const_i1(local.cmp_ne(x, x).step_, false));
+        SIMJIT_ASSERT(is_const_i1(local.cmp_uge(x, zero).step_, true));
+        SIMJIT_ASSERT(is_const_i1(local.cmp_ult(x, zero).step_, false));
+        local.store(self_xor, local.arg(I128));
+        (void)local.build();
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        FunctionBuilder local{ctx};
+
+        Value x = local.input_arg(I128);
+        Value y = local.input_arg(I128);
+        Value result = x;
+        for (ArithBinaryOp op :
+             {ArithBinaryOp::Add, ArithBinaryOp::Mul, ArithBinaryOp::Min, ArithBinaryOp::Max, ArithBinaryOp::UMin,
+              ArithBinaryOp::UMax, ArithBinaryOp::And, ArithBinaryOp::Or, ArithBinaryOp::Xor}) {
+            Value xy = local.arith_binary(x, y, op);
+            Value yx = local.arith_binary(y, x, op);
+            SIMJIT_ASSERT(xy.step_ == yx.step_);
+            result = xy;
+        }
+        local.store(result, local.arg(I128));
+        (void)local.build();
+    });
+
+    for (bool is_signed : {false, true}) {
+        tests.emplace_back([is_signed] {
+            MemoryArena arena;
+            Context ctx{arena};
+            FunctionBuilder local{ctx};
+
+            Value x = local.input_arg(I64);
+            Value wide = is_signed ? local.sext(x, I128) : local.zext(x, I128);
+            Value roundtrip = local.trunc(wide, I64);
+            SIMJIT_ASSERT(roundtrip.step_ == x.step_);
+            local.store(roundtrip, local.arg(I64));
+            (void)local.build();
+        });
+    }
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        FunctionBuilder local{ctx};
+
+        Value product = local.mul(local.input_arg(I128), local.con(13, I128));
+        SIMJIT_ASSERT(product.step_->is(hir::StepKind::ArithBinary));
+        SIMJIT_ASSERT(product.step_->step_data<hir::StepKind::ArithBinary>().op == ArithBinaryOp::Add);
+        local.store(product, local.arg(I128));
+        (void)local.build();
     });
 }
 
@@ -952,7 +1494,6 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Amd64_AVX512;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x = local.input_arg(I8);
@@ -960,17 +1501,13 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         local.store(local.mul(x, y), local.arg(I8));
 
         auto result = vect::try_hir_to_vect(local.build());
-        SIMJIT_ASSERT(!result);
-        SIMJIT_ASSERT(result.error().module == ErrorModule::Vectorizer);
-        SIMJIT_ASSERT(result.error().kind == ErrorKind::VectorizationFailed);
-        SIMJIT_ASSERT(result.error().subkind == ErrorSubKind::UnsupportedSpecialOps);
+        SIMJIT_ASSERT(result);
     });
 
     tests.emplace_back([] {
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Arm64_NEON;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x = local.input_arg(I8);
@@ -985,7 +1522,6 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Amd64_AVX512;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x8 = local.input_arg(I8);
@@ -994,17 +1530,13 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         local.store(local.lzcnt(x16), local.arg(I16));
 
         auto result = vect::try_hir_to_vect(local.build());
-        SIMJIT_ASSERT(!result);
-        SIMJIT_ASSERT(result.error().module == ErrorModule::Vectorizer);
-        SIMJIT_ASSERT(result.error().kind == ErrorKind::VectorizationFailed);
-        SIMJIT_ASSERT(result.error().subkind == ErrorSubKind::UnsupportedSpecialOps);
+        SIMJIT_ASSERT(result);
     });
 
     tests.emplace_back([] {
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Arm64_NEON;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x8 = local.input_arg(I8);
@@ -1020,7 +1552,6 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Amd64_AVX512;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x = local.input_arg(I8);
@@ -1030,17 +1561,13 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         local.store(local.sra(x, amount), local.arg(I8));
 
         auto result = vect::try_hir_to_vect(local.build());
-        SIMJIT_ASSERT(!result);
-        SIMJIT_ASSERT(result.error().module == ErrorModule::Vectorizer);
-        SIMJIT_ASSERT(result.error().kind == ErrorKind::VectorizationFailed);
-        SIMJIT_ASSERT(result.error().subkind == ErrorSubKind::UnsupportedSpecialOps);
+        SIMJIT_ASSERT(result);
     });
 
     tests.emplace_back([] {
         MemoryArena arena;
         Context ctx{arena};
         ctx.arch = Arch::Arm64_NEON;
-        ctx.transformations = CodeTransformations::All & ~CodeTransformations::SmallArith;
         FunctionBuilder local{ctx};
 
         Value x = local.input_arg(I8);
@@ -1221,8 +1748,8 @@ static void add_vectorizer_heuristic_tests(std::vector<IntegrationTest> &tests) 
         deserialize(R"SIMJIT(
 (func
   (args
-    (arg 0 i1 dst-scalar)
-    (arg 1 i64 dst-scalar))
+    (arg 0 i1)
+    (arg 1 i64))
   (accs
     (acc 0 i1 (arg 0) (step 3))
     (acc 1 i64 (arg 1) (step 5)))
@@ -1489,7 +2016,7 @@ static void add_small_gather_scatter_index_tests(std::vector<IntegrationTest> &t
         SIMJIT_ASSERT(cast_data.arg->dtype == I8);
         SIMJIT_ASSERT(cast_data.arg->is(hir::StepKind::Load));
         ArgumentIdx idx_arg = cast_data.arg->step_data<hir::StepKind::Load>().idx;
-        SIMJIT_ASSERT(fn->args[idx_arg].kind == ArgumentKind::SrcIdxArr);
+        SIMJIT_ASSERT(bool(fn->argument_usage[idx_arg] & hir::ArgumentUsage::BoundedIndex));
     });
 
     tests.emplace_back([] {
@@ -1511,7 +2038,7 @@ static void add_small_gather_scatter_index_tests(std::vector<IntegrationTest> &t
         SIMJIT_ASSERT(cast_data.arg->dtype == I16);
         SIMJIT_ASSERT(cast_data.arg->is(hir::StepKind::Load));
         ArgumentIdx idx_arg = cast_data.arg->step_data<hir::StepKind::Load>().idx;
-        SIMJIT_ASSERT(fn->args[idx_arg].kind == ArgumentKind::SrcIdxArr);
+        SIMJIT_ASSERT(bool(fn->argument_usage[idx_arg] & hir::ArgumentUsage::BoundedIndex));
     });
 }
 
@@ -2291,10 +2818,10 @@ static void add_asmjit_x86_peephole_tests(std::vector<IntegrationTest> &tests) {
         deserialize(R"SIMJIT(
 (func
   (args
-    (arg 0 i1 dst-scalar)
-    (arg 1 f64 src-const)
-    (arg 2 i1 dst-scalar)
-    (arg 3 i32 dst-arr))
+    (arg 0 i1)
+    (arg 1 f64)
+    (arg 2 i1)
+    (arg 3 i32))
   (accs
     (acc 0 i1 (arg 0) (step 6))
     (acc 1 i1 (arg 2) (step 11)))
@@ -2420,11 +2947,84 @@ static void add_asmjit_x86_peephole_tests(std::vector<IntegrationTest> &tests) {
 #endif
 }
 
+static void add_asmjit_a64_interleave_tests(std::vector<IntegrationTest> &tests) {
+#if SIMJIT_ASMJIT_BACKEND_ARM
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        ctx.arch = Arch::Arm64_NEON;
+        FunctionBuilder builder{ctx};
+
+        Argument left = builder.arg_interleaved(I64);
+        Argument right = builder.arg_interleaved(I64);
+        Argument dst = builder.arg_interleaved(I64);
+        DeinterleavedPair left_lanes = builder.load2(left);
+        DeinterleavedPair right_lanes = builder.load2(right);
+        builder.store_interleave(dst, builder.xor_(left_lanes.even, right_lanes.even),
+                                 builder.xor_(left_lanes.odd, right_lanes.odd));
+
+        AsmjitCompileResult result{};
+        compile_asmjit(lower_vectorized(builder.build()), AsmjitCompileOptions{false, true, nullptr}, result);
+
+        size_t ld2_count = 0;
+        size_t pos = 0;
+        while ((pos = result.asm_code.find("\nld2 ", pos)) != std::string::npos) {
+            ++ld2_count;
+            pos += 5;
+        }
+        // The vector loop is unrolled twice: one ld2 per input and unrolled body.
+        SIMJIT_ASSERT(ld2_count == 4);
+    });
+
+    tests.emplace_back([] {
+        MemoryArena arena;
+        Context ctx{arena};
+        ctx.arch = Arch::Arm64_NEON;
+        FunctionBuilder builder{ctx};
+
+        Argument dst = builder.arg_interleaved(I64);
+        Predicate cond = builder.input_predicate_arg();
+        builder.cond_store_interleave(builder.i64(1), builder.i64(2), cond, dst, LoadStoreKind::Unaligned);
+
+        AsmjitCompileResult result{};
+        compile_asmjit(lower_vectorized(builder.build()), AsmjitCompileOptions{false, true, nullptr}, result);
+
+        size_t pair_loads = 0;
+        size_t pair_stores = 0;
+        size_t pos = 0;
+        while (pos < result.asm_code.size()) {
+            size_t end = result.asm_code.find('\n', pos);
+            if (end == std::string::npos) { end = result.asm_code.size(); }
+            std::string_view line{result.asm_code.data() + pos, end - pos};
+            bool is_load = line.substr(0, 4) == "ld2 ";
+            bool is_store = line.substr(0, 4) == "st2 ";
+            if (is_load || is_store) {
+                SIMJIT_ASSERT(line.find("],") == std::string_view::npos);
+                if (is_load) {
+                    ++pair_loads;
+                } else {
+                    ++pair_stores;
+                }
+            }
+            pos = end + 1;
+        }
+        // A conditional pair store reads the old pair and writes the blended pair
+        // through the same address. Neither operation may post-index the cursor.
+        SIMJIT_ASSERT(pair_loads != 0);
+        SIMJIT_ASSERT(pair_stores == pair_loads);
+    });
+#else
+    (void)tests;
+#endif
+}
+
 static std::vector<IntegrationTest> make_integration_tests() {
     std::vector<IntegrationTest> tests;
+    add_argument_usage_tests(tests);
     add_pack_tests(tests);
     add_checked_op_shape_tests(tests);
     add_commutative_cse_tests(tests);
+    add_i128_hir_peephole_shape_tests(tests);
     add_const_div_quotient_cache_tests(tests);
     add_logical_peephole_shape_tests(tests);
     add_binary_identity_peephole_shape_tests(tests);
@@ -2438,6 +3038,7 @@ static std::vector<IntegrationTest> make_integration_tests() {
 #endif
     add_cpp_emitter_format_tests(tests);
     add_asmjit_x86_peephole_tests(tests);
+    add_asmjit_a64_interleave_tests(tests);
     return tests;
 }
 

@@ -15,6 +15,7 @@
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/IR/Argument.h"
@@ -74,6 +75,7 @@ namespace {
 struct ArgInfo {
     V *data_ptr = nullptr;
     Ty *element_type = nullptr;
+    ScalarDataType dtype{};
 };
 
 struct AccInfo {
@@ -288,12 +290,25 @@ struct LLVMBuilder {
         SIMJIT_UNREACHABLE();
     }
     V *arith_binary(ScalarDataType dtype, ArithBinaryOp op, V *left, V *right) {
+        auto widen_mul64_operand = [&](V *value, bool is_unsigned) -> V * {
+            Ty *narrow_type = nullptr;
+            if (value->getType()->isVectorTy()) {
+                auto *vector_type = llvm::cast<llvm::VectorType>(value->getType());
+                narrow_type = llvm::VectorType::get(b->getInt32Ty(), vector_type->getElementCount());
+            } else {
+                narrow_type = b->getInt32Ty();
+            }
+            V *narrow = b->CreateTrunc(value, narrow_type);
+            return is_unsigned ? b->CreateZExt(narrow, value->getType()) : b->CreateSExt(narrow, value->getType());
+        };
         switch (op) {
         case ArithBinaryOp::Add: return b->CreateAdd(left, right);
         case ArithBinaryOp::Sub: return b->CreateSub(left, right);
-        case ArithBinaryOp::Mul:
+        case ArithBinaryOp::Mul: return b->CreateMul(left, right);
         case ArithBinaryOp::Mul64SE:
-        case ArithBinaryOp::Mul64ZE: return b->CreateMul(left, right);
+            return b->CreateMul(widen_mul64_operand(left, false), widen_mul64_operand(right, false));
+        case ArithBinaryOp::Mul64ZE:
+            return b->CreateMul(widen_mul64_operand(left, true), widen_mul64_operand(right, true));
         case ArithBinaryOp::Div: return b->CreateSDiv(left, right);
         case ArithBinaryOp::UDiv: return b->CreateUDiv(left, right);
         case ArithBinaryOp::Mod: return b->CreateSRem(left, right);
@@ -429,9 +444,16 @@ struct LLVMBuilder {
         messed_up("Invalid float cast from {} to {}");
     }
 
-    V *index_arg(const ArgInfo &info, V *idx) {
-        SIMJIT_ASSERT(info.element_type != b->getVoidTy());
-        return b->CreateInBoundsGEP(info.element_type, info.data_ptr, idx);
+    V *index_arg(const ArgInfo &info, V *idx, llvm::Type *element_type = nullptr) {
+        if (element_type == nullptr) { element_type = info.element_type; }
+        SIMJIT_ASSERT(element_type != b->getVoidTy());
+        return b->CreateInBoundsGEP(element_type, info.data_ptr, idx);
+    }
+
+    V *index_interleaved_arg(const ArgInfo &info, V *row, ScalarDataType half_dtype, uint8_t lane = 0) {
+        V *byte_off = b->CreateNUWMul(row, b->getInt64(scalar_dtype_size(info.dtype)));
+        if (lane != 0) { byte_off = b->CreateNUWAdd(byte_off, b->getInt64(lane * scalar_dtype_size(half_dtype))); }
+        return b->CreateInBoundsGEP(b->getInt8Ty(), info.data_ptr, byte_off);
     }
 
     V *load_acc(AccId id) {
@@ -477,6 +499,30 @@ struct LLVMBuilder {
         return v;
     }
 
+    V *i128_div_to_llvm(const Step *step, const I128DivData &data) {
+        if (step->dtype != ScalarDataType::I64 || data.partner == nullptr || data.partner->kind != StepKind::I128Div ||
+            data.partner->dtype != ScalarDataType::I64) {
+            messed_up("malformed scalar i128 division");
+        }
+        llvm::IntegerType *i64 = b->getInt64Ty();
+        llvm::IntegerType *i128 = b->getIntNTy(128);
+        auto combine = [&](Step *low_step, Step *high_step) {
+            V *low = b->CreateZExt(step_to_llvm(low_step), i128);
+            V *high = b->CreateShl(b->CreateZExt(step_to_llvm(high_step), i128), 64);
+            return b->CreateOr(low, high);
+        };
+        V *left = combine(data.left_low, data.left_high);
+        V *right = combine(data.right_low, data.right_high);
+        // LLVM represents wide division directly. Its target lowering chooses an
+        // appropriate compiler-runtime helper for offline compilation when needed.
+        V *result = arith_binary(ScalarDataType::I128, data.op, left, right);
+        V *low = b->CreateTrunc(result, i64);
+        V *high = b->CreateTrunc(b->CreateLShr(result, 64), i64);
+        value_map[data.high_word ? data.partner->id : step->id] = low;
+        value_map[data.high_word ? step->id : data.partner->id] = high;
+        return data.high_word ? high : low;
+    }
+
     V *scalar_step_to_llvm_internal(const Step *step) {
         switch (step->kind) {
             SIMJIT_MATCH (StepKind::Const) {
@@ -504,17 +550,56 @@ struct LLVMBuilder {
                 if (data.addr.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.addr.offset)); }
                 return b->CreateLoad(info.element_type, index_arg(info, off));
             }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (data.lane_count != 2 || data.lane >= data.lane_count || step->dtype == ScalarDataType::I1) {
+                    messed_up("Unsupported scalar load-deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                ArgInfo &info = func_args[data.addr.arg];
+                V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
+                if (data.addr.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.addr.offset)); }
+                return b->CreateLoad(scalar_type_to_llvm(step->dtype.as_scalar()),
+                                     index_interleaved_arg(info, off, step->dtype.as_scalar(), data.lane));
+            }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                ArgInfo &info = func_args[data.dst.arg];
+                V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
+                if (data.dst.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.dst.offset)); }
+                V *even_ptr = index_interleaved_arg(info, off, step->dtype.as_scalar());
+                V *odd_ptr = index_interleaved_arg(info, off, step->dtype.as_scalar(), 1);
+                llvm::Align alignment(data.kind == LoadStoreKind::Aligned ? scalar_dtype_size(step->dtype.as_scalar())
+                                                                          : 1);
+                if (data.cond != nullptr) {
+                    llvm::BasicBlock *then = llvm::BasicBlock::Create(*context, "then", function);
+                    llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context, "merge", function);
+                    V *cond = b->CreateIntCast(step_to_llvm(data.cond), b->getInt1Ty(), false);
+                    b->CreateCondBr(cond, then, merge);
+                    b->SetInsertPoint(then);
+                    b->CreateAlignedStore(step_to_llvm(data.even), even_ptr, alignment);
+                    b->CreateAlignedStore(step_to_llvm(data.odd), odd_ptr, alignment);
+                    b->CreateBr(merge);
+                    b->SetInsertPoint(merge);
+                    return nullptr;
+                }
+                b->CreateAlignedStore(step_to_llvm(data.even), even_ptr, alignment);
+                b->CreateAlignedStore(step_to_llvm(data.odd), odd_ptr, alignment);
+                return nullptr;
+            }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 ArgInfo &info = func_args[data.addr.arg];
-                if (step->dtype == ScalarDataType::I1) {
-                    return b->CreateTrunc(b->CreateLoad(b->getInt8Ty(), info.data_ptr), b->getInt1Ty());
+                V *ptr = info.data_ptr;
+                if (data.byte_offset != 0) {
+                    ptr = b->CreateInBoundsGEP(b->getInt8Ty(), ptr, b->getInt64(data.byte_offset));
                 }
-                return b->CreateLoad(info.element_type, info.data_ptr);
+                if (step->dtype == ScalarDataType::I1) {
+                    return b->CreateTrunc(b->CreateLoad(b->getInt8Ty(), ptr), b->getInt1Ty());
+                }
+                return b->CreateLoad(scalar_type_to_llvm(step->dtype.as_scalar()), ptr);
             }
             SIMJIT_MATCH (StepKind::Gather) {
                 ArgInfo &info = func_args[data.data];
                 V *idx_value = step_to_llvm(data.idx);
-                return b->CreateLoad(info.element_type, index_arg(info, idx_value));
+                llvm::Type *element_type = scalar_type_to_llvm(step->dtype.as_scalar());
+                return b->CreateLoad(element_type, index_arg(info, idx_value, element_type));
             }
             SIMJIT_MATCH (StepKind::Store) {
                 V *arg = step_to_llvm(data.what);
@@ -540,7 +625,7 @@ struct LLVMBuilder {
                 V *arg = step_to_llvm(data.arg);
                 ArgInfo &info = func_args[data.dst];
                 V *off = step_to_llvm(data.idx);
-                b->CreateStore(arg, index_arg(info, off));
+                b->CreateStore(arg, index_arg(info, off, scalar_type_to_llvm(step->dtype.as_scalar())));
                 return nullptr;
             }
             SIMJIT_MATCH (StepKind::CondScatter) {
@@ -554,7 +639,7 @@ struct LLVMBuilder {
                 b->CreateCondBr(cond, then, merge);
                 b->SetInsertPoint(then);
 
-                b->CreateStore(arg, index_arg(info, off));
+                b->CreateStore(arg, index_arg(info, off, scalar_type_to_llvm(step->dtype.as_scalar())));
                 b->CreateBr(merge);
 
                 b->SetInsertPoint(merge);
@@ -577,6 +662,26 @@ struct LLVMBuilder {
                 b->CreateStore(new_acc_value, acc.val_ptr);
                 b->CreateBr(merge);
 
+                b->SetInsertPoint(merge);
+                return nullptr;
+            }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                ArgInfo &info = func_args[data.dst];
+                llvm::BasicBlock *then = llvm::BasicBlock::Create(*context, "then", function);
+                llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context, "merge", function);
+                V *low = step_to_llvm(data.low);
+                V *high = step_to_llvm(data.high);
+                V *cond = b->CreateIntCast(step_to_llvm(data.cond), b->getInt1Ty(), false);
+                b->CreateCondBr(cond, then, merge);
+                b->SetInsertPoint(then);
+                AccInfo &acc = accs[func->accs.index(data.acc)];
+                V *acc_value = b->CreateLoad(acc.type, acc.val_ptr);
+                V *word_index = b->CreateShl(acc_value, b->getInt64(1));
+                V *low_ptr = index_arg(info, word_index, b->getInt64Ty());
+                b->CreateStore(low, low_ptr);
+                b->CreateStore(high, b->CreateInBoundsGEP(b->getInt64Ty(), low_ptr, b->getInt64(1)));
+                b->CreateStore(b->CreateAdd(acc_value, b->getInt64(1)), acc.val_ptr);
+                b->CreateBr(merge);
                 b->SetInsertPoint(merge);
                 return nullptr;
             }
@@ -612,6 +717,17 @@ struct LLVMBuilder {
 
                 if (is_float_dtype(step->dtype.as_scalar())) return float_arith_binary(data.op, left, right);
                 return arith_binary(step->dtype.as_scalar(), data.op, left, right);
+            }
+            SIMJIT_MATCH (StepKind::I128Div) { return i128_div_to_llvm(step, data); }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                V *left = step_to_llvm(data.left);
+                V *right = step_to_llvm(data.right);
+                V *amount = step_to_llvm(data.amount);
+                llvm::Type *type = left->getType();
+                if (data.kind == FunnelShiftKind::Left) {
+                    return b->CreateIntrinsic(llvm::Intrinsic::fshl, {type}, {left, right, amount});
+                }
+                return b->CreateIntrinsic(llvm::Intrinsic::fshr, {type}, {left, right, amount});
             }
             SIMJIT_MATCH (StepKind::FMA) { return fma_to_llvm(step, data); }
             SIMJIT_MATCH (StepKind::ConstDiv) {
@@ -655,30 +771,15 @@ struct LLVMBuilder {
             SIMJIT_MATCH (StepKind::AggResult) {
                 V *arg = step_to_llvm(data.arg);
                 ArgInfo &info = func_args[data.dst];
-                b->CreateStore(arg, info.data_ptr);
+                V *ptr = info.data_ptr;
+                if (data.byte_offset != 0) {
+                    ptr = b->CreateInBoundsGEP(b->getInt8Ty(), ptr, b->getInt64(data.byte_offset));
+                }
+                b->CreateStore(arg, ptr);
                 return nullptr;
             }
-            SIMJIT_MATCH (StepKind::StoreSum128) {
-                V *high = step_to_llvm(data.hi_combined);
-                V *combined = b->CreateShl(b->CreateZExt(high, b->getInt128Ty()), 64);
-                for (Step *lo_step : data.low_steps) {
-                    V *lo_val = step_to_llvm(lo_step);
-                    if (lo_step->dtype.is_scalar()) {
-                        lo_val = b->CreateZExt(lo_val, b->getInt128Ty());
-                        combined = b->CreateAdd(combined, lo_val);
-                    } else {
-                        VecDataType vdtype = lo_step->dtype.as_vec();
-                        for (size_t i = 0; i < vdtype.nelems(); ++i) {
-                            V *it = b->CreateExtractElement(lo_val, b->getInt64(i));
-                            it = b->CreateZExt(it, b->getInt128Ty());
-                            combined = b->CreateAdd(combined, it);
-                        }
-                    }
-                }
-
-                ArgInfo &info = func_args[data.dst];
-                b->CreateStore(combined, info.data_ptr);
-                return nullptr;
+            SIMJIT_MATCH (StepKind::VecExtract) {
+                return b->CreateExtractElement(step_to_llvm(data.arg), b->getInt64(data.lane));
             }
             SIMJIT_MATCH (StepKind::PredicateNot) {
                 V *arg = step_to_llvm(data);
@@ -818,19 +919,24 @@ struct LLVMBuilder {
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
-        case StepKind::StoreSum128:
+        case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             SIMJIT_ASSERT(0);
             messed_up("Unexpected instruction %s", show_step_kind(step->kind));
 
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 ArgInfo &info = func_args[data.addr.arg];
+                V *ptr = info.data_ptr;
+                if (data.byte_offset != 0) {
+                    ptr = b->CreateInBoundsGEP(b->getInt8Ty(), ptr, b->getInt64(data.byte_offset));
+                }
                 if (step->dtype.is_mask()) {
-                    V *s = b->CreateLoad(b->getInt8Ty(), info.data_ptr);
+                    V *s = b->CreateLoad(b->getInt8Ty(), ptr);
                     s = b->CreateTrunc(s, b->getInt1Ty());
                     return b->CreateVectorSplat(mask_dtype_bits(step->dtype.as_mask()), s);
                 }
-                V *s = b->CreateLoad(info.element_type, info.data_ptr);
+                V *s = b->CreateLoad(scalar_type_to_llvm(step->dtype.as_vec().to_scalar()), ptr);
                 return b->CreateVectorSplat(step->dtype.as_vec().nelems(), s);
             }
             SIMJIT_MATCH (StepKind::Const) {
@@ -898,11 +1004,74 @@ struct LLVMBuilder {
                 }
                 return inst;
             }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask load-deinterleave"); }
+                if (data.lane_count != 2 || data.lane >= data.lane_count) {
+                    unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                VecDataType vdtype = step->dtype.as_vec();
+                size_t width = vdtype.nelems();
+                ArgInfo &info = func_args[data.addr.arg];
+                V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
+                if (data.addr.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.addr.offset)); }
+                llvm::VectorType *pair_type = llvm::VectorType::get(
+                    scalar_type_to_llvm(vdtype.to_scalar()), llvm::ElementCount::getFixed(width * data.lane_count));
+                V *idx = index_interleaved_arg(info, off, vdtype.to_scalar());
+                llvm::LoadInst *wide = nullptr;
+                if (data.kind == LoadStoreKind::Unaligned) {
+                    wide = b->CreateLoad(pair_type, idx);
+                    wide->setAlignment(llvm::Align{1});
+                } else {
+                    wide = b->CreateAlignedLoad(pair_type, idx, {});
+                }
+                llvm::SmallVector<int, 64> lane_indices;
+                for (size_t i = 0; i < width; ++i) {
+                    lane_indices.push_back(int(i * data.lane_count + data.lane));
+                }
+                return b->CreateShuffleVector(wide, wide, lane_indices);
+            }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
+                VecDataType vdtype = step->dtype.as_vec();
+                size_t width = vdtype.nelems();
+                ArgInfo &info = func_args[data.dst.arg];
+                V *even = step_to_llvm(data.even);
+                V *odd = step_to_llvm(data.odd);
+                llvm::SmallVector<int, 64> interleave;
+                for (size_t i = 0; i < width; ++i) {
+                    interleave.push_back(int(i));
+                    interleave.push_back(int(width + i));
+                }
+                V *packed = b->CreateShuffleVector(even, odd, interleave);
+                V *off = b->CreateLoad(b->getInt64Ty(), counter_ptr);
+                if (data.dst.offset != 0) { off = b->CreateNUWAdd(off, b->getInt64(data.dst.offset)); }
+                V *idx = index_interleaved_arg(info, off, vdtype.to_scalar());
+                llvm::Align alignment(data.kind == LoadStoreKind::Aligned ? vdtype.size_bytes() : 1);
+                if (data.cond != nullptr) {
+                    V *cond = step_to_llvm(data.cond);
+                    V *interleaved_cond = b->CreateShuffleVector(cond, cond, interleave);
+                    b->CreateMaskedStore(packed, idx, alignment, interleaved_cond);
+                    return nullptr;
+                }
+                llvm::StoreInst *inst = b->CreateStore(packed, idx);
+                inst->setAlignment(alignment);
+                return nullptr;
+            }
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 V *left = step_to_llvm(data.left);
                 V *right = step_to_llvm(data.right);
                 if (step->dtype.as_vec().is_float()) return float_arith_binary(data.op, left, right);
                 return arith_binary(step->dtype.as_vec().to_scalar(), data.op, left, right);
+            }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                V *left = step_to_llvm(data.left);
+                V *right = step_to_llvm(data.right);
+                V *amount = step_to_llvm(data.amount);
+                llvm::Type *type = left->getType();
+                if (data.kind == FunnelShiftKind::Left) {
+                    return b->CreateIntrinsic(llvm::Intrinsic::fshl, {type}, {left, right, amount});
+                }
+                return b->CreateIntrinsic(llvm::Intrinsic::fshr, {type}, {left, right, amount});
             }
             SIMJIT_MATCH (StepKind::FMA) { return fma_to_llvm(step, data); }
             SIMJIT_MATCH (StepKind::ArithUnary) {
@@ -1074,16 +1243,16 @@ struct LLVMBuilder {
                 case ArithBinaryOp::Add:
                     if (vdtype.is_float()) {
                         V *zero = llvm::ConstantFP::getNegativeZero(vty->getElementType());
-                        llvm::CallInst *inst = b->CreateIntrinsic(llvm::Intrinsic::vector_reduce_fadd, {ty},
-                                                                  {zero, step_to_llvm(data.arg)});
+                        V *inst = b->CreateIntrinsic(llvm::Intrinsic::vector_reduce_fadd, {ty},
+                                                     {zero, step_to_llvm(data.arg)});
                         return with_float_contract(inst, false, true);
                     }
                     return unary_reduce(llvm::Intrinsic::vector_reduce_add);
                 case ArithBinaryOp::Mul:
                     if (vdtype.is_float()) {
                         V *one = llvm::ConstantFP::get(vty->getElementType(), 1.0);
-                        llvm::CallInst *inst = b->CreateIntrinsic(llvm::Intrinsic::vector_reduce_fmul, {ty},
-                                                                  {one, step_to_llvm(data.arg)});
+                        V *inst = b->CreateIntrinsic(llvm::Intrinsic::vector_reduce_fmul, {ty},
+                                                     {one, step_to_llvm(data.arg)});
                         return with_float_contract(inst, false, true);
                     }
                     return unary_reduce(llvm::Intrinsic::vector_reduce_mul);
@@ -1250,6 +1419,36 @@ struct LLVMBuilder {
                 store_acc(data.acc, acc_value);
                 return nullptr;
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                ArgInfo &info = func_args[data.dst];
+                V *low = step_to_llvm(data.low);
+                V *high = step_to_llvm(data.high);
+                V *cond = step_to_llvm(data.cond);
+                V *acc_value = load_acc(data.acc);
+                VecDataType vdtype = step->dtype.as_vec();
+                for (size_t lane = 0; lane < vdtype.nelems(); ++lane) {
+                    llvm::BasicBlock *before = b->GetInsertBlock();
+                    llvm::BasicBlock *then = llvm::BasicBlock::Create(*context, "pack128.then", function);
+                    llvm::BasicBlock *merge = llvm::BasicBlock::Create(*context, "pack128.merge", function);
+                    V *active = b->CreateExtractElement(cond, b->getInt32(lane));
+                    b->CreateCondBr(active, then, merge);
+                    b->SetInsertPoint(then);
+                    V *word_index = b->CreateShl(acc_value, b->getInt64(1));
+                    V *low_ptr = index_arg(info, word_index, b->getInt64Ty());
+                    b->CreateStore(b->CreateExtractElement(low, b->getInt32(lane)), low_ptr);
+                    b->CreateStore(b->CreateExtractElement(high, b->getInt32(lane)),
+                                   b->CreateInBoundsGEP(b->getInt64Ty(), low_ptr, b->getInt64(1)));
+                    V *incremented_acc = b->CreateAdd(acc_value, b->getInt64(1));
+                    b->CreateBr(merge);
+                    b->SetInsertPoint(merge);
+                    llvm::PHINode *next_acc = b->CreatePHI(b->getInt64Ty(), 2);
+                    next_acc->addIncoming(incremented_acc, then);
+                    next_acc->addIncoming(acc_value, before);
+                    acc_value = next_acc;
+                }
+                store_acc(data.acc, acc_value);
+                return nullptr;
+            }
             SIMJIT_MATCH (StepKind::Scatter) {
                 VecDataType vdtype = step->dtype.as_vec();
                 V *arg = step_to_llvm(data.arg);
@@ -1316,6 +1515,7 @@ static void compile_function(LLVMBuilder &builder, const Function *func) {
         llvm::Argument *llvm_arg = args_it++;
         SIMJIT_ASSERT(llvm_arg < builder.function->arg_end());
         info.data_ptr = llvm_arg;
+        info.dtype = arg.dtype;
         info.element_type = (arg.dtype == ScalarDataType::I1 || arg.dtype == ScalarDataType::I128)
                                 ? builder.b->getVoidTy()
                                 : builder.scalar_type_to_llvm(arg.dtype);
@@ -1394,52 +1594,6 @@ static void compile_function(LLVMBuilder &builder, const Function *func) {
     builder.b->CreateRetVoid();
 
     llvm::verifyFunction(*builder.function);
-}
-
-std::unique_ptr<llvm::MemoryBuffer> generateA64MachineCode(llvm::Module *module) {
-    // Initialize native target (only needed once per process)
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllAsmPrinters();
-    llvm::InitializeAllTargetMCs();
-
-    // Get the ARM64 target
-    llvm::Triple triple("aarch64-none-unknown");
-    std::string Error;
-    const llvm::Target *target = llvm::TargetRegistry::lookupTarget(triple, Error);
-    if (!target) {
-        llvm::errs() << "Error getting target: " << Error << "\n";
-        return {};
-    }
-
-    // Create target machine
-    llvm::TargetOptions options;
-
-    std::unique_ptr<llvm::TargetMachine> target_machine{
-        //
-        target->createTargetMachine( //
-            triple,
-            "generic", // CPU type
-            "+neon",   // Features
-            options, llvm::Reloc::Model::PIC_, {}, llvm::CodeGenOptLevel::Less)};
-    // Configure module
-    module->setDataLayout(target_machine->createDataLayout());
-
-    // Create output buffer
-    llvm::SmallVector<char, 0> obj_buffer_sv;
-    llvm::raw_svector_ostream obj_stream(obj_buffer_sv);
-
-    // Create a pass manager
-    llvm::legacy::PassManager pass_manager;
-
-    // Ask the target machine to add passes to emit an object file
-    if (target_machine->addPassesToEmitFile(pass_manager, obj_stream, nullptr, llvm::CodeGenFileType::ObjectFile)) {
-        llvm::errs() << "TargetMachine can't emit an object file\n";
-        return {};
-    }
-    pass_manager.run(*module);
-
-    // Create MemoryBuffer from the generated code
-    return llvm::MemoryBuffer::getMemBufferCopy(llvm::StringRef(obj_buffer_sv.data(), obj_buffer_sv.size()));
 }
 
 static std::string get_ir_string(llvm::Module &module) {
@@ -1601,7 +1755,11 @@ LLVMOptLevel LLVMSession::opt_level() const noexcept {
 void LLVMSession::optimize_module(LLVMModuleOwner &owner) {
     if (!owner.context || !owner.module) { throw std::invalid_argument("cannot optimize an empty LLVM module"); }
     owner.module->setDataLayout(impl_->jit->getDataLayout());
+#if LLVM_VERSION_MAJOR < 21
+    owner.module->setTargetTriple(impl_->target_machine->getTargetTriple().str());
+#else
     owner.module->setTargetTriple(impl_->target_machine->getTargetTriple());
+#endif
     verify_module(*owner.module);
     run_optimization_pipeline(*owner.module, *impl_->target_machine, impl_->opt_level);
 }
@@ -1609,7 +1767,11 @@ void LLVMSession::optimize_module(LLVMModuleOwner &owner) {
 void LLVMSession::add_module(LLVMModuleOwner owner) {
     if (!owner.context || !owner.module) { throw std::invalid_argument("cannot add an empty LLVM module"); }
     owner.module->setDataLayout(impl_->jit->getDataLayout());
+#if LLVM_VERSION_MAJOR < 21
+    owner.module->setTargetTriple(impl_->target_machine->getTargetTriple().str());
+#else
     owner.module->setTargetTriple(impl_->target_machine->getTargetTriple());
+#endif
     verify_module(*owner.module);
     llvm::orc::ThreadSafeModule thread_safe_module(std::move(owner.module), std::move(owner.context));
     if (llvm::Error error = impl_->jit->addIRModule(std::move(thread_safe_module))) {

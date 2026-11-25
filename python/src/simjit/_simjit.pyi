@@ -218,12 +218,10 @@ class CodeTransformations:
     
       FmaInst
     
-      SmallArith
-    
       All
     """
     AccSplit: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.AccSplit: 32>
-    All: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.All: 65535>
+    All: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.All: 32767>
     BetweenPeephole: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.BetweenPeephole: 8>
     FmaInst: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.FmaInst: 256>
     LogicalPeephole: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.LogicalPeephole: 4>
@@ -231,10 +229,9 @@ class CodeTransformations:
     MulConstPeephole: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.MulConstPeephole: 2>
     MuldqInst: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.MuldqInst: 1>
     No: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.No: 0>
-    SmallArith: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.SmallArith: 512>
     TernarylogicInst: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.TernarylogicInst: 128>
     Unroll: typing.ClassVar[CodeTransformations]  # value = <CodeTransformations.Unroll: 16>
-    __members__: typing.ClassVar[dict[str, CodeTransformations]]  # value = {'No': <CodeTransformations.No: 0>, 'MuldqInst': <CodeTransformations.MuldqInst: 1>, 'MulConstPeephole': <CodeTransformations.MulConstPeephole: 2>, 'LogicalPeephole': <CodeTransformations.LogicalPeephole: 4>, 'BetweenPeephole': <CodeTransformations.BetweenPeephole: 8>, 'Unroll': <CodeTransformations.Unroll: 16>, 'AccSplit': <CodeTransformations.AccSplit: 32>, 'MaskCombine': <CodeTransformations.MaskCombine: 64>, 'TernarylogicInst': <CodeTransformations.TernarylogicInst: 128>, 'FmaInst': <CodeTransformations.FmaInst: 256>, 'SmallArith': <CodeTransformations.SmallArith: 512>, 'All': <CodeTransformations.All: 65535>}
+    __members__: typing.ClassVar[dict[str, CodeTransformations]]  # value = {'No': <CodeTransformations.No: 0>, 'MuldqInst': <CodeTransformations.MuldqInst: 1>, 'MulConstPeephole': <CodeTransformations.MulConstPeephole: 2>, 'LogicalPeephole': <CodeTransformations.LogicalPeephole: 4>, 'BetweenPeephole': <CodeTransformations.BetweenPeephole: 8>, 'Unroll': <CodeTransformations.Unroll: 16>, 'AccSplit': <CodeTransformations.AccSplit: 32>, 'MaskCombine': <CodeTransformations.MaskCombine: 64>, 'TernarylogicInst': <CodeTransformations.TernarylogicInst: 128>, 'FmaInst': <CodeTransformations.FmaInst: 256>, 'All': <CodeTransformations.All: 32767>}
     @typing.overload
     def __eq__(self, other: CodeTransformations) -> bool:
         ...
@@ -417,15 +414,18 @@ class DebugStage:
     
       MachineCode
     
+      Serialized
+
       All
     """
     ASM: typing.ClassVar[DebugStage]  # value = <DebugStage.ASM: 8>
-    All: typing.ClassVar[DebugStage]  # value = <DebugStage.All: 31>
+    All: typing.ClassVar[DebugStage]  # value = <DebugStage.All: 63>
     HIR: typing.ClassVar[DebugStage]  # value = <DebugStage.HIR: 1>
     MIR: typing.ClassVar[DebugStage]  # value = <DebugStage.MIR: 4>
     MachineCode: typing.ClassVar[DebugStage]  # value = <DebugStage.MachineCode: 16>
+    Serialized: typing.ClassVar[DebugStage]  # value = <DebugStage.Serialized: 32>
     Vectorizer: typing.ClassVar[DebugStage]  # value = <DebugStage.Vectorizer: 2>
-    __members__: typing.ClassVar[dict[str, DebugStage]]  # value = {'HIR': <DebugStage.HIR: 1>, 'Vectorizer': <DebugStage.Vectorizer: 2>, 'MIR': <DebugStage.MIR: 4>, 'ASM': <DebugStage.ASM: 8>, 'MachineCode': <DebugStage.MachineCode: 16>, 'All': <DebugStage.All: 31>}
+    __members__: typing.ClassVar[dict[str, DebugStage]]  # value = {'HIR': <DebugStage.HIR: 1>, 'Vectorizer': <DebugStage.Vectorizer: 2>, 'MIR': <DebugStage.MIR: 4>, 'ASM': <DebugStage.ASM: 8>, 'MachineCode': <DebugStage.MachineCode: 16>, 'Serialized': <DebugStage.Serialized: 32>, 'All': <DebugStage.All: 63>}
     @typing.overload
     def __eq__(self, other: DebugStage) -> bool:
         ...
@@ -848,6 +848,9 @@ class Statistics:
         ...
     @property
     def last_compilation_arena_used_memory(self) -> int:
+        ...
+    @property
+    def last_compilation_ns(self) -> int:
         ...
 def _infer_native_length(buffers: dict[str, simjit.ir.BufferHandle], outputs: typing.Sequence[tuple[str, simjit.ir.Expr]]) -> int:
     ...

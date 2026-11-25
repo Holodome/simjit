@@ -22,26 +22,6 @@ namespace vect {
 
 using namespace ::simjit::hir;
 
-static SpecialOp supported_vector_special_ops(Arch arch, CodeTransformations transformations) noexcept {
-    if (is_x86_arch(arch)) {
-        SpecialOp result = SpecialOp::I64Mul | SpecialOp::Gather | SpecialOp::Scatter | SpecialOp::CondScatter |
-                           SpecialOp::SmallPack | SpecialOp::ArbitraryBitPermute;
-        if (bool(transformations & CodeTransformations::SmallArith)) {
-            result |= SpecialOp::I8Mul | SpecialOp::I8VariableShift | SpecialOp::SmallLzcnt;
-        }
-        return result;
-    }
-    if (arch == Arch::Arm64_NEON) {
-        return SpecialOp::Gather | SpecialOp::SmallPack | SpecialOp::I8Mul | SpecialOp::I8VariableShift |
-               SpecialOp::SmallLzcnt;
-    }
-    SIMJIT_UNREACHABLE();
-}
-
-static SpecialOp unsupported_vector_special_ops(const hir::Function *func) noexcept {
-    return func->special_ops & ~supported_vector_special_ops(func->ctx->arch, func->ctx->transformations);
-}
-
 struct NodePool {
     static constexpr size_t chunk_size = 64;
     static constexpr size_t chunk_shift = 6;
@@ -170,7 +150,7 @@ static void find_mask_combineable_nodes(Node *node, std::vector<Node *> &mask_re
             }
         }
         if (step->is(StepKind::Select)) { return; }
-        if (step->is(StepKind::Pack)) { return; }
+        if (step->is(StepKind::Pack) || step->is(StepKind::Pack128)) { return; }
         if (step->is(StepKind::Store) && step->step_data<StepKind::Store>().cond != nullptr) { return; }
         if (is_mask_combineable_step(step)) {
             if (!is_mask_result_node.get(node->id)) {
@@ -324,7 +304,7 @@ static bool is_aggregate_step(const Step *step) noexcept {
     switch (step->kind) {
     case StepKind::AccArithBinary:
     case StepKind::AccPredicateBinary:
-    case StepKind::AccSum128:
+    case StepKind::AccI128:
     case StepKind::Countif: return true;
     default: return false;
     }
@@ -376,9 +356,6 @@ static size_t proactive_unroll_special_op_cost(SpecialOp ops) noexcept {
     if (bool(ops & SpecialOp::SmallPack)) { ++cost; }
     if (bool(ops & SpecialOp::ArbitraryBitPermute)) { ++cost; }
     if (bool(ops & SpecialOp::I64Mul)) { ++cost; }
-    if (bool(ops & SpecialOp::I8Mul)) { ++cost; }
-    if (bool(ops & SpecialOp::I8VariableShift)) { ++cost; }
-    if (bool(ops & SpecialOp::SmallLzcnt)) { ++cost; }
     return cost;
 }
 
@@ -538,7 +515,7 @@ struct AlgebraicVectorizer {
             simjit::format("vectorization creates too many roots (%zu > %zu)", root_count, max_roots));
     }
 
-    void assign_carrier(Node *node, ScalarDataType dtype) noexcept {
+    void assign_carrier(const Node *node, ScalarDataType dtype) noexcept {
         auto &slot = assignment.carrier_dtypes[node->id];
         if (slot.has_value()) {
             SIMJIT_ASSERT(*slot == dtype);
@@ -589,7 +566,7 @@ struct AlgebraicVectorizer {
         return {};
     }
 
-    bool graph_unify_carriers(Node *left, Node *right) noexcept {
+    bool graph_unify_carriers(const Node *left, const Node *right) noexcept {
         auto &left_carrier = assignment.carrier_dtypes[left->id];
         auto &right_carrier = assignment.carrier_dtypes[right->id];
         if (left_carrier.has_value() && !right_carrier.has_value()) {
@@ -655,16 +632,33 @@ struct AlgebraicVectorizer {
                         accumulate(graph_unify_carriers(node->children[0], node->children[1]));
                     }
                     break;
+                case StepKind::StoreInterleave:
+                    accumulate(graph_unify_carriers(node->children[0], node->children[1]));
+                    if (node->child_count == 3) {
+                        accumulate(graph_unify_carriers(node->children[0], node->children[2]));
+                    }
+                    break;
                 case StepKind::Pack:
                     accumulate(graph_unify_carriers(node, node->left()));
                     accumulate(graph_unify_carriers(node->left(), node->right()));
                     break;
+                case StepKind::Pack128:
+                    accumulate(graph_unify_carriers(node, node->children[0]));
+                    accumulate(graph_unify_carriers(node->children[0], node->children[1]));
+                    accumulate(graph_unify_carriers(node->children[0], node->children[2]));
+                    break;
                 case StepKind::AccPredicateBinary: accumulate(graph_unify_carriers(node, node->arg())); break;
                 case StepKind::AccArithBinary:
-                case StepKind::AccSum128:
                     accumulate(graph_unify_carriers(node, node->children[0]));
                     if (node->child_count == 2) {
                         accumulate(graph_unify_carriers(node->children[0], node->children[1]));
+                    }
+                    break;
+                case StepKind::AccI128:
+                    accumulate(graph_unify_carriers(node, node->children[0]));
+                    accumulate(graph_unify_carriers(node->children[0], node->children[1]));
+                    if (node->child_count == 3) {
+                        accumulate(graph_unify_carriers(node->children[0], node->children[2]));
                     }
                     break;
                 case StepKind::Countif: accumulate(graph_unify_carriers(node, node->arg())); break;
@@ -847,8 +841,8 @@ struct AlgebraicVectorizer {
 
             if (info->family == CastFamily::Float && delta != 1) { continue; }
 
-            int direct = vec_range;
-            int indirect = delta - direct;
+            size_t direct = vec_range;
+            size_t indirect = delta - direct;
             SIMJIT_ASSERT(indirect > 0);
 
             Node *new_node = arg;
@@ -858,8 +852,8 @@ struct AlgebraicVectorizer {
                 new_node = create_cast_direct(new_node, *info, direct_dtype);
             }
 
-            for (int i = 0; i < indirect; ++i) {
-                int shift = direct + i + 1;
+            for (size_t i = 0; i < indirect; ++i) {
+                size_t shift = direct + i + 1;
                 ScalarDataType downcast_dtype =
                     info->family == CastFamily::Float ? to : scalar_dtype_with_size(from_size >> shift);
                 new_node = create_cast_narrow_combine(new_node, *info, downcast_dtype);
@@ -1365,6 +1359,11 @@ struct AlgebraicVectorizer {
                 find_mask_combineable_nodes(root->children[2], forbidden_mask_nodes, is_forbidden_mask);
                 continue;
             }
+            if (root->is_step(StepKind::StoreInterleave) &&
+                root->step->step_data<StepKind::StoreInterleave>().cond != nullptr) {
+                find_mask_combineable_nodes(root->children[2], forbidden_mask_nodes, is_forbidden_mask);
+                continue;
+            }
 
             find_mask_combineable_nodes(root, mask_combineable_nodes, is_mask_combineable_node);
         }
@@ -1451,15 +1450,19 @@ struct AlgebraicVectorizer {
         case StepKind::PredicateBinary: node->dtype = node->left()->dtype; break;
         case StepKind::Compare: node->dtype = graph_value_dtype(node); break;
         case StepKind::Store: node->dtype = node->children[0]->dtype; break;
+        case StepKind::StoreInterleave: node->dtype = node->children[0]->dtype; break;
         case StepKind::Select: node->dtype = node->children[1]->dtype; break;
         case StepKind::Index:
         case StepKind::Const:
         case StepKind::ArithBinary:
+        case StepKind::I128Div:
         case StepKind::CheckedOp:
         case StepKind::ArithUnary:
+        case StepKind::FunnelShift:
         case StepKind::IntCast:
         case StepKind::FloatCast:
         case StepKind::Load:
+        case StepKind::LoadDeinterleave:
         case StepKind::Gather:
         case StepKind::Fpclass:
         case StepKind::LoadSplat:
@@ -1468,6 +1471,7 @@ struct AlgebraicVectorizer {
         case StepKind::Permute: node->dtype = node->arg()->dtype; break;
         case StepKind::Scatter: node->dtype = node->children[1]->dtype; break;
         case StepKind::Pack: node->dtype = node->left()->dtype; break;
+        case StepKind::Pack128: node->dtype = node->children[0]->dtype; break;
         case StepKind::AccPredicateBinary: {
             auto data = step->step_data<StepKind::AccPredicateBinary>();
             node->dtype = node->arg()->dtype;
@@ -1486,9 +1490,9 @@ struct AlgebraicVectorizer {
             acc_dtypes[data.acc] = node->dtype;
             break;
         }
-        case StepKind::AccSum128: {
-            auto data = step->step_data<StepKind::AccSum128>();
-            node->dtype = node->arg()->dtype;
+        case StepKind::AccI128: {
+            auto data = step->step_data<StepKind::AccI128>();
+            node->dtype = node->children[0]->dtype;
             acc_dtypes[data.acc] = node->dtype;
             break;
         }
@@ -1608,9 +1612,25 @@ struct AlgebraicVectorizer {
                 return false;
             }
             break;
+        case StepKind::Pack128:
+            if (!graph_validate_same_width(node, node->children[0], node->children[1]) ||
+                !graph_validate_same_width(node, node->children[0], node->children[2])) {
+                return false;
+            }
+            break;
+        case StepKind::StoreInterleave:
+            if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }
+            if (node->child_count == 3 && !graph_validate_same_width(node, node->children[0], node->children[2])) {
+                return false;
+            }
+            break;
         case StepKind::Select:
             if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }
             if (!graph_validate_same_width(node, node->children[1], node->children[2])) { return false; }
+            break;
+        case StepKind::FunnelShift:
+            if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }
+            if (!graph_validate_same_width(node, node->children[0], node->children[2])) { return false; }
             break;
         case StepKind::Scatter:
             if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }
@@ -1619,8 +1639,13 @@ struct AlgebraicVectorizer {
             }
             break;
         case StepKind::AccArithBinary:
-        case StepKind::AccSum128:
             if (node->child_count == 2 && !graph_validate_same_width(node, node->left(), node->right())) {
+                return false;
+            }
+            break;
+        case StepKind::AccI128:
+            if (!graph_validate_same_width(node, node->children[0], node->children[1])) { return false; }
+            if (node->child_count == 3 && !graph_validate_same_width(node, node->children[0], node->children[2])) {
                 return false;
             }
             break;
@@ -1794,7 +1819,7 @@ struct AlgebraicVectorizer {
 static void print_tree_rec(Node *node, std::string &str, std::vector<size_t> &print_index_by_id,
                            size_t &next_print_index, size_t depth = 0) {
     for (size_t i = 0; i < depth; ++i)
-        str += " ";
+        str += ' ';
 
     if (print_index_by_id[node->id] != SIZE_MAX) {
         simjit::format_to(str, "[%zu] ", print_index_by_id[node->id]);
@@ -1866,7 +1891,7 @@ static Function *make_vectorization_result(AlgebraicVectorizer &state) {
 }
 
 nonstd::expected<Function *, ErrorInfo> try_hir_to_vect(const hir::Function *func) {
-    SpecialOp unsupported_ops = unsupported_vector_special_ops(func);
+    SpecialOp unsupported_ops = func->unsupported_vector_special_ops();
     if (unsupported_ops != SpecialOp::None) {
         return nonstd::unexpected<ErrorInfo>(ErrorInfo{
             ErrorModule::Vectorizer,

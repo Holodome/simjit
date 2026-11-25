@@ -30,7 +30,7 @@ constexpr size_t SIMJIT_ALL_VALID_MASK_ENTRIES = (SIMJIT_DUCKDB_VECTOR_SIZE + 63
 
 using AddI64Kernel = simjit::jit::FunctionHolder<const int64_t *, const int64_t *, int64_t *>;
 using NetI64Kernel = simjit::jit::FunctionHolder<const int64_t *, const int64_t *, int64_t *>;
-using OutputBoolArr = simjit::jit::JitTypeWrapper<simjit::ArgumentKind::Dst, bool *, I8>;
+using OutputBoolArr = simjit::jit::JitTypeWrapper<simjit::jit::JitArgumentRole::OutputArray, bool *, I8>;
 using ShipFilterKernel = simjit::jit::FunctionHolder<const int32_t *, const int32_t *, bool *>;
 using SumAddI64Kernel = simjit::jit::FunctionHolder<const int64_t *, const int64_t *, int64_t *>;
 using SumNetI64Kernel = simjit::jit::FunctionHolder<const int64_t *, const int64_t *, int64_t *>;

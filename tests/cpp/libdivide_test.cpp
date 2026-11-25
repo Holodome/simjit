@@ -950,7 +950,7 @@ def func(n, src, raw_idx, packed, packed_size):
              Value q = b.div(y, b.i32(8));
              b.scatter(q, b.index(I32), b.arg(I32));
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, y, dst):
     def tdiv(num, den):

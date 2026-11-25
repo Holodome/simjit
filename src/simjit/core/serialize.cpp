@@ -38,10 +38,12 @@ DEFAULT_TO_LIST(simjit::VecSize, simjit::show_vec_size);
 DEFAULT_TO_LIST(simjit::MaskDataType, simjit::show_mask_dtype);
 DEFAULT_TO_LIST(simjit::ArithUnaryOp, simjit::show_arith_unary_op);
 DEFAULT_TO_LIST(simjit::ArithBinaryOp, simjit::show_arith_binary_op);
+DEFAULT_TO_LIST(simjit::hir::CheckedOpKind, simjit::hir::show_checked_op_kind);
 DEFAULT_TO_LIST(simjit::CmpOp, simjit::show_cmp_op);
 DEFAULT_TO_LIST(simjit::IntCastKind, simjit::show_int_cast_kind);
 DEFAULT_TO_LIST(simjit::PredicateBinaryOp, simjit::show_predicate_binary_op);
 DEFAULT_TO_LIST(simjit::LoadStoreKind, simjit::show_load_store_kind);
+DEFAULT_TO_LIST(simjit::FunnelShiftKind, simjit::show_funnel_shift_kind);
 DEFAULT_TO_LIST(simjit::hir::StepKind, simjit::hir::show_step_kind);
 INT_TO_FROM_LIST(size_t);
 
@@ -221,6 +223,51 @@ template <> struct hl::from_list<simjit::IntCastKind> {
     }
 };
 
+template <> struct hl::from_list<simjit::hir::CheckedOpKind> {
+    simjit::hir::CheckedOpKind operator()(hl::value x) {
+        std::string_view s = x.as_string_view();
+        using Kind = simjit::hir::CheckedOpKind;
+        if (s == "add") return Kind::Add;
+        if (s == "sub") return Kind::Sub;
+        if (s == "mul") return Kind::Mul;
+        if (s == "div") return Kind::Div;
+        if (s == "udiv") return Kind::UDiv;
+        if (s == "mod") return Kind::Mod;
+        if (s == "umod") return Kind::UMod;
+        if (s == "i128-div") return Kind::I128Div;
+        if (s == "i128-add-low") return Kind::I128AddLow;
+        if (s == "i128-add-high") return Kind::I128AddHigh;
+        if (s == "i128-sub-low") return Kind::I128SubLow;
+        if (s == "i128-sub-high") return Kind::I128SubHigh;
+        if (s == "i128-mul-low") return Kind::I128MulLow;
+        if (s == "i128-mul-high") return Kind::I128MulHigh;
+        if (s == "i128-sll-low") return Kind::I128SllLow;
+        if (s == "i128-sll-high") return Kind::I128SllHigh;
+        if (s == "i128-srl-low") return Kind::I128SrlLow;
+        if (s == "i128-srl-high") return Kind::I128SrlHigh;
+        if (s == "i128-sra-low") return Kind::I128SraLow;
+        if (s == "i128-sra-high") return Kind::I128SraHigh;
+        if (s == "i128-rotl-low") return Kind::I128RotlLow;
+        if (s == "i128-rotl-high") return Kind::I128RotlHigh;
+        if (s == "i128-rotr-low") return Kind::I128RotrLow;
+        if (s == "i128-rotr-high") return Kind::I128RotrHigh;
+        if (s == "i128-neg-low") return Kind::I128NegateLow;
+        if (s == "i128-neg-high") return Kind::I128NegateHigh;
+        if (s == "i128-abs-low") return Kind::I128AbsLow;
+        if (s == "i128-abs-high") return Kind::I128AbsHigh;
+        if (s == "i128-trunc") return Kind::I128Trunc;
+        if (s == "shra") return Kind::ShiftRightArith;
+        if (s == "shrl") return Kind::ShiftRightLogical;
+        if (s == "shll") return Kind::ShiftLeftLogical;
+        if (s == "rol") return Kind::RotateLeft;
+        if (s == "ror") return Kind::RotateRight;
+        if (s == "trunc") return Kind::Trunc;
+        if (s == "abs") return Kind::Abs;
+        if (s == "neg") return Kind::Negate;
+        serialization_error("Invalid CheckedOpKind value %.*s", SV(s));
+    }
+};
+
 template <> struct hl::from_list<simjit::LoadStoreKind> {
     simjit::LoadStoreKind operator()(hl::value x) {
         std::string_view s = x.as_string_view();
@@ -230,30 +277,44 @@ template <> struct hl::from_list<simjit::LoadStoreKind> {
     }
 };
 
+template <> struct hl::from_list<simjit::FunnelShiftKind> {
+    simjit::FunnelShiftKind operator()(hl::value x) {
+        std::string_view s = x.as_string_view();
+        if (s == "left") return simjit::FunnelShiftKind::Left;
+        if (s == "right") return simjit::FunnelShiftKind::Right;
+        serialization_error("Invalid FunnelShiftKind value %.*s", SV(s));
+    }
+};
+
 template <> struct hl::from_list<simjit::hir::StepKind> {
     simjit::hir::StepKind operator()(hl::value x) {
         std::string_view s = x.as_string_view();
         if (s == "load-splat") return simjit::hir::StepKind::LoadSplat;
         if (s == "const") return simjit::hir::StepKind::Const;
         if (s == "load") return simjit::hir::StepKind::Load;
+        if (s == "load-deinterleave") return simjit::hir::StepKind::LoadDeinterleave;
         if (s == "gather") return simjit::hir::StepKind::Gather;
         if (s == "binary") return simjit::hir::StepKind::ArithBinary;
+        if (s == "i128-div") return simjit::hir::StepKind::I128Div;
         if (s == "checked-op") return simjit::hir::StepKind::CheckedOp;
         if (s == "predicate-binary") return simjit::hir::StepKind::PredicateBinary;
         if (s == "unary") return simjit::hir::StepKind::ArithUnary;
         if (s == "int-cast") return simjit::hir::StepKind::IntCast;
         if (s == "float-cast") return simjit::hir::StepKind::FloatCast;
         if (s == "store") return simjit::hir::StepKind::Store;
+        if (s == "store-interleave") return simjit::hir::StepKind::StoreInterleave;
         if (s == "cmp") return simjit::hir::StepKind::Compare;
         if (s == "acc-arith-bin") return simjit::hir::StepKind::AccArithBinary;
         if (s == "acc-predicate-bin") return simjit::hir::StepKind::AccPredicateBinary;
         if (s == "countif") return simjit::hir::StepKind::Countif;
         if (s == "predicate-not") return simjit::hir::StepKind::PredicateNot;
         if (s == "select") return simjit::hir::StepKind::Select;
+        if (s == "funnel-shift") return simjit::hir::StepKind::FunnelShift;
         if (s == "index") return simjit::hir::StepKind::Index;
         if (s == "scatter") return simjit::hir::StepKind::Scatter;
         if (s == "pack") return simjit::hir::StepKind::Pack;
-        if (s == "sum128") return simjit::hir::StepKind::AccSum128;
+        if (s == "pack128") return simjit::hir::StepKind::Pack128;
+        if (s == "sum128") return simjit::hir::StepKind::AccI128;
         if (s == "permute") return simjit::hir::StepKind::Permute;
         if (s == "bitcast") return simjit::hir::StepKind::BitCast;
         if (s == "fpclass") return simjit::hir::StepKind::Fpclass;
@@ -326,48 +387,6 @@ template <> struct hl::from_list<simjit::ArithBinaryOpFlags> {
     }
 };
 
-template <> struct hl::to_list<simjit::ArgumentKind> {
-    hl::value operator()(simjit::ArgumentKind x) {
-        hl::list_builder b{};
-        if (bool(x & simjit::ArgumentKind::SrcArr)) b.add("src-arr");
-        if (bool(x & simjit::ArgumentKind::SrcIdxArr)) b.add("src-idx-arr");
-        if (bool(x & simjit::ArgumentKind::SrcConst)) b.add("src-const");
-        if (bool(x & simjit::ArgumentKind::Dst)) b.add("dst-arr");
-        if (bool(x & simjit::ArgumentKind::DstAgg)) b.add("dst-scalar");
-        if (bool(x & simjit::ArgumentKind::SrcGatherArr)) b.add("src-gather-arr");
-        if (bool(x & simjit::ArgumentKind::DstSafetyCheck)) b.add("dst-overflow");
-        if (b.size() == 1) { return hl::car(b.list()); }
-        return b.list();
-    }
-};
-
-template <> struct hl::from_list<simjit::ArgumentKind> {
-    simjit::ArgumentKind operator()(hl::value x) {
-        simjit::ArgumentKind result{};
-        if (hl::is_string(x)) { x = hl::list(x); }
-
-        for (std::string_view it : x.iter().as<std::string_view>()) {
-            if (it == "src-arr")
-                result |= simjit::ArgumentKind::SrcArr;
-            else if (it == "src-idx-arr")
-                result |= simjit::ArgumentKind::SrcIdxArr;
-            else if (it == "src-const")
-                result |= simjit::ArgumentKind::SrcConst;
-            else if (it == "dst-arr")
-                result |= simjit::ArgumentKind::Dst;
-            else if (it == "dst-scalar")
-                result |= simjit::ArgumentKind::DstAgg;
-            else if (it == "src-gather-arr")
-                result |= simjit::ArgumentKind::SrcGatherArr;
-            else if (it == "dst-overflow")
-                result |= simjit::ArgumentKind::DstSafetyCheck;
-            else
-                serialization_error("Invalid ArgumentKind entry %.*s", SV(it));
-        }
-        return result;
-    }
-};
-
 namespace simjit {
 
 using namespace hir;
@@ -405,7 +424,7 @@ static std::string debug_context_str() {
     std::string result;
     result.reserve(32);
     for (const auto &s : debug_context_stack) {
-        if (!result.empty()) { result += "|"; }
+        if (!result.empty()) { result += '|'; }
         result += s;
     }
     return result;
@@ -413,10 +432,15 @@ static std::string debug_context_str() {
 
 static hl::value serialize_args(const Function *func) {
     hl::list_builder b{};
+    const auto &usages = func->argument_usage;
     size_t i = 0;
     for (const auto &arg : func->args) {
         SIMJIT_ASSERT(arg.idx == i);
-        hl::value it = hl::list("arg", arg.idx, arg.dtype, arg.kind);
+        hl::value it = bool(usages[i] & ArgumentUsage::SafetyCheck)
+                           ? hl::list("safety-check-arg", arg.idx)
+                           : (arg.interleaved ? hl::list("arg", arg.idx, arg.dtype,
+                                                         hl::list("interleaved", arg.interleaved_half_dtype))
+                                              : hl::list("arg", arg.idx, arg.dtype));
         b.add(it);
         ++i;
     }
@@ -461,8 +485,13 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             payload = hl::list(serialize_arg_ref(data.idx), data.kind);
             break;
         }
+        SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+            payload = hl::list(serialize_arg_ref(data.idx), data.kind, data.lane_count, data.lane);
+            break;
+        }
         SIMJIT_MATCH (StepKind::LoadSplat) {
-            payload = hl::list(serialize_arg_ref(data.idx));
+            payload = data.byte_offset == 0 ? hl::list(serialize_arg_ref(data.idx))
+                                            : hl::list(serialize_arg_ref(data.idx), data.byte_offset);
             break;
         }
         SIMJIT_MATCH (StepKind::Index) { break; }
@@ -475,8 +504,23 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
                                    data.flags != ArithBinaryOpFlags::No ? hl::list(data.flags) : nullptr);
             break;
         }
+        SIMJIT_MATCH (StepKind::I128Div) {
+            payload = hl::list(data.op, ref(data.left_low), ref(data.left_high), ref(data.right_low),
+                               ref(data.right_high), data.high_word);
+            break;
+        }
         SIMJIT_MATCH (StepKind::CheckedOp) {
-            payload = hl::list_dot(ref(data.op), data.mask ? hl::list(ref(data.mask)) : nullptr);
+            if (data.kind >= CheckedOpKind::I128AddLow && data.kind <= CheckedOpKind::I128Trunc) {
+                if (data.right_low != nullptr) {
+                    payload = hl::list_dot(data.kind, ref(data.left_low), ref(data.left_high), ref(data.right_low),
+                                           ref(data.right_high), data.mask ? hl::list(ref(data.mask)) : nullptr);
+                } else {
+                    payload = hl::list_dot(data.kind, ref(data.left_low), ref(data.left_high),
+                                           data.mask ? hl::list(ref(data.mask)) : nullptr);
+                }
+            } else {
+                payload = hl::list_dot(data.kind, ref(data.op), data.mask ? hl::list(ref(data.mask)) : nullptr);
+            }
             break;
         }
         SIMJIT_MATCH (StepKind::ArithUnary) {
@@ -485,6 +529,11 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
         }
         SIMJIT_MATCH (StepKind::Store) {
             payload = hl::list_dot(ref(data.what), serialize_arg_ref(data.addr), data.kind,
+                                   data.cond ? hl::list(ref(data.cond)) : nullptr);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::StoreInterleave) {
+            payload = hl::list_dot(ref(data.even), ref(data.odd), serialize_arg_ref(data.dst), data.kind,
                                    data.cond ? hl::list(ref(data.cond)) : nullptr);
             break;
         }
@@ -513,8 +562,14 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             payload = hl::list(data.op, ref(data.arg), serialize_acc_ref(data.acc));
             break;
         }
-        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccSum128) {
+        SIMJIT_MATCH (StepKind::AccArithBinary) {
             payload = hl::list_dot(data.op, ref(data.arg), serialize_acc_ref(data.acc),
+                                   data.cond ? hl::list(ref(data.cond)) : nullptr);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::AccI128) {
+            SIMJIT_ASSERT(data.high != nullptr);
+            payload = hl::list_dot(data.op, ref(data.low), ref(data.high), serialize_acc_ref(data.acc),
                                    data.cond ? hl::list(ref(data.cond)) : nullptr);
             break;
         }
@@ -526,6 +581,10 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
             payload = hl::list(ref(data.cond), ref(data.truthy), ref(data.falsy));
             break;
         }
+        SIMJIT_MATCH (StepKind::FunnelShift) {
+            payload = hl::list(ref(data.left), ref(data.right), ref(data.amount), data.kind);
+            break;
+        }
         SIMJIT_MATCH (StepKind::Scatter) {
             payload = hl::list_dot(ref(data.arg), ref(data.idx), serialize_arg_ref(data.dst),
                                    data.cond ? hl::list(ref(data.cond)) : nullptr);
@@ -533,6 +592,11 @@ static hl::value serialize_step(const Step *step, const std::vector<size_t> &id_
         }
         SIMJIT_MATCH (StepKind::Pack) {
             payload = hl::list(ref(data.arg), ref(data.cond), serialize_arg_ref(data.dst),
+                               serialize_acc_ref(data.dst_size_acc));
+            break;
+        }
+        SIMJIT_MATCH (StepKind::Pack128) {
+            payload = hl::list(ref(data.low), ref(data.high), ref(data.cond), serialize_arg_ref(data.dst),
                                serialize_acc_ref(data.dst_size_acc));
             break;
         }
@@ -574,7 +638,7 @@ static hl::value serialize_headerlisp(const Function *func) {
     if (!func->accs.empty()) { b.add(serialize_accs(func, id_map)); }
     b.add(hl::cons("steps", steps_head));
     b.add(hl::cons("roots", roots_head));
-    if (func->scalar_only) { b.add(hl::list("scalar-only")); }
+    if (func->vectorization_hint == VectorizationHint::ScalarOnly) { b.add(hl::list("scalar-only")); }
     return b.list();
 }
 
@@ -590,13 +654,21 @@ static void process_deserialized_args(hl::value args, FunctionBuilder &builder) 
     for (auto arg : args.iter()) {
         DebugContextGuard guard{arg};
 
-        auto [idx, dtype, kind] = hl::require_match("invalid arg", arg, "arg", hl::cap_as<int>,
-                                                    hl::cap_as<ScalarDataType>, hl::cap_as<ArgumentKind>);
-        if (kind == ArgumentKind::DstSafetyCheck) {
+        if (auto match = hl::match(arg, "safety-check-arg", hl::cap_as<int>)) {
+            auto [idx] = *match;
             Argument arg_id = builder.arg_safety_check();
             GUARD_DESERIALIZE((int)arg_id.idx_ == idx);
+        } else if (auto m = hl::match(arg, "arg", hl::cap_as<int>, hl::cap_as<ScalarDataType>, hl::cap)) {
+            auto [idx, dtype, layout] = *m;
+            auto [half_dtype] = hl::require_match("invalid interleaved argument layout", layout, "interleaved",
+                                                  hl::cap_as<ScalarDataType>);
+            Argument arg_id = builder.arg(dtype);
+            builder.mark_arg_interleave(arg_id, half_dtype);
+            GUARD_DESERIALIZE((int)arg_id.idx_ == idx);
         } else {
-            Argument arg_id = builder.arg(dtype, kind);
+            auto [idx, dtype] =
+                hl::require_match("invalid arg", arg, "arg", hl::cap_as<int>, hl::cap_as<ScalarDataType>);
+            Argument arg_id = builder.arg(dtype);
             GUARD_DESERIALIZE((int)arg_id.idx_ == idx);
         }
     }
@@ -622,6 +694,7 @@ static AccIdx parse_acc_ref(hl::value v) {
 
 static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &builder,
                                               const std::unordered_map<int, DynamicValue> &step_map,
+                                              const std::unordered_map<int, hl::value> &serialized_step_map,
                                               const std::unordered_map<AccIdx, Argument> &acc_arg_map) {
     DebugContextGuard guard{step};
 
@@ -657,11 +730,121 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
             bind_step(hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap, hl::or_nil_as<ArithBinaryOpFlags>);
         return builder.arith_binary(ref_value(l), ref_value(r), op, flags);
     }
+    case StepKind::I128Div: {
+        auto [op, left_low, left_high, right_low, right_high, high_word] =
+            bind_step(hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap, hl::cap, hl::cap, hl::cap_as<bool>);
+        auto join_i128 = [&](hl::value low_word, hl::value high_word_value) {
+            Value low = builder.zext(ref_value(low_word), ScalarDataType::I128);
+            Value high = builder.zext(ref_value(high_word_value), ScalarDataType::I128);
+            return builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+        };
+        Value quotient = builder.arith_binary(join_i128(left_low, left_high), join_i128(right_low, right_high), op);
+        Value selected = high_word ? builder.srl(quotient, builder.con(64, ScalarDataType::I128)) : quotient;
+        return builder.trunc(selected, ScalarDataType::I64);
+    }
     case StepKind::CheckedOp: {
-        auto [op, mask] = bind_step(hl::cap, hl::or_nil);
+        auto [checked_kind, checked_payload] = bind_step(hl::cap_as<hir::CheckedOpKind>, hl::rest);
+        if (checked_kind >= hir::CheckedOpKind::I128AddLow && checked_kind <= hir::CheckedOpKind::I128Trunc) {
+            auto join_i128 = [&](hl::value low_word, hl::value high_word_value) {
+                Value low = builder.zext(ref_value(low_word), ScalarDataType::I128);
+                Value high = builder.zext(ref_value(high_word_value), ScalarDataType::I128);
+                return builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+            };
+            bool unary =
+                checked_kind == hir::CheckedOpKind::I128NegateLow ||
+                checked_kind == hir::CheckedOpKind::I128NegateHigh || checked_kind == hir::CheckedOpKind::I128AbsLow ||
+                checked_kind == hir::CheckedOpKind::I128AbsHigh || checked_kind == hir::CheckedOpKind::I128Trunc;
+            hl::value left_low{};
+            hl::value left_high{};
+            hl::value right_low{};
+            hl::value right_high{};
+            hl::value mask{};
+            if (unary) {
+                std::tie(left_low, left_high, mask) =
+                    hl::require_match(hl::print(step).c_str(), checked_payload, hl::cap, hl::cap, hl::or_nil);
+            } else {
+                std::tie(left_low, left_high, right_low, right_high, mask) = hl::require_match(
+                    hl::print(step).c_str(), checked_payload, hl::cap, hl::cap, hl::cap, hl::cap, hl::or_nil);
+            }
+            MaybePredicate predicate{};
+            if (!hl::is_nil(mask)) { predicate = ref_predicate(mask); }
+            Value left = join_i128(left_low, left_high);
+            if (checked_kind == hir::CheckedOpKind::I128Trunc) {
+                return builder.checked_op(builder.trunc(left, dtype), predicate);
+            }
+            std::optional<Value> checked;
+            if (unary) {
+                checked.emplace(
+                    builder.checked_op(builder.arith_unary(left, checked_kind == hir::CheckedOpKind::I128AbsLow ||
+                                                                         checked_kind == hir::CheckedOpKind::I128AbsHigh
+                                                                     ? ArithUnaryOp::Abs
+                                                                     : ArithUnaryOp::Negate),
+                                       predicate));
+            } else {
+                ArithBinaryOp op{};
+                switch (checked_kind) {
+                case hir::CheckedOpKind::I128AddLow:
+                case hir::CheckedOpKind::I128AddHigh: op = ArithBinaryOp::Add; break;
+                case hir::CheckedOpKind::I128SubLow:
+                case hir::CheckedOpKind::I128SubHigh: op = ArithBinaryOp::Sub; break;
+                case hir::CheckedOpKind::I128MulLow:
+                case hir::CheckedOpKind::I128MulHigh: op = ArithBinaryOp::Mul; break;
+                case hir::CheckedOpKind::I128SllLow:
+                case hir::CheckedOpKind::I128SllHigh: op = ArithBinaryOp::ShiftLeftLogical; break;
+                case hir::CheckedOpKind::I128SrlLow:
+                case hir::CheckedOpKind::I128SrlHigh: op = ArithBinaryOp::ShiftRightLogical; break;
+                case hir::CheckedOpKind::I128SraLow:
+                case hir::CheckedOpKind::I128SraHigh: op = ArithBinaryOp::ShiftRightArith; break;
+                case hir::CheckedOpKind::I128RotlLow:
+                case hir::CheckedOpKind::I128RotlHigh: op = ArithBinaryOp::RotateLeft; break;
+                case hir::CheckedOpKind::I128RotrLow:
+                case hir::CheckedOpKind::I128RotrHigh: op = ArithBinaryOp::RotateRight; break;
+                default: SIMJIT_UNREACHABLE();
+                }
+                checked.emplace(
+                    builder.checked_op(builder.arith_binary(left, join_i128(right_low, right_high), op), predicate));
+            }
+            bool high =
+                checked_kind == hir::CheckedOpKind::I128AddHigh || checked_kind == hir::CheckedOpKind::I128SubHigh ||
+                checked_kind == hir::CheckedOpKind::I128MulHigh || checked_kind == hir::CheckedOpKind::I128SllHigh ||
+                checked_kind == hir::CheckedOpKind::I128SrlHigh || checked_kind == hir::CheckedOpKind::I128SraHigh ||
+                checked_kind == hir::CheckedOpKind::I128RotlHigh || checked_kind == hir::CheckedOpKind::I128RotrHigh ||
+                checked_kind == hir::CheckedOpKind::I128NegateHigh || checked_kind == hir::CheckedOpKind::I128AbsHigh;
+            if (high) {
+                return builder.trunc(builder.srl(*checked, builder.con(64, ScalarDataType::I128)), ScalarDataType::I64);
+            }
+            return builder.trunc(*checked, ScalarDataType::I64);
+        }
+        auto [op, mask] = hl::require_match(hl::print(step).c_str(), checked_payload, hl::cap, hl::or_nil);
         MaybePredicate predicate{};
         if (!hl::is_nil(mask)) { predicate = ref_predicate(mask); }
-        return builder.checked_op(ref_value(op), predicate);
+        auto [op_kind, op_dtype, op_payload] =
+            hl::require_match(hl::print(op).c_str(), serialized_step_map.at(parse_step_ref(op)),
+                              hl::cap_as<hir::StepKind>, hl::cap_as<ScalarDataType>, hl::rest);
+        if (op_kind == StepKind::I128Div) {
+            auto [div_op, left_low, left_high, right_low, right_high, high_word] =
+                hl::require_match(hl::print(op).c_str(), op_payload, hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap,
+                                  hl::cap, hl::cap, hl::cap_as<bool>);
+            if (op_dtype != ScalarDataType::I64) { serialization_error("Invalid i128 division word dtype"); }
+            auto join_i128 = [&](hl::value low_word, hl::value high_word_value) {
+                Value low = builder.zext(ref_value(low_word), ScalarDataType::I128);
+                Value high = builder.zext(ref_value(high_word_value), ScalarDataType::I128);
+                return builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+            };
+            Value quotient = builder.checked_op(
+                builder.arith_binary(join_i128(left_low, left_high), join_i128(right_low, right_high), div_op),
+                predicate);
+            if (checked_kind != hir::CheckedOpKind::I128Div) {
+                serialization_error("Checked operation kind does not match i128 division");
+            }
+            Value selected = high_word ? builder.srl(quotient, builder.con(64, ScalarDataType::I128)) : quotient;
+            return builder.trunc(selected, ScalarDataType::I64);
+        }
+        Value checked = builder.checked_op(ref_value(op), predicate);
+        if (checked.step_->step_data<StepKind::CheckedOp>().kind != checked_kind) {
+            serialization_error("Checked operation kind does not match its operation");
+        }
+        return checked;
     }
     case StepKind::ArithUnary: {
         auto [op, arg, overflow] = bind_step(hl::cap_as<ArithUnaryOp>, hl::cap, hl::or_nil_as<bool>);
@@ -707,6 +890,14 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
     case StepKind::Index: {
         return builder.index(dtype);
     }
+    case StepKind::FunnelShift: {
+        auto [left, right, amount, shift_kind] = bind_step(hl::cap, hl::cap, hl::cap, hl::cap_as<FunnelShiftKind>);
+        Value l = ref_value(left);
+        Value r = ref_value(right);
+        Value a = ref_value(amount);
+        return shift_kind == FunnelShiftKind::Left ? builder.funnel_shift_left(l, r, a)
+                                                   : builder.funnel_shift_right(l, r, a);
+    }
     case StepKind::Permute: {
         auto [arg, perm, bit] = bind_step(hl::cap, hl::cap, hl::cap_as<bool>);
         uint64_t permute_values = strtoull(perm.as_c_str(), nullptr, 16);
@@ -721,14 +912,42 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         if (dtype == ScalarDataType::I1) { return builder.load_predicate(parse_arg_ref(func_arg)); }
         return builder.load(parse_arg_ref(func_arg), load_kind);
     }
+    case StepKind::StoreInterleave: {
+        auto [even, odd, dst, store_kind, cond] =
+            bind_step(hl::cap, hl::cap, hl::cap, hl::cap_as<LoadStoreKind>, hl::maybe);
+        if (cond) {
+            builder.cond_store_interleave(ref_value(even), ref_value(odd), ref_predicate(cond.value()),
+                                          parse_arg_ref(dst), store_kind);
+        } else {
+            builder.store_interleave(parse_arg_ref(dst), ref_value(even), ref_value(odd), store_kind);
+        }
+        return {};
+    }
+    case StepKind::LoadDeinterleave: {
+        auto [func_arg, load_kind, lane_count, lane] =
+            bind_step(hl::cap, hl::cap_as<LoadStoreKind>, hl::cap_as<int>, hl::cap_as<int>);
+        if (lane_count < 2 || lane >= lane_count) {
+            serialization_error("Invalid deinterleave lane metadata %d/%d", lane, lane_count);
+        }
+        return builder.load_deinterleave(parse_arg_ref(func_arg), lane_count, lane, load_kind);
+    }
     case StepKind::Gather: {
         auto [idx, func_arg] = bind_step(hl::cap, hl::cap);
-        return builder.gather(ref_value(idx), parse_arg_ref(func_arg));
+        return builder.gather(ref_value(idx), parse_arg_ref(func_arg), dtype);
     }
     case StepKind::LoadSplat: {
-        auto [func_arg] = bind_step(hl::cap);
-        if (dtype == ScalarDataType::I1) { return builder.load_predicate_splat(parse_arg_ref(func_arg)); }
-        return builder.load_splat(parse_arg_ref(func_arg));
+        auto [func_arg, offset] = bind_step(hl::cap, hl::or_nil);
+        size_t byte_offset = 0;
+        if (!hl::is_nil(offset)) {
+            int parsed_offset = offset.as_int();
+            if (parsed_offset < 0) { serialization_error("load-splat byte offset must not be negative"); }
+            byte_offset = (size_t)parsed_offset;
+        }
+        if (dtype == ScalarDataType::I1) {
+            if (byte_offset != 0) { serialization_error("Predicate load-splat does not support byte offsets"); }
+            return builder.load_predicate_splat(parse_arg_ref(func_arg));
+        }
+        return builder.load_splat(parse_arg_ref(func_arg), dtype, byte_offset);
     }
     case StepKind::Store: {
         auto [arg, func_arg, store_kind, cond] = bind_step(hl::cap, hl::cap, hl::cap_as<LoadStoreKind>, hl::maybe);
@@ -753,6 +972,14 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         builder.pack(ref_value(arg), ref_predicate(cond), parse_arg_ref(dst), acc_arg_map.at(parse_acc_ref(acc)));
         return {};
     }
+    case StepKind::Pack128: {
+        auto [low_word, high_word, cond, dst, acc] = bind_step(hl::cap, hl::cap, hl::cap, hl::cap, hl::cap);
+        Value low = builder.zext(ref_value(low_word), ScalarDataType::I128);
+        Value high = builder.zext(ref_value(high_word), ScalarDataType::I128);
+        Value value = builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+        builder.pack(value, ref_predicate(cond), parse_arg_ref(dst), acc_arg_map.at(parse_acc_ref(acc)));
+        return {};
+    }
     case StepKind::Scatter: {
         auto [arg, idx, dst, cond] = bind_step(hl::cap, hl::cap, hl::cap, hl::maybe);
         if (cond) {
@@ -762,13 +989,26 @@ static DynamicValue process_deserialized_step(hl::value step, FunctionBuilder &b
         }
         return {};
     }
-    case StepKind::AccArithBinary:
-    case StepKind::AccSum128: {
+    case StepKind::AccArithBinary: {
         auto [op, arg, acc, cond] = bind_step(hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap, hl::maybe);
         if (cond) {
             builder.cond_arith_agg(ref_value(arg), ref_predicate(cond.value()), op, acc_arg_map.at(parse_acc_ref(acc)));
         } else {
             builder.arith_agg(ref_value(arg), op, acc_arg_map.at(parse_acc_ref(acc)));
+        }
+        return {};
+    }
+    case StepKind::AccI128: {
+        auto [op, low_word, high_word, acc, cond] =
+            bind_step(hl::cap_as<ArithBinaryOp>, hl::cap, hl::cap, hl::cap, hl::maybe);
+        Value low = builder.int_cast(ref_value(low_word), ScalarDataType::I128, IntCastKind::Zext);
+        Value high = builder.int_cast(ref_value(high_word), ScalarDataType::I128, IntCastKind::Zext);
+        Value value = builder.or_(low, builder.sll(high, builder.con(64, ScalarDataType::I128)));
+        Argument dst = acc_arg_map.at(parse_acc_ref(acc));
+        if (cond) {
+            builder.cond_arith_agg(value, ref_predicate(cond.value()), op, dst);
+        } else {
+            builder.arith_agg(value, op, dst);
         }
         return {};
     }
@@ -808,10 +1048,12 @@ static void process_deserialized_steps(hl::value steps, FunctionBuilder &builder
 
     int idx = 0;
     std::unordered_map<int, DynamicValue> step_map;
+    std::unordered_map<int, hl::value> serialized_step_map;
     for (auto step : steps.iter()) {
         auto [other] = hl::require_match("invalid step", step, "step", idx, hl::rest);
-        auto v = process_deserialized_step(other, builder, step_map, acc_arg_map);
+        auto v = process_deserialized_step(other, builder, step_map, serialized_step_map, acc_arg_map);
         step_map[idx] = v;
+        serialized_step_map[idx] = other;
 
         idx++;
     }

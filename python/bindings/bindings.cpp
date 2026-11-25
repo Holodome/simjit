@@ -85,6 +85,7 @@ PYBIND11_MODULE(_simjit, m) {
         .value("MIR", sj::jit::DebugStage::MIR)
         .value("ASM", sj::jit::DebugStage::ASM)
         .value("MachineCode", sj::jit::DebugStage::MachineCode)
+        .value("Serialized", sj::jit::DebugStage::Serialized)
         .value("All", sj::jit::DebugStage::All);
     py::enum_<sj::CodeTransformations>(m, "CodeTransformations")
         .value("No", sj::CodeTransformations::No)
@@ -97,7 +98,6 @@ PYBIND11_MODULE(_simjit, m) {
         .value("MaskCombine", sj::CodeTransformations::MaskCombine)
         .value("TernarylogicInst", sj::CodeTransformations::TernarylogicInst)
         .value("FmaInst", sj::CodeTransformations::FmaInst)
-        .value("SmallArith", sj::CodeTransformations::SmallArith)
         .value("All", sj::CodeTransformations::All);
     py::enum_<sj::LoadStoreKind>(m, "LoadStoreKind")
         .value("Aligned", sj::LoadStoreKind::Aligned)
@@ -206,6 +206,7 @@ PYBIND11_MODULE(_simjit, m) {
         .def_readonly("compilation_attempts", &sj::jit::Statistics::compilation_attempts)
         .def_readonly("compilation_successes", &sj::jit::Statistics::compilation_successes)
         .def_readonly("compilation_failures", &sj::jit::Statistics::compilation_failures)
+        .def_readonly("last_compilation_ns", &sj::jit::Statistics::last_compilation_ns)
         .def_readonly("last_compilation_arena_used_memory", &sj::jit::Statistics::last_compilation_arena_used_memory)
         .def_readonly("last_compilation_arena_reserved_memory",
                       &sj::jit::Statistics::last_compilation_arena_reserved_memory)

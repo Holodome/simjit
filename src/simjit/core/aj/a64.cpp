@@ -5,6 +5,7 @@
 
 #include "simjit/asmjit.h"
 #include "simjit/core/expr.h"
+#include "simjit/core/hir.h"
 #include "simjit/core/mir.h"
 #include "simjit/detail/base.h"
 #include "simjit/simjit.h"
@@ -53,6 +54,7 @@ enum : uint64_t {
     Zero8One8,       // [0 x8, 1 x8], used in Load M16
     I32_32,          // (i32)32
     I64_64,          // (i64)64
+    I16_16,          // (i16)16
     F32_Inf,         // (f32)0x7F800000
     F64_Inf,         // (f64)0x7FF0000000000000
     F32_Mant,        // (f32)0x007FFFFF
@@ -82,7 +84,7 @@ struct SuggestedReg {
 };
 
 struct ArgInfo {
-    const ArgumentDecl *arg;
+    const ArgumentDecl *arg = nullptr;
     aja64::Gp gp;
 };
 
@@ -306,6 +308,7 @@ static bool vector_binary_const_can_fold(VecDataType vdtype, ArithBinaryOp op, c
 namespace {
 struct CompileState {
     MemoryArena *arena;
+    // cppcheck-suppress uninitMemberVarNoCtor
     aja64::Compiler &cc;
     GpR counter{};
     GpR row_count{};
@@ -363,10 +366,12 @@ struct CompileState {
 
     VecR vec_special_const(unsigned constant) noexcept {
         SIMJIT_ASSERT(constant < SpecialConstant::Count);
+        // cppcheck-suppress arrayIndexOutOfBoundsCond
         return special_constants[constant].as<VecR>();
     }
     GpR gp_special_const(unsigned constant) noexcept {
         SIMJIT_ASSERT(constant < SpecialConstant::Count);
+        // cppcheck-suppress arrayIndexOutOfBoundsCond
         return special_constants[constant].as<GpR>();
     }
 
@@ -384,7 +389,7 @@ struct CompileState {
         return refcounts[step->id] != 0 && refcounts[step->id] == folded_const_refcounts[step->id];
     }
 
-    void record_folded_const_ref(Step *step) {
+    void record_folded_const_ref(const Step *step) {
         switch (step->kind) {
             SIMJIT_MATCH (StepKind::ArithBinary) {
                 if (!SIMJIT_A64_ASMJIT_CONST_OPS || !data.right->is(StepKind::Const)) { return; }
@@ -511,53 +516,47 @@ struct CompileState {
         return {left, shrink_mask(right, right_size, left_size)};
     }
 
-    aja64::Mem vec_mem(const ArgumentAddress &addr, VecDataType dtype, bool change_post_idx = true) {
-        if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
+    // TODO(a64 addressing): add an inline-offset-support argument to the Mem-returning helpers and fold the
+    // static row offset into the instruction instead of the second add in the fallback path. Per-instruction
+    // support (ARMv8 SIMD load/store addressing classes):
+    //   LDR/STR B/H/S/D/Q  - immediate (unsigned, scaled by size) and register offset: both supported
+    //   LDP/STP S/D/Q      - immediate only (signed, scaled by 8), no register offset
+    //   LD1R/LD2R/LD3R/LD4R (replicate) - no inline offset
+    //   LD1/ST1/LD2/ST2/LD3/ST4 multiple structures (incl. future ld2/st2) - no inline offset
+    //   LD1/ST1/.../LD4/ST4 single structure to one lane ({Vt.T}[i]) - no inline offset
+    aja64::Mem row_address(const ArgumentAddress &addr, size_t elem_log2, size_t elems_per_row_log2,
+                           size_t stride_elems, bool change_post_idx = true) {
+        if (change_post_idx && SIMJIT_A64_ASMJIT_INDEX_REGS) {
             if (auto &state = index_regs[addr.arg]; state.gp.is_valid()) {
-                if (!change_post_idx && state.offset == addr.offset) { return aja64::ptr(state.gp); }
                 if (state.offset == addr.offset) {
-                    state.offset += dtype.nelems();
-                    return aja64::ptr_post(state.gp, (int)dtype.size_bytes());
+                    state.offset += stride_elems;
+                    return aja64::ptr_post(state.gp, (int)(stride_elems << elem_log2));
                 }
             }
         }
         GpR base = args[addr.arg].gp;
         GpR tmp = cc.new_gp64();
-        cc.add(tmp, base, counter, aja64::lsl(dtype.element_size_bytes_log2()));
-        if (addr.offset != 0) { cc.add(tmp, tmp, addr.offset << dtype.element_size_bytes_log2()); }
+        cc.add(tmp, base, counter, aja64::lsl(elem_log2 + elems_per_row_log2));
+        if (addr.offset != 0) { cc.add(tmp, tmp, addr.offset << elem_log2); }
         return aja64::ptr(tmp);
+    }
+
+    aja64::Mem vec_mem(const ArgumentAddress &addr, VecDataType dtype, bool change_post_idx = true) {
+        return row_address(addr, dtype.element_size_bytes_log2(), 0, dtype.nelems(), change_post_idx);
     }
 
     aja64::Mem vec_pair_mem(const ArgumentAddress &addr, VecDataType dtype) {
-        if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
-            if (auto &state = index_regs[addr.arg]; state.gp.is_valid()) {
-                if (state.offset == addr.offset) {
-                    state.offset += dtype.nelems() * 2;
-                    return aja64::ptr_post(state.gp, (int)dtype.size_bytes() * 2);
-                }
-            }
-        }
-        GpR base = args[addr.arg].gp;
-        GpR tmp = cc.new_gp64();
-        cc.add(tmp, base, counter, aja64::lsl(dtype.element_size_bytes_log2()));
-        if (addr.offset != 0) { cc.add(tmp, tmp, addr.offset << dtype.element_size_bytes_log2()); }
-        return aja64::ptr(tmp);
+        return row_address(addr, dtype.element_size_bytes_log2(), 0, dtype.nelems() * 2);
+    }
+
+    // Address of an interleaved pair. The argument's carrier defines the record
+    // stride; dtype is the type of each half.
+    aja64::Mem vec_deinterleave_mem(const ArgumentAddress &addr, VecDataType dtype, bool change_post_idx = true) {
+        return row_address(addr, scalar_dtype_size_log2(args[addr.arg].arg->dtype), 0, dtype.nelems(), change_post_idx);
     }
 
     aja64::Mem scalar_mem(const ArgumentAddress &addr, ScalarDataType sdtype) {
-        if (SIMJIT_A64_ASMJIT_INDEX_REGS) {
-            if (auto &state = index_regs[addr.arg]; state.gp.is_valid()) {
-                if (state.offset == addr.offset) {
-                    state.offset += 1;
-                    return aja64::ptr_post(state.gp, (int)scalar_dtype_size(sdtype));
-                }
-            }
-        }
-        GpR base = args[addr.arg].gp;
-        GpR tmp = cc.new_gp64();
-        cc.add(tmp, base, counter, aja64::lsl(scalar_dtype_size_log2(sdtype)));
-        if (addr.offset != 0) { cc.add(tmp, tmp, addr.offset << scalar_dtype_size_log2(sdtype)); }
-        return aja64::ptr(tmp);
+        return row_address(addr, scalar_dtype_size_log2(sdtype), 0, 1);
     }
 
     aja64::Mem mask_mem(const ArgumentAddress &addr, MaskDataType mdtype) {
@@ -964,6 +963,130 @@ struct CompileState {
         return emit_vector_gather_indirect(data, vdtype, idx_dtype);
     }
 
+    void emit_vector_scatter_direct(const ScatterData &data, const VecR &value, VecDataType vdtype,
+                                    VecDataType idx_dtype) {
+        SIMJIT_ASSERT(data.idx->is(StepKind::Load));
+        SIMJIT_ASSERT(idx_dtype.nelems() == 2 || idx_dtype.nelems() == 4);
+
+        auto idx_data = data.idx->step_data<StepKind::Load>();
+        GpR indices[4];
+        for (uint32_t lane = 0; lane != idx_dtype.nelems(); ++lane) {
+            indices[lane] = cc.new_gp64();
+        }
+
+        if (SIMJIT_A64_ASMJIT_INDEX_REGS && index_regs[idx_data.addr.arg].gp.is_valid() &&
+            index_regs[idx_data.addr.arg].offset == idx_data.addr.offset) {
+            IndexRegState &state = index_regs[idx_data.addr.arg];
+            state.offset += idx_dtype.nelems();
+            int pair_size = (int)(idx_dtype.element_size_bytes() * 2);
+            for (uint32_t lane = 0; lane != idx_dtype.nelems(); lane += 2) {
+                aja64::Mem mem = aja64::ptr_post(state.gp, pair_size);
+                if (idx_dtype.elem == VecElemType::I32) {
+                    cc.ldpsw(indices[lane], indices[lane + 1], mem);
+                } else {
+                    cc.ldp(indices[lane], indices[lane + 1], mem);
+                }
+            }
+        } else {
+            const ArgInfo &idx_arg = args[idx_data.addr.arg];
+            GpR base = cc.new_gp64();
+            cc.add(base, idx_arg.gp, counter, aja64::lsl(idx_dtype.element_size_bytes_log2()));
+            if (idx_data.addr.offset != 0) {
+                cc.add(base, base, (int64_t)(idx_data.addr.offset << idx_dtype.element_size_bytes_log2()));
+            }
+            for (uint32_t lane = 0; lane != idx_dtype.nelems(); lane += 2) {
+                aja64::Mem mem = aja64::ptr(base, (int32_t)(lane * idx_dtype.element_size_bytes()));
+                if (idx_dtype.elem == VecElemType::I32) {
+                    cc.ldpsw(indices[lane], indices[lane + 1], mem);
+                } else {
+                    cc.ldp(indices[lane], indices[lane + 1], mem);
+                }
+            }
+        }
+
+        const ArgInfo &arg = args[data.dst];
+        for (uint32_t lane = 0; lane != vdtype.nelems(); ++lane) {
+            GpR idx = indices[lane];
+            if (lane == 0) {
+                aja64::Mem mem = mem_offset(arg.gp, idx, vdtype.to_scalar());
+                switch (vdtype.elem) {
+                case VecElemType::I8: cc.str(value.b(), mem); break;
+                case VecElemType::I16: cc.str(value.h(), mem); break;
+                case VecElemType::I32:
+                case VecElemType::F32: cc.str(value.s(), mem); break;
+                case VecElemType::I64:
+                case VecElemType::F64: cc.str(value.d(), mem); break;
+                }
+                continue;
+            }
+
+            GpR addr = cc.new_gp64();
+            cc.add(addr, arg.gp, idx.x(), aja64::lsl(vdtype.element_size_bytes_log2()));
+            switch (vdtype.elem) {
+            case VecElemType::I8: cc.st1(value.b(lane), aja64::ptr(addr)); break;
+            case VecElemType::I16: cc.st1(value.h(lane), aja64::ptr(addr)); break;
+            case VecElemType::I32:
+            case VecElemType::F32: cc.st1(value.s(lane), aja64::ptr(addr)); break;
+            case VecElemType::I64:
+            case VecElemType::F64: cc.st1(value.d(lane), aja64::ptr(addr)); break;
+            }
+        }
+    }
+
+    void emit_vector_scatter_indirect(const ScatterData &data, const VecR &value, VecDataType vdtype,
+                                      VecDataType idx_dtype) {
+        const ArgInfo &arg = args[data.dst];
+        VecR idx_vec = vec_subexpr(data.idx);
+
+        for (uint32_t lane = 0; lane != vdtype.nelems(); ++lane) {
+            GpR idx = idx_dtype.elem == VecElemType::I32 ? cc.new_gp32() : cc.new_gp64();
+            if (idx_dtype.elem == VecElemType::I32) {
+                cc.umov(idx.w(), idx_vec.s(lane));
+            } else {
+                cc.umov(idx.x(), idx_vec.d(lane));
+            }
+
+            if (lane == 0) {
+                aja64::Mem mem = mem_offset(arg.gp, idx, vdtype.to_scalar());
+                switch (vdtype.elem) {
+                case VecElemType::I8: cc.str(value.b(), mem); break;
+                case VecElemType::I16: cc.str(value.h(), mem); break;
+                case VecElemType::I32:
+                case VecElemType::F32: cc.str(value.s(), mem); break;
+                case VecElemType::I64:
+                case VecElemType::F64: cc.str(value.d(), mem); break;
+                }
+                continue;
+            }
+
+            GpR addr = cc.new_gp64();
+            cc.add(addr, arg.gp, idx.x(), aja64::lsl(vdtype.element_size_bytes_log2()));
+            switch (vdtype.elem) {
+            case VecElemType::I8: cc.st1(value.b(lane), aja64::ptr(addr)); break;
+            case VecElemType::I16: cc.st1(value.h(lane), aja64::ptr(addr)); break;
+            case VecElemType::I32:
+            case VecElemType::F32: cc.st1(value.s(lane), aja64::ptr(addr)); break;
+            case VecElemType::I64:
+            case VecElemType::F64: cc.st1(value.d(lane), aja64::ptr(addr)); break;
+            }
+        }
+    }
+
+    void emit_vector_scatter(const ScatterData &data, VecDataType vdtype) {
+        VecDataType idx_dtype = data.idx->dtype.as_vec();
+        if (idx_dtype.elem != VecElemType::I32 && idx_dtype.elem != VecElemType::I64) {
+            unsupported("Do not support %s gather index", show_vec_dtype(idx_dtype));
+        }
+        if (idx_dtype.nelems() != vdtype.nelems()) {
+            messed_up("Gather value/index lane count mismatch: value=%s index=%s", show_vec_dtype(vdtype),
+                      show_vec_dtype(idx_dtype));
+        }
+
+        VecR value = vec_subexpr(data.arg);
+        if (data.idx->is(StepKind::Load)) { return emit_vector_scatter_direct(data, value, vdtype, idx_dtype); }
+        return emit_vector_scatter_indirect(data, value, vdtype, idx_dtype);
+    }
+
     VecR emit_vec_narrow_combine(VecDataType vdtype, const VecR &low, const VecR &high) {
         VecR result = create_vec_reg(vdtype);
         switch (vdtype.elem) {
@@ -1023,11 +1146,27 @@ struct CompileState {
                 load(cc, result, mem, sdtype);
                 return result;
             }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (data.lane_count != 2 || data.lane >= data.lane_count || sdtype == ScalarDataType::I1) {
+                    unsupported("Unsupported scalar load-deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                AnyR result = create_scalar_reg(sdtype);
+                GpR addr = cc.new_gp64();
+                cc.add(addr, args[data.addr.arg].gp, counter, aja64::lsl(scalar_dtype_size_log2(sdtype) + 1));
+                if (data.lane != 0) { cc.add(addr, addr, size_t{data.lane} << scalar_dtype_size_log2(sdtype)); }
+                load(cc, result, aja64::ptr(addr), sdtype);
+                return result;
+            }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 const ArgInfo &arg = args[data.addr.arg];
                 sdtype = sdtype == ScalarDataType::I1 ? ScalarDataType::I8 : sdtype;
                 AnyR result = create_scalar_reg(sdtype);
-                load(cc, result, aja64::ptr(arg.gp), sdtype);
+                GpR base = arg.gp;
+                if (data.byte_offset != 0) {
+                    base = cc.new_gp64();
+                    cc.add(base, arg.gp, data.byte_offset);
+                }
+                load(cc, result, aja64::ptr(base), sdtype);
                 if (step->dtype == ScalarDataType::I1) { cc.and_(result.as<GpR>(), result.as<GpR>(), 1); }
                 return result;
             }
@@ -1058,6 +1197,41 @@ struct CompileState {
                 AnyR what = subexpr(data.what);
                 aja64::Mem mem = scalar_mem(data.addr, sdtype);
                 store(cc, what, mem, sdtype);
+                return {};
+            }
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                aj::Label skip_label{};
+                if (data.cond != nullptr) {
+                    GpR cond = int_subexpr(data.cond);
+                    skip_label = cc.new_anonymous_label("skip");
+                    cc.cbz(cond, skip_label);
+                }
+                AnyR even = subexpr(data.even);
+                AnyR odd = subexpr(data.odd);
+                SIMJIT_ASSERT(data.dst.offset == 0);
+                aja64::Mem mem = row_address(data.dst, scalar_dtype_size_log2(sdtype), 1, 2, data.cond == nullptr);
+                switch (sdtype) {
+                case ScalarDataType::F32:
+                case ScalarDataType::F64: cc.stp(even.as<VecR>(), odd.as<VecR>(), mem); break;
+                case ScalarDataType::I32:
+                case ScalarDataType::I64: cc.stp(even.as<GpR>(), odd.as<GpR>(), mem); break;
+                case ScalarDataType::I8:
+                case ScalarDataType::I16: {
+                    GpR tmp = cc.new_gp32();
+                    cc.mov(tmp, even.as<GpR>());
+                    size_t bits = scalar_dtype_bits(sdtype);
+                    cc.bfi(tmp, odd.as<GpR>(), bits, bits);
+                    if (sdtype == ScalarDataType::I8) {
+                        cc.strh(tmp, mem);
+                    } else {
+                        cc.str(tmp, mem);
+                    }
+                    break;
+                }
+                case ScalarDataType::I1:
+                case ScalarDataType::I128: messed_up("...");
+                }
+                if (skip_label.is_valid()) cc.bind(skip_label);
                 return {};
             }
             SIMJIT_MATCH (StepKind::ArithBinary) {
@@ -1291,11 +1465,126 @@ struct CompileState {
 
                 return result;
             }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                GpR left = int_subexpr(data.left);
+                GpR right = int_subexpr(data.right);
+                GpR result = create_int_reg(sdtype);
+                uint64_t bits = scalar_dtype_bits(sdtype);
+
+                if (SIMJIT_A64_ASMJIT_CONST_OPS && data.amount->is(StepKind::Const)) {
+                    uint64_t imm = data.amount->step_data<StepKind::Const>().as_unsigned();
+                    if (sdtype == ScalarDataType::I64) {
+                        GpR tmp = cc.new_gp64();
+                        if (data.kind == FunnelShiftKind::Left) {
+                            cc.lsl(result, left, imm);
+                            cc.lsr(tmp, right, bits - imm);
+                        } else {
+                            cc.lsr(result, right, imm);
+                            cc.lsl(tmp, left, bits - imm);
+                        }
+                        cc.orr(result, result, tmp);
+                        return result;
+                    }
+                    if (sdtype == ScalarDataType::I32) {
+                        GpR concat = cc.new_gp64();
+                        cc.mov(concat.w(), right);
+                        cc.orr(concat.x(), concat.x(), left.x(), aja64::lsl(32));
+                        cc.lsr(result.x(), concat.x(), data.kind == FunnelShiftKind::Left ? bits - imm : imm);
+                        return result;
+                    }
+                    GpR concat = cc.new_gp32();
+                    cc.and_(concat, right.w(), 0xffff);
+                    cc.orr(concat, concat, left.w(), aja64::lsl(16));
+                    cc.lsr(result, concat, data.kind == FunnelShiftKind::Left ? bits - imm : imm);
+                    cc.sxth(result, result);
+                    return result;
+                }
+
+                GpR amount = int_subexpr(data.amount);
+                if (sdtype == ScalarDataType::I64) {
+                    GpR masked = cc.new_gp64();
+                    cc.and_(masked, amount, bits - 1);
+                    GpR tmp = cc.new_gp64();
+                    if (data.kind == FunnelShiftKind::Left) {
+                        cc.lsl(result, left, masked);
+                        cc.mov(tmp, 63);
+                        cc.sub(tmp, tmp, masked);
+                        cc.lsr(tmp, right, tmp);
+                        cc.lsr(tmp, tmp, 1);
+                    } else {
+                        cc.lsr(result, right, masked);
+                        cc.mov(tmp, 63);
+                        cc.sub(tmp, tmp, masked);
+                        cc.lsl(tmp, left, tmp);
+                        cc.lsl(tmp, tmp, 1);
+                    }
+                    cc.orr(result, result, tmp);
+                    return result;
+                }
+                if (sdtype == ScalarDataType::I32) {
+                    GpR masked = cc.new_gp64();
+                    cc.mov(masked.w(), amount);
+                    cc.and_(masked, masked, bits - 1);
+                    GpR concat = cc.new_gp64();
+                    cc.mov(concat.w(), right);
+                    cc.orr(concat.x(), concat.x(), left.x(), aja64::lsl(32));
+                    if (data.kind == FunnelShiftKind::Left) {
+                        GpR inv = cc.new_gp64();
+                        cc.mov(inv, bits);
+                        cc.sub(inv, inv, masked);
+                        cc.lsr(result.x(), concat.x(), inv);
+                    } else {
+                        cc.lsr(result.x(), concat.x(), masked);
+                    }
+                    return result;
+                }
+                GpR masked = cc.new_gp32();
+                cc.and_(masked, amount.w(), bits - 1);
+                GpR concat = cc.new_gp32();
+                cc.and_(concat, right.w(), 0xffff);
+                cc.orr(concat, concat, left.w(), aja64::lsl(16));
+                if (data.kind == FunnelShiftKind::Left) {
+                    GpR inv = cc.new_gp32();
+                    cc.mov(inv, bits);
+                    cc.sub(inv, inv, masked);
+                    cc.lsr(result, concat, inv);
+                } else {
+                    cc.lsr(result, concat, masked);
+                }
+                cc.sxth(result, result);
+                return result;
+            }
             SIMJIT_MATCH (StepKind::ConstDiv) {
                 GpR numerator = int_subexpr(data.numerator);
                 GpR result = create_int_reg(sdtype);
                 emit_scalar_const_div(data, sdtype, result, numerator);
                 return result;
+            }
+            SIMJIT_MATCH (StepKind::I128Div) {
+                if (step->dtype != ScalarDataType::I64 || data.partner == nullptr ||
+                    data.partner->kind != StepKind::I128Div || data.partner->dtype != ScalarDataType::I64) {
+                    messed_up("malformed scalar i128 division");
+                }
+                GpR left_low = int_subexpr(data.left_low);
+                GpR left_high = int_subexpr(data.left_high);
+                GpR right_low = int_subexpr(data.right_low);
+                GpR right_high = int_subexpr(data.right_high);
+                GpR low = cc.new_gp64();
+                GpR high = cc.new_gp64();
+                GpR target = cc.new_gp64();
+                cc.mov(target, (uint64_t)i128_div_helper_address(data.op));
+                aj::InvokeNode *invoke = nullptr;
+                cc.invoke(aj::Out(invoke), target,
+                          aj::FuncSignature::build<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>());
+                invoke->set_arg(0, left_low);
+                invoke->set_arg(1, left_high);
+                invoke->set_arg(2, right_low);
+                invoke->set_arg(3, right_high);
+                invoke->set_ret(0, low);
+                cc.mov(high, aja64::x1);
+                step_map[data.high_word ? data.partner->id : step->id] = low;
+                step_map[data.high_word ? step->id : data.partner->id] = high;
+                return data.high_word ? high : low;
             }
             SIMJIT_MATCH (StepKind::FMA) {
                 VecR x1 = float_subexpr(data.x1);
@@ -1605,35 +1894,16 @@ struct CompileState {
             SIMJIT_MATCH (StepKind::AggResult) {
                 const ArgInfo &info = args[data.dst];
                 AnyR arg = subexpr(data.arg);
-                store(cc, arg, aja64::ptr(info.gp), sdtype);
+                SIMJIT_ASSERT(data.byte_offset <= INT32_MAX);
+                store(cc, arg, aja64::ptr(info.gp, static_cast<int32_t>(data.byte_offset)), sdtype);
                 return {};
             }
-            SIMJIT_MATCH (StepKind::StoreSum128) {
-                const ArgInfo &info = args[data.dst];
-                GpR zero = cc.new_gp64();
-                cc.mov(zero, 0);
-                GpR high = int_subexpr(data.hi_combined);
-                GpR low = cc.new_gp64();
-                cc.mov(low, 0);
-                for (Step *lo_step : data.low_steps) {
-                    if (lo_step->dtype.is_scalar()) {
-                        GpR lo_val = int_subexpr(lo_step);
-                        cc.adds(low, low, lo_val);
-                        cc.adc(high, high, zero);
-                    } else {
-                        VecR vec = vec_subexpr(lo_step);
-                        GpR lo_val = cc.new_gp64();
-                        cc.umov(lo_val, vec.d(0));
-                        cc.adds(low, low, lo_val);
-                        cc.adc(high, high, zero);
-                        cc.umov(lo_val, vec.d(1));
-                        cc.adds(low, low, lo_val);
-                        cc.adc(high, high, zero);
-                    }
-                }
-
-                cc.stp(low, high, aja64::ptr(info.gp));
-                return {};
+            SIMJIT_MATCH (StepKind::VecExtract) {
+                VecDataType vdtype = data.arg->dtype.as_vec();
+                SIMJIT_ASSERT(vdtype.elem == VecElemType::I64 && data.lane < vdtype.nelems());
+                GpR result = create_int_reg(sdtype);
+                cc.umov(result, vec_subexpr(data.arg).d(data.lane));
+                return result;
             }
             SIMJIT_MATCH (StepKind::AccLoad) { return accs[mir_func->accs.index(data)]; }
             SIMJIT_MATCH (StepKind::AccStore) {
@@ -1907,6 +2177,21 @@ struct CompileState {
                 cc.bind(skip_label);
                 return {};
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                const ArgInfo &arg_info = args[data.dst];
+                GpR acc = accs[mir_func->accs.index(data.acc)].as<GpR>();
+                GpR low = int_subexpr(data.low);
+                GpR high = int_subexpr(data.high);
+                GpR cond = int_subexpr(data.cond);
+                aj::Label skip_label = cc.new_anonymous_label("skip");
+                cc.cbz(cond, skip_label);
+                GpR addr = cc.new_gp64();
+                cc.add(addr, arg_info.gp, acc, aja64::lsl(4));
+                cc.stp(low, high, aja64::ptr(addr));
+                cc.add(acc, acc, 1);
+                cc.bind(skip_label);
+                return {};
+            }
             SIMJIT_MATCH (StepKind::CondStore) {
                 const ArgInfo &arg_info = args[data.addr.arg];
                 AnyR arg = subexpr(data.arg);
@@ -2057,15 +2342,21 @@ struct CompileState {
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
-        case StepKind::StoreSum128:
+        case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             SIMJIT_ASSERT(0);
             messed_up("Unexpected instruction %s", show_step_kind(step->kind));
 
-            SIMJIT_MATCH (StepKind::Gather) return emit_vector_gather(data, step->dtype.as_vec());
-            SIMJIT_MATCH (StepKind::Scatter) unsupported("Do not support scatter");
             SIMJIT_MATCH (StepKind::CondScatter) unsupported("Do not support cond scatter");
             SIMJIT_MATCH (StepKind::Ternarylogic) unsupported("Do not support ternarylogic");
+
+            // XXX: Both gather and scatter depend on accesses to parts of same register to NOT be serialized
+            // (i.e. ldr s1 and ld1.s { v1 }[1] execute in parallel).
+            // This is the case on Apple M CPUs, but I don't know about others.
+            SIMJIT_MATCH (StepKind::Gather) return emit_vector_gather(data, step->dtype.as_vec());
+            SIMJIT_MATCH (StepKind::Scatter) emit_vector_scatter(data, step->dtype.as_vec());
+            return {};
 
             SIMJIT_MATCH (StepKind::Pack) {
                 VecDataType vdtype = step->dtype.as_vec();
@@ -2168,6 +2459,31 @@ struct CompileState {
                 cc.add(acc, acc, tmpGp);
                 return {};
             }
+            SIMJIT_MATCH (StepKind::Pack128) {
+                VecDataType dtype = step->dtype.as_vec();
+                if (dtype.elem != VecElemType::I64 || dtype.nelems() != 2) {
+                    messed_up("i128 vector pack has non-two-i64-lane dtype %s", show_vec_dtype(dtype));
+                }
+                GpR acc = accs[mir_func->accs.index(data.acc)].as<GpR>();
+                GpR base = args[data.dst].gp;
+                VecR low = vec_subexpr(data.low);
+                VecR high = vec_subexpr(data.high);
+                VecR cond = vec_subexpr(data.cond);
+                for (size_t lane = 0; lane < 2; ++lane) {
+                    GpR active = cc.new_gp64();
+                    GpR addr = cc.new_gp64();
+                    aj::Label skip_label = cc.new_anonymous_label("skip");
+                    cc.umov(active, cond.d(lane));
+                    cc.cbz(active, skip_label);
+                    cc.add(addr, base, acc, aja64::lsl(4));
+                    cc.st1(low.d(lane), aja64::ptr(addr));
+                    cc.add(addr, addr, 8);
+                    cc.st1(high.d(lane), aja64::ptr(addr));
+                    cc.add(acc, acc, 1);
+                    cc.bind(skip_label);
+                }
+                return {};
+            }
             SIMJIT_MATCH (StepKind::Const) {
                 if (step->dtype.is_mask()) {
                     MaskDataType mdtype = step->dtype.as_mask();
@@ -2236,6 +2552,25 @@ struct CompileState {
                 aja64::Mem mem = cc.new_const(aj::ConstPoolScope::kLocal, data.mem, vdtype.size_bytes());
                 cc.ldr(reg, mem);
                 return reg;
+            }
+            SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+                if (step->dtype.is_mask()) { unsupported("Do not support mask load-deinterleave"); }
+                VecDataType vdtype = step->dtype.as_vec();
+                if (data.lane_count != 2 || data.lane >= data.lane_count) {
+                    unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
+                }
+                // subexpr() returns a cached register when the partner already emitted the pair, so reaching
+                // this point means this lane emits the pair now and fills the partner's slot. Pairing comes
+                // from the MIR interleave lane lists.
+                Step *partner = mir_func->interleave.by_argument[data.addr.arg].find_partner(step);
+                if (vdtype.size_bytes() != 16) messed_up("Invalid deinterleave of dtype %s", show_vec_dtype(vdtype));
+                // The MIR offset counts logical rows; the pair occupies lane_count rows worth of elements.
+                aja64::Mem mem = vec_deinterleave_mem(data.addr, vdtype);
+                VecR even = create_vec_reg(vdtype);
+                VecR odd = create_vec_reg(vdtype);
+                cc.ld2(even, odd, mem);
+                if (partner != nullptr) { step_map[partner->id] = data.lane == 0 ? odd : even; }
+                return data.lane == 0 ? even : odd;
             }
             SIMJIT_MATCH (StepKind::Load) {
                 if (step->dtype.is_mask()) {
@@ -2306,13 +2641,18 @@ struct CompileState {
             }
             SIMJIT_MATCH (StepKind::LoadSplat) {
                 const ArgInfo &arg = args[data.addr.arg];
+                GpR base = arg.gp;
+                if (data.byte_offset != 0) {
+                    base = cc.new_gp64();
+                    cc.add(base, arg.gp, data.byte_offset);
+                }
                 if (step->dtype.is_mask()) {
                     MaskDataType mdtype = step->dtype.as_mask();
                     if (mdtype != MaskDataType::M8 && mdtype != MaskDataType::M16) {
                         messed_up("Invalid mask load of type %s", show_mask_dtype(mdtype));
                     }
                     VecR result = cc.new_vec128();
-                    aja64::Mem mem = aja64::ptr(arg.gp);
+                    aja64::Mem mem = aja64::ptr(base);
                     GpR w = cc.new_gp32();
                     cc.ldrb(w, mem);
                     cc.and_(w, w, 1);
@@ -2329,7 +2669,7 @@ struct CompileState {
                 }
                 VecDataType vdtype = step->dtype.as_vec();
                 VecR reg = create_vec_reg(vdtype);
-                cc.ld1r(reg, aja64::ptr(arg.gp));
+                cc.ld1r(reg, aja64::ptr(base));
                 return reg;
             }
 
@@ -2371,6 +2711,39 @@ struct CompileState {
                 if (vdtype.size_bytes() != 16) messed_up("Invalid store of dtype %s", show_vec_dtype(vdtype));
                 // No special handling for data.kind
                 cc.str(reg.q(), mem);
+                return {};
+            }
+
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                VecDataType vdtype = step->dtype.as_vec();
+                if (step->dtype.is_mask()) { unsupported("Do not support mask store-interleave"); }
+                if (vdtype.size_bytes() != 16)
+                    messed_up("Invalid store-interleave of dtype %s", show_vec_dtype(vdtype));
+                aja64::Mem mem = vec_deinterleave_mem(data.dst, vdtype, data.cond == nullptr);
+                VecR even = vec_subexpr(data.even);
+                VecR odd = vec_subexpr(data.odd);
+                if (data.cond != nullptr) {
+                    VecR cond = vec_subexpr(data.cond);
+                    size_t cond_sz = vec_elem_size(cond);
+                    if (cond_sz < vdtype.element_size_bytes()) {
+                        cond = expand_mask(cond, cond_sz, vdtype.element_size_bytes());
+                    } else if (cond_sz > vdtype.element_size_bytes()) {
+                        cond = shrink_mask(cond, cond_sz, vdtype.element_size_bytes());
+                    }
+                    VecR old_even = create_vec_reg(vdtype);
+                    VecR old_odd = create_vec_reg(vdtype);
+                    cc.ld2(old_even, old_odd, mem);
+                    cc.bit(old_even.b16(), even.b16(), cond.b16());
+                    cc.bit(old_odd.b16(), odd.b16(), cond.b16());
+                    cc.st2(old_even, old_odd, mem);
+                    return {};
+                }
+                if (even.id() == odd.id()) {
+                    VecR copy = create_vec_reg(vdtype);
+                    cc.orr(copy.b16(), odd.b16(), odd.b16());
+                    odd = copy;
+                }
+                cc.st2(even, odd, mem);
                 return {};
             }
 
@@ -2460,28 +2833,24 @@ struct CompileState {
                     if (vdtype.elem == VecElemType::I64) { unsupported("Do not support i64 mul"); }
                     cc.mul(result, left, right);
                     break;
-                case ArithBinaryOp::Mul64SE:
-                    if (vdtype.elem == VecElemType::I64) {
-                        VecR left32 = cc.new_vec128().s2();
-                        VecR right32 = cc.new_vec128().s2();
-                        cc.xtn(left32, left.d2());
-                        cc.xtn(right32, right.d2());
-                        cc.smull(result.d2(), left32, right32);
-                        break;
-                    }
-                    cc.smull(result, left, right);
+                case ArithBinaryOp::Mul64SE: {
+                    SIMJIT_ASSERT(vdtype.elem == VecElemType::I64);
+                    VecR left32 = cc.new_vec128().s2();
+                    VecR right32 = cc.new_vec128().s2();
+                    cc.xtn(left32, left.d2());
+                    cc.xtn(right32, right.d2());
+                    cc.smull(result.d2(), left32, right32);
                     break;
-                case ArithBinaryOp::Mul64ZE:
-                    if (vdtype.elem == VecElemType::I64) {
-                        VecR left32 = cc.new_vec128().s2();
-                        VecR right32 = cc.new_vec128().s2();
-                        cc.xtn(left32, left.d2());
-                        cc.xtn(right32, right.d2());
-                        cc.umull(result.d2(), left32, right32);
-                        break;
-                    }
-                    cc.umull(result, left, right);
+                }
+                case ArithBinaryOp::Mul64ZE: {
+                    SIMJIT_ASSERT(vdtype.elem == VecElemType::I64);
+                    VecR left32 = cc.new_vec128().s2();
+                    VecR right32 = cc.new_vec128().s2();
+                    cc.xtn(left32, left.d2());
+                    cc.xtn(right32, right.d2());
+                    cc.umull(result.d2(), left32, right32);
                     break;
+                }
                 case ArithBinaryOp::Min:
                     if (vdtype.elem == VecElemType::I64) {
                         // There is no direct encoding but this case is easy enough to write by hand
@@ -2557,6 +2926,44 @@ struct CompileState {
                 case ArithBinaryOp::Div:
                 case ArithBinaryOp::UMod:
                 case ArithBinaryOp::Mod: unsupported("Do not support int div");
+                }
+                return result;
+            }
+            SIMJIT_MATCH (StepKind::FunnelShift) {
+                VecDataType vdtype = step->dtype.as_vec();
+                VecR left = vec_subexpr(data.left);
+                VecR right = vec_subexpr(data.right);
+                VecR result = create_vec_reg(vdtype);
+
+                if (SIMJIT_A64_ASMJIT_CONST_OPS && data.amount->is(StepKind::Const)) {
+                    uint64_t imm = data.amount->step_data<StepKind::Const>().as_unsigned();
+                    if (data.kind == FunnelShiftKind::Left) {
+                        cc.shl(result, left, imm);
+                        cc.sri(result, right, vdtype.element_size_bits() - imm);
+                    } else {
+                        cc.shl(result, left, vdtype.element_size_bits() - imm);
+                        cc.sri(result, right, imm);
+                    }
+                    return result;
+                }
+                VecR amount = vec_subexpr(data.amount);
+                auto width = vdtype.elem == VecElemType::I16   ? SpecialConstant::I16_16
+                             : vdtype.elem == VecElemType::I32 ? SpecialConstant::I32_32
+                                                               : SpecialConstant::I64_64;
+                if (data.kind == FunnelShiftKind::Left) {
+                    cc.ushl(result, left, amount);
+                    VecR tmp = create_vec_reg(vdtype);
+                    cc.sub(tmp, amount, vec_special_const(width));
+                    cc.ushl(tmp, right, tmp);
+                    cc.orr(result.b16(), result.b16(), tmp.b16());
+                } else {
+                    VecR tmp1 = create_vec_reg(vdtype);
+                    cc.neg(tmp1, amount);
+                    cc.ushl(result, right, tmp1);
+                    VecR tmp2 = create_vec_reg(vdtype);
+                    cc.sub(tmp2, vec_special_const(width), amount);
+                    cc.ushl(tmp2, left, tmp2);
+                    cc.orr(result.b16(), result.b16(), tmp2.b16());
                 }
                 return result;
             }
@@ -3471,7 +3878,6 @@ struct CompileState {
                 loads[data.addr.arg].push_back(s);
             }
         });
-
         for (ArgumentIdx idx = 0; idx < loads.size(); ++idx) {
             const std::vector<Step *> &arg_loads = loads[idx];
             // SIMJIT_ASSERT(arg_loads.empty() || has_single_bit(arg_loads.size()));
@@ -3513,15 +3919,21 @@ struct CompileState {
 
         traverse_steps_postorder_unique(step_map.size(), steps, [&](Step *step) {
             std::optional<ArgumentAddress> addr{};
+            size_t footprint_width = 0;
             if (step->is(StepKind::Load)) {
                 addr = step->step_data<StepKind::Load>().addr;
             } else if (step->is(StepKind::Store)) {
                 addr = step->step_data<StepKind::Store>().addr;
             } else if (step->is(StepKind::CondStore)) {
                 addr = step->step_data<StepKind::CondStore>().addr;
+            } else if (step->is(StepKind::StoreInterleave)) {
+                addr = step->step_data<StepKind::StoreInterleave>().dst;
+                footprint_width = step->dtype.is_vec() ? step->dtype.as_vec().nelems() : 0;
             }
             if (!addr.has_value()) { return; }
-            if (addr->offset + step_row_width(step) <= loop_width) { return; }
+            if (addr->offset + (footprint_width != 0 ? footprint_width : step_row_width(step)) <= loop_width) {
+                return;
+            }
 
             // Some normalized vector expressions read overlapping windows that extend past the rows produced by
             // one main-loop iteration. Post-index addressing would advance the argument pointer by those read-ahead
@@ -3530,7 +3942,7 @@ struct CompileState {
         });
     }
 
-    bool is_second_paired_load(Step *step) const {
+    bool is_second_paired_load(const Step *step) const {
         if (!SIMJIT_A64_ASMJIT_LDP || !step->is(StepKind::Load) || !step->dtype.is_vec()) { return false; }
         for (const Step *paired : paired_ops) {
             if (paired == step) { return true; }
@@ -3538,8 +3950,24 @@ struct CompileState {
         return false;
     }
 
-    std::optional<std::pair<ArgumentAddress, size_t>> post_index_access(Step *step) const {
+    std::optional<std::pair<ArgumentAddress, size_t>> post_index_access(const Step *step) const {
         if (is_second_paired_load(step)) { return {}; }
+
+        if (step->is(StepKind::LoadDeinterleave)) {
+            if (!step->dtype.is_vec()) { return {}; }
+            // The pair load advances one declared carrier record per logical row, so only
+            // lane 0 participates in the cursor model.
+            auto data = step->step_data<StepKind::LoadDeinterleave>();
+            if (data.lane != 0) { return {}; }
+            return std::pair{data.addr, step->dtype.as_vec().nelems()};
+        }
+
+        if (step->is(StepKind::StoreInterleave)) {
+            if (!step->dtype.is_vec()) { return {}; }
+            auto data = step->step_data<StepKind::StoreInterleave>();
+            if (data.cond != nullptr) { return {}; }
+            return std::pair{data.dst, step->dtype.as_vec().nelems()};
+        }
 
         if (step->is(StepKind::Load)) {
             auto data = step->step_data<StepKind::Load>();
@@ -3598,6 +4026,7 @@ struct CompileState {
     void plan_mask_shift_writers(const mir::Function *func) {
         mask_shift_writers.assign(func->args.size(), {});
         std::vector<MSSCandidate> candidates(func->args.size());
+        const auto &usages = func->source_hir->argument_usage;
 
         for (Step *root : func->main_loop_roots) {
             if (!is_vector_mask_shift_writer_store(root)) { continue; }
@@ -3652,6 +4081,7 @@ struct CompileState {
 
         for (size_t i = 0; i < candidates.size(); ++i) {
             MSSCandidate candidate = candidates[i];
+            if (bool(usages[i] & (hir::ArgumentUsage::SequentialRead | hir::ArgumentUsage::RandomRead))) { continue; }
             // Rejected includes partially managed outputs. A common valid shape is an m8/m16 main-loop mask store
             // followed by scalar i1 tail stores for the same argument. The shift writer must not handle only
             // the tail, because its destination pointer would not be advanced by the normal main-loop stores.
@@ -3679,7 +4109,7 @@ struct CompileState {
         }
     }
 
-    void emit_mask_shift_append(Step *root) {
+    void emit_mask_shift_append(const Step *root) {
         SIMJIT_ASSERT(is_mask_shift_writer_root(root));
         auto data = root->step_data<StepKind::Store>();
         MSSWriterState &writer = mask_shift_writers[data.addr.arg];
@@ -3735,7 +4165,7 @@ struct CompileState {
         cc.bind(no_flush);
     }
 
-    bool try_emit_store_pair(Step *left, Step *right) {
+    bool try_emit_store_pair(const Step *left, const Step *right) {
         bool can_pair_stores = SIMJIT_A64_ASMJIT_STP && left != nullptr && right != nullptr &&
                                left->is(StepKind::Store) && right->is(StepKind::Store) && left->dtype.is_vec() &&
                                right->dtype.is_vec() && left->dtype == right->dtype;
@@ -3832,78 +4262,90 @@ struct CompileState {
             if (s->dtype.is_mask() &&
                 (s->is(StepKind::Load) ||
                  (s->is(StepKind::Store) && (s->dtype == MaskDataType::M8 || s->dtype == MaskDataType::M16)))) {
-                need_special_constants |= 1 << SpecialConstant::Bits;
+                need_special_constants |= 1ull << SpecialConstant::Bits;
             }
             if (s->dtype == MaskDataType::M16 && s->is(StepKind::Load)) {
-                need_special_constants |= 1 << SpecialConstant::Zero8One8;
+                need_special_constants |= 1ull << SpecialConstant::Zero8One8;
             }
             if (s->dtype == MaskDataType::M2 && (s->is(StepKind::Load) || s->is(StepKind::Store))) {
-                need_special_constants |= 1 << SpecialConstant::I64_MaskBits;
+                need_special_constants |= 1ull << SpecialConstant::I64_MaskBits;
             }
             if (s->dtype == MaskDataType::M4 && (s->is(StepKind::Load) || s->is(StepKind::Store))) {
-                need_special_constants |= 1 << SpecialConstant::I32_MaskBits;
+                need_special_constants |= 1ull << SpecialConstant::I32_MaskBits;
             }
             if (s->is(StepKind::ArithBinary) && s->dtype.is_vec()) {
                 auto op = s->step_data<StepKind::ArithBinary>().op;
                 if (op == ArithBinaryOp::RotateLeft || op == ArithBinaryOp::RotateRight) {
                     VecDataType vdtype = s->dtype.as_vec();
                     if (vdtype.elem == VecElemType::I32) {
-                        need_special_constants |= 1 << SpecialConstant::I32_32;
+                        need_special_constants |= 1ull << SpecialConstant::I32_32;
                     } else if (vdtype.elem == VecElemType::I64) {
-                        need_special_constants |= 1 << SpecialConstant::I64_64;
+                        need_special_constants |= 1ull << SpecialConstant::I64_64;
                     }
+                }
+            }
+            if (s->is(StepKind::FunnelShift) && s->dtype.is_vec()) {
+                VecDataType vdtype = s->dtype.as_vec();
+                if (vdtype.elem == VecElemType::I16) {
+                    need_special_constants |= 1ull << SpecialConstant::I16_16;
+                } else if (vdtype.elem == VecElemType::I32) {
+                    need_special_constants |= 1ull << SpecialConstant::I32_32;
+                } else if (vdtype.elem == VecElemType::I64) {
+                    need_special_constants |= 1ull << SpecialConstant::I64_64;
                 }
             }
             if (s->is(StepKind::ArithUnary) && s->dtype.is_vec()) {
                 VecDataType vdtype = s->dtype.as_vec();
                 auto op = s->step_data<StepKind::ArithUnary>().op;
                 if (op == ArithUnaryOp::Lzcnt && vdtype.elem == VecElemType::I64) {
-                    need_special_constants |= 1 << SpecialConstant::I32_32;
+                    need_special_constants |= 1ull << SpecialConstant::I32_32;
                 }
                 if (op == ArithUnaryOp::Popcount && vdtype.elem == VecElemType::I64) {
-                    need_special_constants |= 1 << SpecialConstant::I8_1;
+                    need_special_constants |= 1ull << SpecialConstant::I8_1;
                 }
             }
             if (s->is(StepKind::Fpclass) && s->dtype.is_mask()) {
                 auto flags = s->step_data<StepKind::Fpclass>().flags;
                 VecDataType vdtype = s->step_data<StepKind::Fpclass>().arg->dtype.as_vec();
                 if (bool(flags & FpClass::FPC_INFINITE)) {
-                    if (vdtype.elem == VecElemType::F32) need_special_constants |= 1 << SpecialConstant::F32_Inf;
-                    if (vdtype.elem == VecElemType::F64) need_special_constants |= 1 << SpecialConstant::F64_Inf;
+                    if (vdtype.elem == VecElemType::F32) need_special_constants |= 1ull << SpecialConstant::F32_Inf;
+                    if (vdtype.elem == VecElemType::F64) need_special_constants |= 1ull << SpecialConstant::F64_Inf;
                 }
                 if (bool(flags & FpClass::FPC_SUBNORMAL)) {
                     if (vdtype.elem == VecElemType::F32)
-                        need_special_constants |= (1 << SpecialConstant::F32_Inf) | (1 << SpecialConstant::F32_Mant);
+                        need_special_constants |=
+                            (1ull << SpecialConstant::F32_Inf) | (1ull << SpecialConstant::F32_Mant);
                     if (vdtype.elem == VecElemType::F64)
-                        need_special_constants |= (1 << SpecialConstant::F64_Inf) | (1 << SpecialConstant::F64_Mant);
+                        need_special_constants |=
+                            (1ull << SpecialConstant::F64_Inf) | (1ull << SpecialConstant::F64_Mant);
                 }
             }
             if (s->is(StepKind::Pack) && s->dtype.is_vec()) {
                 VecDataType vdtype = s->dtype.as_vec();
                 if (vdtype.elem == VecElemType::I8) {
                     need_special_constants |=
-                        (1 << SpecialConstant::I8_PackIndices) | (1 << SpecialConstant::I8_MaskBits);
+                        (1ull << SpecialConstant::I8_PackIndices) | (1ull << SpecialConstant::I8_MaskBits);
                 } else if (vdtype.elem == VecElemType::I16) {
                     need_special_constants |=
-                        (1 << SpecialConstant::I16_PackIndices) | (1 << SpecialConstant::I16_MaskBits);
+                        (1ull << SpecialConstant::I16_PackIndices) | (1ull << SpecialConstant::I16_MaskBits);
                 } else if (vdtype.elem == VecElemType::I32 || vdtype.elem == VecElemType::F32) {
                     need_special_constants |=
-                        (1 << SpecialConstant::I32_PackIndices) | (1 << SpecialConstant::I32_MaskBits);
+                        (1ull << SpecialConstant::I32_PackIndices) | (1ull << SpecialConstant::I32_MaskBits);
                 } else if (vdtype.elem == VecElemType::I64 || vdtype.elem == VecElemType::F64) {
                     need_special_constants |=
-                        (1 << SpecialConstant::I64_PackIndices) | (1 << SpecialConstant::I64_MaskBits);
+                        (1ull << SpecialConstant::I64_PackIndices) | (1ull << SpecialConstant::I64_MaskBits);
                 }
             }
         });
 
-        if ((need_special_constants & (1 << SpecialConstant::Bits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::Bits)) != 0) {
             GpR gp = cc.new_gp64();
             VecR reg = cc.new_vec128();
             init_int_const(gp, ConstData::u64(0x8040201008040201ull), ScalarDataType::I64);
             cc.dup(reg.d2(), gp);
             special_constants[SpecialConstant::Bits] = reg;
         }
-        if ((need_special_constants & (1 << SpecialConstant::Zero8One8)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::Zero8One8)) != 0) {
             GpR gp = cc.new_gp64();
             VecR reg = cc.new_vec128();
             cc.mov(gp, 0);
@@ -3911,58 +4353,63 @@ struct CompileState {
             cc.ins(reg.d(0), gp);
             special_constants[SpecialConstant::Zero8One8] = reg;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I32_32)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I32_32)) != 0) {
             VecR reg = cc.new_vec128();
             cc.movi(reg.s4(), 32);
             special_constants[SpecialConstant::I32_32] = reg.s4();
         }
-        if ((need_special_constants & (1 << SpecialConstant::I64_64)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I16_16)) != 0) {
+            VecR reg = cc.new_vec128();
+            cc.movi(reg.h8(), 16);
+            special_constants[SpecialConstant::I16_16] = reg.h8();
+        }
+        if ((need_special_constants & (1ull << SpecialConstant::I64_64)) != 0) {
             GpR gp = cc.new_gp64();
             cc.mov(gp, 64);
             VecR reg = cc.new_vec128();
             cc.dup(reg.d2(), gp);
             special_constants[SpecialConstant::I64_64] = reg.d2();
         }
-        if ((need_special_constants & (1 << SpecialConstant::F32_Inf)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::F32_Inf)) != 0) {
             GpR tmpx = cc.new_gp32();
             VecR tmp1 = cc.new_vec128().s4();
             cc.mov(tmpx, 0x7F800000);
             cc.dup(tmp1, tmpx);
             special_constants[SpecialConstant::F32_Inf] = tmp1;
         }
-        if ((need_special_constants & (1 << SpecialConstant::F32_Mant)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::F32_Mant)) != 0) {
             GpR tmpx = cc.new_gp32();
             VecR tmp1 = cc.new_vec128().s4();
             cc.mov(tmpx, 0x007FFFFF);
             cc.dup(tmp1, tmpx);
             special_constants[SpecialConstant::F32_Mant] = tmp1;
         }
-        if ((need_special_constants & (1 << SpecialConstant::F64_Inf)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::F64_Inf)) != 0) {
             GpR tmpx = cc.new_gp64();
             VecR tmp1 = cc.new_vec128().d2();
             cc.mov(tmpx, 0x7FF0000000000000);
             cc.dup(tmp1, tmpx);
             special_constants[SpecialConstant::F64_Inf] = tmp1;
         }
-        if ((need_special_constants & (1 << SpecialConstant::F64_Mant)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::F64_Mant)) != 0) {
             GpR tmpx = cc.new_gp64();
             VecR tmp1 = cc.new_vec128().d2();
             cc.mov(tmpx, 0x000FFFFFFFFFFFFF);
             cc.dup(tmp1, tmpx);
             special_constants[SpecialConstant::F64_Mant] = tmp1;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I8_1)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I8_1)) != 0) {
             VecR reg = cc.new_vec128();
             cc.movi(reg.b16(), 1);
             special_constants[SpecialConstant::I8_1] = reg.b16();
         }
-        if ((need_special_constants & (1 << SpecialConstant::I8_PackIndices)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I8_PackIndices)) != 0) {
             i8_pack_indices_label = cc.new_label();
             GpR gp = cc.new_gp64();
             cc.adr(gp, i8_pack_indices_label);
             special_constants[SpecialConstant::I8_PackIndices] = gp;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I8_MaskBits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I8_MaskBits)) != 0) {
             const static uint8_t data[16] = {
                 1, 2, 4, 8, 16, 32, 64, 128, //
                 1, 2, 4, 8, 16, 32, 64, 128,
@@ -3972,13 +4419,13 @@ struct CompileState {
             cc.ldr(vec.q(), mem);
             special_constants[SpecialConstant::I8_MaskBits] = vec;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I16_PackIndices)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I16_PackIndices)) != 0) {
             i16_pack_indices_label = cc.new_label();
             GpR gp = cc.new_gp64();
             cc.adr(gp, i16_pack_indices_label);
             special_constants[SpecialConstant::I16_PackIndices] = gp;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I16_MaskBits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I16_MaskBits)) != 0) {
             const static uint8_t data[16] = {
                 1, 0, 2, 0, 4, 0, 8, 0, 16, 0, 32, 0, 64, 0, 128, 0,
             };
@@ -3987,13 +4434,13 @@ struct CompileState {
             cc.ldr(vec.q(), mem);
             special_constants[SpecialConstant::I16_MaskBits] = vec;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I32_PackIndices)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I32_PackIndices)) != 0) {
             i32_pack_indices_label = cc.new_label();
             GpR gp = cc.new_gp64();
             cc.adr(gp, i32_pack_indices_label);
             special_constants[SpecialConstant::I32_PackIndices] = gp;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I32_MaskBits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I32_MaskBits)) != 0) {
             const static uint8_t data[16] = {
                 1, 0, 0, 0, //
                 2, 0, 0, 0, //
@@ -4005,13 +4452,13 @@ struct CompileState {
             cc.ldr(vec.q(), mem);
             special_constants[SpecialConstant::I32_MaskBits] = vec;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I64_PackIndices)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I64_PackIndices)) != 0) {
             i64_pack_indices_label = cc.new_label();
             GpR gp = cc.new_gp64();
             cc.adr(gp, i64_pack_indices_label);
             special_constants[SpecialConstant::I64_PackIndices] = gp;
         }
-        if ((need_special_constants & (1 << SpecialConstant::I64_MaskBits)) != 0) {
+        if ((need_special_constants & (1ull << SpecialConstant::I64_MaskBits)) != 0) {
             const static uint8_t data[16] = {
                 1, 0, 0, 0, 0, 0, 0, 0, //
                 2, 0, 0, 0, 0, 0, 0, 0, //
@@ -4073,7 +4520,8 @@ struct CompileState {
         }
     }
 
-    void init_args(nonstd::span<ArgumentDecl const> func_args, aj::FuncNode *func_node) {
+    void init_args(nonstd::span<ArgumentDecl const> func_args, nonstd::span<const hir::ArgumentUsage> usages,
+                   aj::FuncNode *func_node) {
         func_node->set_arg(0, row_count);
 
         for (const ArgumentDecl &arg : func_args) {
@@ -4081,8 +4529,8 @@ struct CompileState {
             ArgInfo info{&arg, gp};
             func_node->set_arg(arg.idx + 1, gp);
             this->args[arg.idx] = std::move(info);
-            if (SIMJIT_A64_ASMJIT_INDEX_REGS && (arg.kind == ArgumentKind::SrcArr || arg.kind == ArgumentKind::Dst ||
-                                                 arg.kind == ArgumentKind::SrcIdxArr)) {
+            if (SIMJIT_A64_ASMJIT_INDEX_REGS &&
+                bool(usages[arg.idx] & (hir::ArgumentUsage::SequentialRead | hir::ArgumentUsage::SequentialWrite))) {
                 index_regs[arg.idx] = {cc.new_gp64()};
             }
         }
@@ -4099,8 +4547,8 @@ struct CompileState {
     void init_accs(nonstd::span<Step *const> prologue_roots) {
         for (const Step *step : prologue_roots) {
             if (!step->is(StepKind::AccStore)) continue;
-            const auto &store = step->step_data<StepKind::AccStore>();
-            size_t idx = mir_func->accs.index(store.acc);
+            const auto &store_data = step->step_data<StepKind::AccStore>();
+            size_t idx = mir_func->accs.index(store_data.acc);
             switch (step->dtype.kind) {
             case DataTypeKind::Scalar: {
                 ScalarDataType dtype = step->dtype.as_scalar();
@@ -4142,10 +4590,11 @@ static void compile_asmjit(const mir::Function *func, aja64::Compiler &cc) {
     aj::FuncNode *func_node = create_func_node(func->args.size(), cc);
 
     CompileState state{func->ctx->arena, cc};
+    const auto &usages = func->source_hir->argument_usage;
     // Note that we only pass func as argument, but don't save it inside CompileState. This makes it easier to see where
     // we interact with it.
     state.init(func);
-    state.init_args(func->args, func_node);
+    state.init_args(func->args, usages, func_node);
     state.init_accs(func->prologue_roots);
     state.plan_mask_shift_writers(func);
 

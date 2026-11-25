@@ -17,8 +17,10 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::LoadSplat: return "load-splat";
     case StepKind::Const: return "const";
     case StepKind::Load: return "load";
+    case StepKind::LoadDeinterleave: return "load-deinterleave";
     case StepKind::Gather: return "gather";
     case StepKind::ArithBinary: return "binary";
+    case StepKind::I128Div: return "i128-div";
     case StepKind::CheckedOp: return "checked-op";
     case StepKind::PredicateBinary: return "predicate-binary";
     case StepKind::ArithUnary: return "unary";
@@ -30,14 +32,61 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::AccPredicateBinary: return "acc-predicate-bin";
     case StepKind::PredicateNot: return "predicate-not";
     case StepKind::Select: return "select";
+    case StepKind::FunnelShift: return "funnel-shift";
     case StepKind::Index: return "index";
     case StepKind::Scatter: return "scatter";
     case StepKind::Pack: return "pack";
-    case StepKind::AccSum128: return "sum128";
+    case StepKind::Pack128: return "pack128";
+    // Keep the serialized spelling stable while the internal node has the generic name.
+    case StepKind::AccI128: return "sum128";
     case StepKind::Permute: return "permute";
     case StepKind::BitCast: return "bitcast";
     case StepKind::Fpclass: return "fpclass";
     case StepKind::Countif: return "countif";
+    case StepKind::StoreInterleave: return "store-interleave";
+    }
+    SIMJIT_UNREACHABLE();
+}
+
+const char *show_checked_op_kind(CheckedOpKind kind) noexcept {
+    switch (kind) {
+    case CheckedOpKind::Add: return "add";
+    case CheckedOpKind::Sub: return "sub";
+    case CheckedOpKind::Mul: return "mul";
+    case CheckedOpKind::Div: return "div";
+    case CheckedOpKind::UDiv: return "udiv";
+    case CheckedOpKind::Mod: return "mod";
+    case CheckedOpKind::UMod: return "umod";
+    case CheckedOpKind::I128Div: return "i128-div";
+    case CheckedOpKind::I128AddLow: return "i128-add-low";
+    case CheckedOpKind::I128AddHigh: return "i128-add-high";
+    case CheckedOpKind::I128SubLow: return "i128-sub-low";
+    case CheckedOpKind::I128SubHigh: return "i128-sub-high";
+    case CheckedOpKind::I128MulLow: return "i128-mul-low";
+    case CheckedOpKind::I128MulHigh: return "i128-mul-high";
+    case CheckedOpKind::I128SllLow: return "i128-sll-low";
+    case CheckedOpKind::I128SllHigh: return "i128-sll-high";
+    case CheckedOpKind::I128SrlLow: return "i128-srl-low";
+    case CheckedOpKind::I128SrlHigh: return "i128-srl-high";
+    case CheckedOpKind::I128SraLow: return "i128-sra-low";
+    case CheckedOpKind::I128SraHigh: return "i128-sra-high";
+    case CheckedOpKind::I128RotlLow: return "i128-rotl-low";
+    case CheckedOpKind::I128RotlHigh: return "i128-rotl-high";
+    case CheckedOpKind::I128RotrLow: return "i128-rotr-low";
+    case CheckedOpKind::I128RotrHigh: return "i128-rotr-high";
+    case CheckedOpKind::I128NegateLow: return "i128-neg-low";
+    case CheckedOpKind::I128NegateHigh: return "i128-neg-high";
+    case CheckedOpKind::I128AbsLow: return "i128-abs-low";
+    case CheckedOpKind::I128AbsHigh: return "i128-abs-high";
+    case CheckedOpKind::I128Trunc: return "i128-trunc";
+    case CheckedOpKind::ShiftRightArith: return "shra";
+    case CheckedOpKind::ShiftRightLogical: return "shrl";
+    case CheckedOpKind::ShiftLeftLogical: return "shll";
+    case CheckedOpKind::RotateLeft: return "rol";
+    case CheckedOpKind::RotateRight: return "ror";
+    case CheckedOpKind::Trunc: return "trunc";
+    case CheckedOpKind::Abs: return "abs";
+    case CheckedOpKind::Negate: return "neg";
     }
     SIMJIT_UNREACHABLE();
 }
@@ -48,7 +97,7 @@ std::string show_special_ops(SpecialOp ops) {
     result.reserve(64);
     auto append = [&](SpecialOp op, const char *name) {
         if (!bool(ops & op)) { return; }
-        if (!result.empty()) { result += ","; }
+        if (!result.empty()) { result += ','; }
         result += name;
     };
     append(SpecialOp::I64Mul, "i64-mul");
@@ -57,11 +106,159 @@ std::string show_special_ops(SpecialOp ops) {
     append(SpecialOp::CondScatter, "cond-scatter");
     append(SpecialOp::SmallPack, "small-pack");
     append(SpecialOp::ArbitraryBitPermute, "arbitrary-bit-permute");
-    append(SpecialOp::I8Mul, "i8-mul");
-    append(SpecialOp::I8VariableShift, "i8-variable-shift");
-    append(SpecialOp::SmallLzcnt, "small-lzcnt");
     append(SpecialOp::SmallGather, "small-gather");
+    append(SpecialOp::SmallPopcount, "small-popcount");
+    append(SpecialOp::LargePopcount, "large-popcount");
+    append(SpecialOp::I8ConstantShift, "i8-constant-shift");
+    append(SpecialOp::SmallDeinterleave, "small-deinterleave");
+    append(SpecialOp::FunnelShift, "funnel-shift");
     return result;
+}
+
+SpecialOp supported_vector_special_ops_for_arch(Arch arch) noexcept {
+    switch (arch) {
+    case Arch::Amd64_AVX512:
+    case Arch::Amd64_AVX512_YMM:
+        // We treat Ice Lake as baseline supported version - it has everything we need. Other versions are treated as
+        // 'reduced ice lake', where some special ops will be removed from supported list.
+        return SpecialOp::I64Mul | SpecialOp::Gather | SpecialOp::Scatter | SpecialOp::CondScatter |
+               SpecialOp::SmallPack | SpecialOp::ArbitraryBitPermute | SpecialOp::SmallPopcount |
+               SpecialOp::LargePopcount | SpecialOp::I8ConstantShift | SpecialOp::SmallDeinterleave |
+               SpecialOp::FunnelShift;
+    case Arch::Arm64_NEON:
+        return SpecialOp::Gather | SpecialOp::SmallPack | SpecialOp::SmallPopcount | SpecialOp::LargePopcount |
+               SpecialOp::I8ConstantShift | SpecialOp::Scatter | SpecialOp::SmallDeinterleave | SpecialOp::FunnelShift;
+    }
+    SIMJIT_UNREACHABLE();
+}
+
+SpecialOp Function::unsupported_vector_special_ops() const noexcept {
+    return special_ops & ~(supported_vector_special_ops_for_arch(ctx->arch) & ctx->host_supported_vector_special_ops);
+}
+
+namespace {
+
+const char *show_argument_access(ArgumentUsage access) {
+    switch (access) {
+    case ArgumentUsage::SequentialRead: return "sequential read";
+    case ArgumentUsage::SequentialWrite: return "sequential write";
+    case ArgumentUsage::RandomRead: return "random read";
+    case ArgumentUsage::RandomWrite: return "random write";
+    case ArgumentUsage::AppendWrite: return "append write";
+    case ArgumentUsage::AggregateWrite: return "aggregate write";
+    default: break;
+    }
+    SIMJIT_UNREACHABLE();
+}
+
+constexpr ArgumentUsage compatible_argument_access_flags(ArgumentUsage access) {
+    switch (access) {
+    case ArgumentUsage::SequentialRead:
+        return ArgumentUsage::SequentialRead | ArgumentUsage::SequentialWrite | ArgumentUsage::RandomRead;
+    case ArgumentUsage::SequentialWrite: return ArgumentUsage::SequentialRead;
+    case ArgumentUsage::RandomRead:
+        return ArgumentUsage::SequentialRead | ArgumentUsage::RandomRead | ArgumentUsage::RandomWrite;
+    case ArgumentUsage::RandomWrite: return ArgumentUsage::RandomRead | ArgumentUsage::RandomWrite;
+    default: return ArgumentUsage::None;
+    }
+    SIMJIT_UNREACHABLE();
+}
+
+ArgumentUsage first_argument_access(ArgumentUsage flags) {
+    if (bool(flags & ArgumentUsage::SequentialRead)) { return ArgumentUsage::SequentialRead; }
+    if (bool(flags & ArgumentUsage::SequentialWrite)) { return ArgumentUsage::SequentialWrite; }
+    if (bool(flags & ArgumentUsage::RandomRead)) { return ArgumentUsage::RandomRead; }
+    if (bool(flags & ArgumentUsage::RandomWrite)) { return ArgumentUsage::RandomWrite; }
+    if (bool(flags & ArgumentUsage::AppendWrite)) { return ArgumentUsage::AppendWrite; }
+    if (bool(flags & ArgumentUsage::AggregateWrite)) { return ArgumentUsage::AggregateWrite; }
+    SIMJIT_UNREACHABLE();
+}
+
+void add_argument_access(std::vector<ArgumentUsage> &usages, ArgumentIdx idx, ArgumentUsage access) {
+    SIMJIT_ASSERT(idx < usages.size());
+    ArgumentUsage &old_flags = usages[idx];
+    ArgumentUsage incompatible_flags =
+        (old_flags & ArgumentUsage::AccessMask) & ~compatible_argument_access_flags(access);
+    if (incompatible_flags != ArgumentUsage::None) {
+        ArgumentUsage old_access = first_argument_access(incompatible_flags);
+        simjit_exception(ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidArgumentAccess,
+                         "Argument %zu has incompatible accesses: %s and %s", idx, show_argument_access(old_access),
+                         show_argument_access(access));
+    }
+    old_flags |= access;
+}
+
+void add_step_argument_accesses(std::vector<ArgumentUsage> &usages, const Step *step) {
+    switch (step->kind) {
+    case StepKind::Load:
+        add_argument_access(usages, step->step_data<StepKind::Load>().idx, ArgumentUsage::SequentialRead);
+        usages[step->step_data<StepKind::Load>().idx] |= ArgumentUsage::ArrayRead;
+        return;
+    case StepKind::LoadSplat:
+        add_argument_access(usages, step->step_data<StepKind::LoadSplat>().idx, ArgumentUsage::SequentialRead);
+        usages[step->step_data<StepKind::LoadSplat>().idx] |= ArgumentUsage::SplatRead;
+        return;
+    case StepKind::LoadDeinterleave:
+        add_argument_access(usages, step->step_data<StepKind::LoadDeinterleave>().idx, ArgumentUsage::SequentialRead);
+        usages[step->step_data<StepKind::LoadDeinterleave>().idx] |= ArgumentUsage::ArrayRead;
+        return;
+    case StepKind::Gather:
+        add_argument_access(usages, step->step_data<StepKind::Gather>().data, ArgumentUsage::RandomRead);
+        return;
+    case StepKind::Store:
+        add_argument_access(usages, step->step_data<StepKind::Store>().addr, ArgumentUsage::SequentialWrite);
+        return;
+    case StepKind::StoreInterleave:
+        add_argument_access(usages, step->step_data<StepKind::StoreInterleave>().dst, ArgumentUsage::SequentialWrite);
+        return;
+    case StepKind::Scatter:
+        add_argument_access(usages, step->step_data<StepKind::Scatter>().dst, ArgumentUsage::RandomWrite);
+        return;
+    case StepKind::Pack:
+        add_argument_access(usages, step->step_data<StepKind::Pack>().dst, ArgumentUsage::AppendWrite);
+        return;
+    case StepKind::Pack128:
+        add_argument_access(usages, step->step_data<StepKind::Pack128>().dst, ArgumentUsage::AppendWrite);
+        return;
+    default: return;
+    }
+}
+
+void mark_bounded_index_inputs(std::vector<ArgumentUsage> &usages, Step *idx, size_t step_count) {
+    std::vector<uint8_t> state(step_count, 0);
+    traverse_steps_postorder_unique(idx, state, [&](Step *step) {
+        if (step->is(StepKind::Load) || step->is(StepKind::LoadSplat)) {
+            usages[step->step_data<StepKind::Load>().idx] |= ArgumentUsage::BoundedIndex;
+        }
+        if (step->is(StepKind::LoadDeinterleave)) {
+            usages[step->step_data<StepKind::LoadDeinterleave>().idx] |= ArgumentUsage::BoundedIndex;
+        }
+    });
+}
+
+} // namespace
+
+void analyze_argument_usage(Function *func) {
+    std::vector<ArgumentUsage> usages(func->args.size());
+    std::vector<uint8_t> state(func->step_id_count, 0);
+    for (Step *root : func->step_roots) {
+        traverse_steps_postorder_unique(root, state, [&](Step *step) {
+            add_step_argument_accesses(usages, step);
+            if (step->is(StepKind::Gather)) {
+                mark_bounded_index_inputs(usages, step->step_data<StepKind::Gather>().idx, func->step_id_count);
+            } else if (step->is(StepKind::Scatter)) {
+                mark_bounded_index_inputs(usages, step->step_data<StepKind::Scatter>().idx, func->step_id_count);
+            }
+        });
+    }
+    for (const Accumulator &acc : func->accs) {
+        add_argument_access(usages, acc.dst_arg, ArgumentUsage::AggregateWrite);
+    }
+    if (func->safety_check_arg) {
+        add_argument_access(usages, *func->safety_check_arg, ArgumentUsage::AggregateWrite);
+        usages[*func->safety_check_arg] |= ArgumentUsage::SafetyCheck;
+    }
+    func->argument_usage = func->ctx->arena->copy_array<ArgumentUsage>(usages);
 }
 
 static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache, std::string &buf) {
@@ -79,6 +276,8 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
         SIMJIT_MATCH (StepKind::Const) wr("value=%s", show_const_data(data, step->dtype).c_str());
         SIMJIT_MATCH2 (StepKind::Load, StepKind::LoadSplat)
             wr("arg=@%zu kind=%s", data.idx, show_load_store_kind(data.kind));
+        SIMJIT_MATCH (StepKind::LoadDeinterleave)
+            wr("arg=@%zu kind=%s lane=%u/%u", data.idx, show_load_store_kind(data.kind), data.lane, data.lane_count);
         SIMJIT_MATCH (StepKind::BitCast) wr("arg=%%%u", ref(data));
         SIMJIT_MATCH (StepKind::Gather) wr("arg=@%zu idx=%%%u", data.data, ref(data.idx));
         SIMJIT_MATCH (StepKind::Scatter) {
@@ -89,9 +288,17 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
         SIMJIT_MATCH (StepKind::ArithBinary)
             wr("op=%s left=%%%u right=%%%u flags=%s", show_arith_binary_op(data.op), ref(data.left), ref(data.right),
                show_arith_binary_flags(data.flags).c_str());
+        SIMJIT_MATCH (StepKind::I128Div)
+            wr("op=%s left_low=%%%u left_high=%%%u right_low=%%%u right_high=%%%u word=%s",
+               show_arith_binary_op(data.op), ref(data.left_low), ref(data.left_high), ref(data.right_low),
+               ref(data.right_high), data.high_word ? "high" : "low");
         SIMJIT_MATCH (StepKind::CheckedOp) {
-            wr_("op=%%%u", ref(data.op));
+            wr_("kind=%s op=%%%u", show_checked_op_kind(data.kind), ref(data.op));
             if (data.mask != nullptr) wr_(" mask=%%%u", ref(data.mask));
+            if (data.left_low != nullptr) {
+                wr_(" left={%%%u,%%%u}", ref(data.left_low), ref(data.left_high));
+                if (data.right_low != nullptr) wr_(" right={%%%u,%%%u}", ref(data.right_low), ref(data.right_high));
+            }
             return;
         }
         SIMJIT_MATCH (StepKind::PredicateBinary)
@@ -109,8 +316,14 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
         SIMJIT_MATCH (StepKind::Compare)
             wr("op=%s left=%%%u right=%%%u is_unsigned=%s", show_cmp_op(data.op), ref(data.left), ref(data.right),
                data.is_unsigned ? "true" : "false");
-        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccSum128) {
+        SIMJIT_MATCH (StepKind::AccArithBinary) {
             wr_("op=%s acc=$%zu arg=%%%u", show_arith_binary_op(data.op), data.acc, ref(data.arg));
+            if (data.cond != nullptr) wr_(" cond=%%%u", ref(data.cond));
+            return;
+        }
+        SIMJIT_MATCH (StepKind::AccI128) {
+            wr_("op=%s acc=$%zu low=%%%u high=%%%u", show_arith_binary_op(data.op), data.acc, ref(data.low),
+                ref(data.high));
             if (data.cond != nullptr) wr_(" cond=%%%u", ref(data.cond));
             return;
         }
@@ -120,12 +333,20 @@ static void show_step(const Step *step, nonstd::span<uint32_t const> show_cache,
             wr("op=%s acc=$%zu arg=%%%u", show_predicate_binary_op(data.op), data.acc, ref(data.arg));
         SIMJIT_MATCH (StepKind::Select)
             wr("cond=%%%u truthy=%%%u falsy=%%%u", ref(data.cond), ref(data.truthy), ref(data.falsy));
+        SIMJIT_MATCH (StepKind::FunnelShift)
+            wr("left=%%%u right=%%%u amount=%%%u kind=%s", ref(data.left), ref(data.right), ref(data.amount),
+               show_funnel_shift_kind(data.kind));
         SIMJIT_MATCH (StepKind::Pack)
             wr("arg=%%%u cond=%%%u dst=@%zu dst_size=$%zu", ref(data.arg), ref(data.cond), data.dst, data.dst_size_acc);
+        SIMJIT_MATCH (StepKind::Pack128)
+            wr("low=%%%u high=%%%u cond=%%%u dst=@%zu dst_size=$%zu", ref(data.low), ref(data.high), ref(data.cond),
+               data.dst, data.dst_size_acc);
         SIMJIT_MATCH (StepKind::Permute)
             wr("is_bit=%s arg=%%%u permute=%llx", data.is_bit ? "true" : "false", ref(data.arg),
                (unsigned long long)data.permute);
         SIMJIT_MATCH (StepKind::Fpclass) wr("arg=%%%u flags=%s", ref(data.arg), show_fpclass(data.flags).c_str());
+        SIMJIT_MATCH (StepKind::StoreInterleave)
+            wr("even=%%%u odd=%%%u dst=@%zu", ref(data.even), ref(data.odd), data.dst);
     }
 #undef wr
 #undef wr_
@@ -138,8 +359,7 @@ std::string print_function(const Function *func) {
     buf.reserve(1024);
     if (!func->args.empty()) {
         for (const ArgumentDecl &arg : func->args) {
-            simjit::format_to(buf, "@%zu arg dtype=%s kind=%s\n", arg.idx, show_scalar_dtype(arg.dtype),
-                              show_argument_kind(arg.kind).c_str());
+            simjit::format_to(buf, "@%zu arg dtype=%s\n", arg.idx, show_scalar_dtype(arg.dtype));
         }
     }
     if (!func->accs.empty()) {
@@ -149,6 +369,10 @@ std::string print_function(const Function *func) {
     }
     if (func->special_ops != SpecialOp::None) {
         simjit::format_to(buf, "# special-ops=%s\n", show_special_ops(func->special_ops).c_str());
+    }
+    if (func->vectorization_hint == VectorizationHint::UnsupportedSpecialOps) {
+        simjit::format_to(buf, "# unsupported-vector-special-ops=%s\n",
+                          show_special_ops(func->unsupported_vector_special_ops()).c_str());
     }
     std::vector<uint32_t> show_cache(func->step_id_count, 0);
     std::vector<uint8_t> traversal_state(func->step_id_count, 0);
@@ -166,5 +390,6 @@ std::string print_function(const Function *func) {
     }
     return buf;
 }
+
 } // namespace hir
 } // namespace simjit

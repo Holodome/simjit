@@ -187,27 +187,27 @@ static std::string exception_message(const std::exception &e, std::optional<Erro
     return e.what();
 }
 
-static std::string schema_json(nonstd::span<ArgumentDecl> args) {
+static std::string schema_json(const hir::Function *func) {
+    const auto &args = func->args;
+    const auto &usages = func->argument_usage;
     std::string result = "{ \"args\": [";
     for (size_t i = 0; i < args.size(); ++i) {
         const auto &arg = args[i];
         std::string kind;
-        if ((arg.kind & simjit::ArgumentKind::SrcIdxArr) != simjit::ArgumentKind::Undefined) {
+        if (bool(usages[i] & hir::ArgumentUsage::BoundedIndex)) {
             kind = "sv";
-        } else if ((arg.kind & (simjit::ArgumentKind::SrcGatherArr | simjit::ArgumentKind::SrcArr |
-                                ArgumentKind::SrcConst)) != simjit::ArgumentKind::Undefined) {
-            kind = "in";
-        } else if ((arg.kind & simjit::ArgumentKind::DstSafetyCheck) != simjit::ArgumentKind::Undefined) {
+        } else if (bool(usages[i] & hir::ArgumentUsage::SafetyCheck)) {
             kind = "safety";
-        } else if ((arg.kind & simjit::ArgumentKind::DstAgg) != simjit::ArgumentKind::Undefined) {
+        } else if (bool(usages[i] & hir::ArgumentUsage::AggregateWrite)) {
             kind = "outs";
-        } else if ((arg.kind & simjit::ArgumentKind::Dst) != simjit::ArgumentKind::Undefined) {
+        } else if (bool(usages[i] & (hir::ArgumentUsage::SequentialWrite | hir::ArgumentUsage::RandomWrite |
+                                     hir::ArgumentUsage::AppendWrite))) {
             kind = "out";
         } else {
-            throw std::runtime_error("invalid arg kind");
+            kind = "in";
         }
         result += std::format("{{ \"dtype\": \"{}\", \"kind\": \"{}\"}}", show_scalar_dtype(arg.dtype), kind);
-        if (i + 1 != args.size()) { result += ","; }
+        if (i + 1 != args.size()) { result += ','; }
     }
     result += "]}";
     return result;
@@ -338,12 +338,16 @@ static ParseResult parse_args(int argc, char **argv) {
 struct ArgDecl {
     int id;
     hl::value dtype;
-    hl::value kind;
+    bool safety_check;
 };
 
 static ArgDecl parse_arg_decl(hl::value value) {
-    auto [id, dtype, kind] = hl::require_match("arg declaration", value, "arg", hl::cap_as<int>, hl::cap, hl::cap);
-    return ArgDecl{id, dtype, kind};
+    if (auto match = hl::match(value, "safety-check-arg", hl::cap_as<int>)) {
+        auto [id] = *match;
+        return ArgDecl{id, hl::value{}, true};
+    }
+    auto [id, dtype] = hl::require_match("arg declaration", value, "arg", hl::cap_as<int>, hl::cap);
+    return ArgDecl{id, dtype, false};
 }
 
 struct AccDecl {
@@ -379,7 +383,7 @@ static int parse_named_ref(hl::value value, const char *expected_name) {
 }
 
 static bool arg_decl_is_checked(hl::value arg_decl) {
-    return parse_arg_decl(arg_decl).kind.as_string_view() == "dst-checked";
+    return parse_arg_decl(arg_decl).safety_check;
 }
 
 struct StepUseInfo {
@@ -765,7 +769,11 @@ static std::string minimize_item(std::string_view input, const ParseResult &conf
         hl::list_builder b{};
         for (int arg_id : kept_arg_order) {
             ArgDecl decl = parse_arg_decl(arg_map.at(arg_id));
-            b.add(hl::list("arg", arg_id_map.at(arg_id), decl.dtype, decl.kind));
+            if (decl.safety_check) {
+                b.add(hl::list("safety-check-arg", arg_id_map.at(arg_id)));
+            } else {
+                b.add(hl::list("arg", arg_id_map.at(arg_id), decl.dtype));
+            }
         }
         func_fields.add(hl::cons("args", b.list()));
     }
@@ -909,9 +917,9 @@ static std::string error_object_json(const CompileState &state) {
     for (size_t i = 0; i < items.size(); ++i) {
         const auto &[key, value] = items[i];
         result += std::format("\"{}\": \"{}\"", key, escape_json(value));
-        if (i + 1 != items.size()) { result += ","; }
+        if (i + 1 != items.size()) { result += ','; }
     }
-    result += "}";
+    result += '}';
     return result;
 }
 
@@ -942,9 +950,9 @@ static std::string error_metadata_json(const CompileState &state) {
     for (size_t i = 0; i < items.size(); ++i) {
         const auto &[key, info] = items[i];
         result += std::format("\"{}\": {}", key, error_info_json(*info));
-        if (i + 1 != items.size()) { result += ","; }
+        if (i + 1 != items.size()) { result += ','; }
     }
-    result += "}";
+    result += '}';
     return result;
 }
 
@@ -954,10 +962,10 @@ static std::string codes_json(const std::vector<CodeBlob> &codes) {
         const auto &code = codes[i];
         result += std::format("{{\"name\": \"{}\", \"code\": \"{}\"", escape_json(code.name), escape_json(code.code));
         if (code.comparison_unstable) { result += ",\"comparison_unstable\": true"; }
-        result += "}";
-        if (i + 1 != codes.size()) { result += ","; }
+        result += '}';
+        if (i + 1 != codes.size()) { result += ','; }
     }
-    result += "]";
+    result += ']';
     return result;
 }
 
@@ -973,9 +981,9 @@ static std::string build_item_json(const CompileState &state) {
     const char *variant_mode = state.vector_status == "not-requested" ? "scalar" : "vector";
     std::string result = "{";
     result += std::format("\"n\": {}", state.meta.program_index);
-    result += ",";
+    result += ',';
     result += std::format("\"id\": \"{}\"", escape_json(item_id(state.meta)));
-    result += ",";
+    result += ',';
     result += "\"suite\": \"xsmith\"";
     result += ",";
     result += std::format("\"variant\": \"{}-{}\"", escape_json(state.meta.arch), variant_mode);
@@ -1031,10 +1039,10 @@ static CompileState compile_item(std::string_view input, const ParseResult &conf
     try {
         deserialize(input, builder);
         fn = builder.build();
-        state.hir_scalar_only = fn->scalar_only;
+        state.hir_scalar_only = fn->is_scalar_only();
         state.comparison_unstable = has_float_to_int_cast(fn);
         state.serialized = serialize(fn);
-        state.schema = schema_json(fn->args);
+        state.schema = schema_json(fn);
     } catch (const std::exception &e) {
         state.stage_error = exception_message(e, state.stage_error_info);
         return state;

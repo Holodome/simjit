@@ -7,6 +7,8 @@
 
 #include "simjit/compiler.h"
 
+#include <limits>
+
 using namespace simjit;
 using namespace simjit::types;
 
@@ -115,7 +117,7 @@ static void add_lifecycle_tests(std::vector<Test> &tests) {
         b.arg_safety_check();
     });
     add_invalid(tests, [](FunctionBuilder &b) { (void)b.arg(I32); });
-    add_invalid(tests, [](FunctionBuilder &b) {
+    add_valid(tests, [](FunctionBuilder &b) {
         (void)b.arg(I32);
         b.store(b.i32(1), b.arg(I32));
     });
@@ -196,6 +198,16 @@ static void add_low_level_api_tests(std::vector<Test> &tests) {
     add_invalid(tests, [](FunctionBuilder &b) {
         Value x = b.input_arg(I32);
         Value y = b.input_arg(I32);
+        b.output_arg(b.arith_binary(x, y, ArithBinaryOp::Mul64SE));
+    });
+    add_invalid(tests, [](FunctionBuilder &b) {
+        Value x = b.input_arg(I32);
+        Value y = b.input_arg(I32);
+        b.output_arg(b.arith_binary(x, y, ArithBinaryOp::Mul64ZE));
+    });
+    add_invalid(tests, [](FunctionBuilder &b) {
+        Value x = b.input_arg(I32);
+        Value y = b.input_arg(I32);
         b.output_arg(b.arith_binary(x, y, ArithBinaryOp::Add, ArithBinaryOpFlags::SafeDivision));
     });
     add_invalid(tests, [](FunctionBuilder &b) {
@@ -216,8 +228,32 @@ static void add_low_level_api_tests(std::vector<Test> &tests) {
     add_invalid(tests,
                 [](FunctionBuilder &b) { b.output_arg(b.int_cast(b.input_arg(I32), I64, IntCastKind::Sext, true)); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.cmp_ugt(b.input_arg(F32), b.input_arg(F32))); });
-    add_unsupported(tests, [](FunctionBuilder &b) { b.sum(b.input_arg(I32), b.arg(I128)); });
+    add_valid(tests, [](FunctionBuilder &b) { b.sum(b.input_arg(I32), b.arg(I128)); });
     add_unsupported(tests, [](FunctionBuilder &b) { b.product(b.input_arg(I64), b.arg(I128)); });
+    add_valid(tests, [](FunctionBuilder &b) {
+        Argument src = b.arg(I128);
+        b.store(b.mul(b.load(src), b.load(src)), b.arg(I128));
+    });
+    add_valid(tests, [](FunctionBuilder &b) {
+        b.arg_safety_check();
+        Argument src = b.arg(I128);
+        b.store(b.mul_checked(b.load(src), b.load(src)), b.arg(I128));
+    });
+    add_valid(tests, [](FunctionBuilder &b) {
+        b.arg_safety_check();
+        Argument src = b.arg(I128);
+        b.store(b.sll_checked(b.load(src), b.load(src)), b.arg(I128));
+    });
+    add_unsupported(tests, [](FunctionBuilder &b) {
+        Argument value = b.arg(I128);
+        Argument count = b.arg(I128);
+        b.store(b.arith_binary(b.load(value), b.load(count), ArithBinaryOp::ShiftLeftLogical), b.arg(I128));
+    });
+    add_valid(tests, [](FunctionBuilder &b) { b.store(b.load_splat(b.arg(I128)), b.arg(I128)); });
+    add_invalid(tests, [](FunctionBuilder &b) {
+        Argument src = b.arg(I128);
+        b.store(b.load_splat(src, std::numeric_limits<size_t>::max()), b.arg(I128));
+    });
 }
 
 static void add_constant_tests(std::vector<Test> &tests) {
@@ -249,14 +285,14 @@ static void add_wrapper_tests(std::vector<Test> &tests) {
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.signed_cast(b.input_arg(I1), I32)); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.unsigned_cast(b.input_arg(I1), I32)); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.log2_no_zero(b.input_arg(F32))); });
-    add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.log2(b.input_arg(I128))); });
+    add_valid(tests, [](FunctionBuilder &b) { b.output_arg(b.log2(b.input_arg(I128))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.bit_floor(b.input_arg(F64))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.bit_ceil(b.input_arg(I1))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.has_single_bit(b.input_arg(F32))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.bit_test(b.input_arg(I32), b.input_arg(I64))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.bit_testn(b.input_arg(I16), b.input_arg(I32))); });
     add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.copysign_no_zero(b.input_arg(I32), b.input_arg(I1))); });
-    add_invalid(tests, [](FunctionBuilder &b) { b.output_arg(b.copysign(b.input_arg(I64), b.input_arg(I128))); });
+    add_valid(tests, [](FunctionBuilder &b) { b.output_arg(b.copysign(b.input_arg(I64), b.input_arg(I128))); });
 }
 
 static std::vector<Test> make_invalid_builder_tests() {

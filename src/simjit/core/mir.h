@@ -9,6 +9,9 @@
 #include "simjit/core/expr.h"
 
 namespace simjit {
+namespace hir {
+struct Function;
+}
 namespace mir {
 
 struct Step;
@@ -26,14 +29,26 @@ struct AccId {
 static_assert(sizeof(AccId) == sizeof(uint64_t));
 
 struct ArgumentAddress {
-    ArgumentIdx arg;
-    size_t offset;
+    ArgumentIdx arg{};
+    size_t offset{};
 };
 
 struct ArithBinData {
     Step *left;
     Step *right;
     ArithBinaryOp op;
+};
+
+// See hir::I128DivData. The partner is metadata rather than a traversal edge;
+// scalar emitters materialize both result words from one helper call.
+struct I128DivData {
+    ArithBinaryOp op{};
+    Step *left_low{};
+    Step *left_high{};
+    Step *right_low{};
+    Step *right_high{};
+    Step *partner{};
+    bool high_word = false;
 };
 
 struct PredicateBinData {
@@ -53,15 +68,15 @@ struct GatherData {
 };
 
 struct StoreData {
-    ArgumentAddress addr;
+    ArgumentAddress addr{};
     Step *what;
-    LoadStoreKind kind;
+    LoadStoreKind kind{};
 };
 
 struct CmpData {
     Step *left;
     Step *right;
-    CmpOp op;
+    CmpOp op{};
     bool is_unsigned = false;
 };
 
@@ -72,12 +87,13 @@ struct AccStoreData {
 
 struct AggResultData {
     Step *arg;
-    ArgumentIdx dst;
+    ArgumentIdx dst{};
+    size_t byte_offset{};
 };
 
 struct ArithReduceData {
     Step *arg;
-    ArithBinaryOp op;
+    ArithBinaryOp op{};
 };
 
 struct PredicateReduceData {
@@ -105,6 +121,14 @@ struct IndexData {
     Step *inc;
 };
 
+struct StoreInterleaveData {
+    Step *even{};
+    Step *odd{};
+    ArgumentAddress dst{};
+    LoadStoreKind kind{};
+    Step *cond{};
+};
+
 struct ScatterData {
     ArgumentIdx dst;
     Step *idx;
@@ -125,11 +149,19 @@ struct PackData {
     AccId acc;
 };
 
+struct Pack128Data {
+    ArgumentIdx dst;
+    Step *low;
+    Step *high;
+    Step *cond;
+    AccId acc;
+};
+
 struct CondStoreData {
-    ArgumentAddress addr;
+    ArgumentAddress addr{};
     Step *arg;
     Step *cond;
-    LoadStoreKind kind;
+    LoadStoreKind kind{};
 };
 
 struct TernarylogicData {
@@ -141,10 +173,10 @@ struct TernarylogicData {
 };
 
 struct ScalarBinWithSafetyCheck {
-    ArithBinaryOp op;
+    ArithBinaryOp op{};
     Step *left;
     Step *right;
-    AccId overflow_flag;
+    AccId overflow_flag{};
     Step *mask = nullptr;
 };
 
@@ -156,6 +188,13 @@ struct IntCastData {
 struct FloatCastData {
     Step *arg;
     bool is_unsigned;
+};
+
+struct FunnelShiftData {
+    Step *left;
+    Step *right;
+    Step *amount;
+    FunnelShiftKind kind;
 };
 
 struct VecPermuteData {
@@ -172,14 +211,21 @@ struct ScalarPermuteData {
 };
 
 struct LoadData {
-    ArgumentAddress addr;
-    LoadStoreKind kind;
+    ArgumentAddress addr{};
+    LoadStoreKind kind{};
+    size_t byte_offset{};
 };
 
-struct StoreSum128Data {
-    ArenaArray<Step *> low_steps;
-    Step *hi_combined;
-    ArgumentIdx dst;
+struct LoadDeinterleaveData {
+    ArgumentAddress addr{};
+    LoadStoreKind kind{};
+    uint8_t lane_count = 2;
+    uint8_t lane = 0;
+};
+
+struct VecExtractData {
+    Step *arg;
+    uint8_t lane{};
 };
 
 enum class FmaKind : uint8_t {
@@ -231,10 +277,12 @@ struct ConstDivData {
 enum class StepKind : uint8_t {
     Const,
     Load,
+    LoadDeinterleave,
     LoadSplat,
     Gather,
     Store,
     ArithBinary,
+    I128Div,
     ArithUnary,
     IntCast,
     FloatCast,
@@ -257,6 +305,7 @@ enum class StepKind : uint8_t {
     VecIndex,
     Scatter,
     Pack,
+    Pack128,
     Ternarylogic,
     CondStore,
     ScalarIndex,
@@ -264,13 +313,15 @@ enum class StepKind : uint8_t {
     VecConst,
     VecPermute,
     ScalarPermute,
-    StoreSum128,
+    VecExtract,
     CondScatter,
     FMA,
     Fpclass,
     VecNarrowCombine,
     VecFloatNarrowCombine,
     ConstDiv,
+    FunnelShift,
+    StoreInterleave
 };
 
 struct Step {
@@ -295,12 +346,14 @@ private:
         StoreData store;
         SelectData select;
         ArithBinData ab;
+        I128DivData i128_div;
         GatherData gather;
         ArithUnaryData au;
         PredicateBinData mb;
         ConstData con;
         AccId acc_move;
         LoadData load;
+        LoadDeinterleaveData load_deinterleave;
         AccStoreData acc_store;
         AggResultData agg_result;
         ArithReduceData ab_reduce;
@@ -310,6 +363,7 @@ private:
         IndexData index;
         ScatterData scatter;
         PackData pack;
+        Pack128Data pack128;
         TernarylogicData ternarylogic;
         CondStoreData cond_store;
         ScalarBinWithSafetyCheck ab_overflow;
@@ -317,7 +371,7 @@ private:
         FloatCastData float_cast;
         VecPermuteData vec_permute;
         ScalarPermuteData scalar_permute;
-        StoreSum128Data sum128;
+        VecExtractData vec_extract;
         CondScatterData cond_scatter;
         FMAData fma;
         FpclassData fpclass;
@@ -325,6 +379,8 @@ private:
         VecNarrowCombineData narrow_combine;
         VecFloatNarrowCombineData float_narrow_combine;
         ConstDivData const_div;
+        FunnelShiftData funnel;
+        StoreInterleaveData store_interleave;
     };
 };
 
@@ -340,11 +396,13 @@ enum class AllowedDataTypes : uint8_t {
 #define MIR_STEP_DATA_LIST(X)                                                     \
     X(con, Const, con, Any)                                                       \
     X(load, Load, load, Any)                                                      \
+    X(load_deinterleave, LoadDeinterleave, load_deinterleave, Any)                \
     X(load_splat, LoadSplat, load, Any)                                           \
     X(gather, Gather, gather, ScalarOrVec)                                        \
     X(store, Store, store, Any)                                                   \
     X(arith_un, ArithUnary, au, ScalarOrVec)                                      \
     X(arith_bin, ArithBinary, ab, ScalarOrVec)                                    \
+    X(i128_div, I128Div, i128_div, Scalar)                                        \
     X(mask_bin, MaskBinary, mb, Mask)                                             \
     X(int_cast, IntCast, int_cast, ScalarOrVec)                                   \
     X(widen_hi, VecWidenHighHalf, half_cast, Vec)                                 \
@@ -364,6 +422,7 @@ enum class AllowedDataTypes : uint8_t {
     X(vec_index, VecIndex, index, Vec)                                            \
     X(scatter, Scatter, scatter, ScalarOrVec)                                     \
     X(pack, Pack, pack, ScalarOrVec)                                              \
+    X(pack128, Pack128, pack128, ScalarOrVec)                                     \
     X(ternarylogic, Ternarylogic, ternarylogic, Vec)                              \
     X(cond_store, CondStore, cond_store, ScalarOrVec)                             \
     X(scalar_index, ScalarIndex, index, Scalar)                                   \
@@ -371,7 +430,7 @@ enum class AllowedDataTypes : uint8_t {
     X(vec_const, VecConst, vec_const, Vec)                                        \
     X(vec_permute, VecPermute, vec_permute, Vec)                                  \
     X(scalar_permute, ScalarPermute, scalar_permute, Scalar)                      \
-    X(sum128, StoreSum128, sum128, Scalar)                                        \
+    X(vec_extract, VecExtract, vec_extract, Scalar)                               \
     X(cond_scatter, CondScatter, cond_scatter, ScalarOrVec)                       \
     X(float_cast, FloatCast, float_cast, ScalarOrVec)                             \
     X(fma, FMA, fma, ScalarOrVec)                                                 \
@@ -379,7 +438,9 @@ enum class AllowedDataTypes : uint8_t {
     X(fpclass, Fpclass, fpclass, ScalarOrMask)                                    \
     X(vec_narrow_combine, VecNarrowCombine, narrow_combine, Vec)                  \
     X(vec_float_narrow_combine, VecFloatNarrowCombine, float_narrow_combine, Vec) \
-    X(const_div, ConstDiv, const_div, Scalar)
+    X(const_div, ConstDiv, const_div, Scalar)                                     \
+    X(funnel_shift, FunnelShift, funnel, ScalarOrVec)                             \
+    X(store_interleave, StoreInterleave, store_interleave, ScalarOrVec)
 
 #define ASSOC_STEP_DATA(_0, _kind, _field, _2)       \
     template <> struct Step::Data<StepKind::_kind> { \
@@ -423,6 +484,7 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
     case StepKind::Const:
     case StepKind::VecConst:
     case StepKind::Load:
+    case StepKind::LoadDeinterleave:
     case StepKind::AccLoad:
     case StepKind::LoadSplat:
     case StepKind::ScalarIndex:
@@ -473,6 +535,13 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             if (data.magic != nullptr) { process(data.magic); }
             if (data.round_mask != nullptr) { process(data.round_mask); }
             process(data.divisor);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::I128Div) {
+            process(data.left_low);
+            process(data.left_high);
+            process(data.right_low);
+            process(data.right_high);
             break;
         }
         SIMJIT_MATCH2 (StepKind::PredicateNot, StepKind::MaskCount) {
@@ -529,6 +598,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.cond);
             break;
         }
+        SIMJIT_MATCH (StepKind::Pack128) {
+            process(data.low);
+            process(data.high);
+            process(data.cond);
+            break;
+        }
         SIMJIT_MATCH (StepKind::CondStore) {
             process(data.arg);
             process(data.cond);
@@ -546,6 +621,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             if (data.mask) { process(data.mask); }
             break;
         }
+        SIMJIT_MATCH (StepKind::FunnelShift) {
+            process(data.left);
+            process(data.right);
+            process(data.amount);
+            break;
+        }
         SIMJIT_MATCH (StepKind::VecPermute) {
             process(data.arg);
             process(data.permute_idxs);
@@ -555,11 +636,8 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.arg);
             break;
         }
-        SIMJIT_MATCH (StepKind::StoreSum128) {
-            for (auto x : data.low_steps) {
-                process(x);
-            }
-            process(data.hi_combined);
+        SIMJIT_MATCH (StepKind::VecExtract) {
+            process(data.arg);
             break;
         }
         SIMJIT_MATCH (StepKind::CondScatter) {
@@ -584,6 +662,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
         }
         SIMJIT_MATCH (StepKind::Fpclass) {
             process(data.arg);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::StoreInterleave) {
+            process(data.even);
+            process(data.odd);
+            if (data.cond) process(data.cond);
             break;
         }
     }
@@ -671,10 +755,35 @@ struct AccumulatorInfo {
     }
 };
 
+struct InterleavePair {
+    Step *even = nullptr;
+    Step *odd = nullptr;
+};
+
+struct ArgumentInterleave {
+    ArenaArray<InterleavePair> pairs;
+
+    Step *find_partner(const Step *step) const noexcept {
+        for (const InterleavePair &pair : pairs) {
+            if (pair.even == step) { return pair.odd; }
+            if (pair.odd == step) { return pair.even; }
+        }
+        return nullptr;
+    }
+};
+
+struct InterleaveInfo {
+    ArenaArray<ArgumentInterleave> by_argument;
+    ArenaArray<VecDataType> deinterleave_dtypes;
+    ArenaArray<VecDataType> interleave_dtypes;
+};
+
 struct Function {
     Context *ctx;
+    const hir::Function *source_hir = nullptr;
     ArenaArray<ArgumentDecl> args;
     AccumulatorInfo accs;
+    InterleaveInfo interleave;
     ArenaArray<Step *> prologue_roots;
     ArenaArray<Step *> main_loop_roots;
     ArenaArray<Step *> remainder_roots;
@@ -692,10 +801,12 @@ constexpr bool is_scalar_step(StepKind kind) noexcept {
     switch (kind) {
     case StepKind::Const:
     case StepKind::Load:
+    case StepKind::LoadDeinterleave:
     case StepKind::LoadSplat:
     case StepKind::Gather:
     case StepKind::Store:
     case StepKind::ArithBinary:
+    case StepKind::I128Div:
     case StepKind::FMA:
     case StepKind::ArithUnary:
     case StepKind::IntCast:
@@ -709,20 +820,26 @@ constexpr bool is_scalar_step(StepKind kind) noexcept {
     case StepKind::ScalarIndex:
     case StepKind::Scatter:
     case StepKind::Pack:
+    case StepKind::Pack128:
     case StepKind::CondStore:
     case StepKind::ScalarArithBinaryOverflow:
+    case StepKind::FunnelShift:
     case StepKind::ScalarPermute:
-    case StepKind::StoreSum128:
+    case StepKind::VecExtract:
     case StepKind::CondScatter:
     case StepKind::BitCast:
     case StepKind::Fpclass:
-    case StepKind::ConstDiv: return true;
+    case StepKind::ConstDiv:
+    case StepKind::StoreInterleave: return true;
     default: break;
     }
     return false;
 }
 
 std::vector<uint8_t> generate_bit_permute_lut(uint64_t func);
+
+const char *i128_div_helper_symbol(ArithBinaryOp op);
+void *i128_div_helper_address(ArithBinaryOp op);
 
 } // namespace mir
 } // namespace simjit

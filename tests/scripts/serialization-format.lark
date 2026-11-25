@@ -14,7 +14,8 @@ document: function
 function: "(" "func" args_section accs_section? steps_section roots_section? scalar_only_section? ")"
 
 args_section: "(" "args" arg_decl* ")"
-arg_decl: "(" "arg" arg_id scalar_dtype arg_kind ")"
+arg_decl: "(" "arg" arg_id scalar_dtype interleaved_arg? ")" | "(" "safety-check-arg" arg_id ")"
+interleaved_arg: "(" "interleaved" scalar_dtype ")"
 
 accs_section: "(" "accs" acc_decl* ")"
 acc_decl: "(" "acc" acc_id scalar_dtype arg_ref step_ref ")"
@@ -25,10 +26,12 @@ scalar_only_section: "(" "scalar-only" ")"
 
 step: const_step
     | load_step
+    | load_deinterleave_step
     | load_splat_step
     | index_step
     | gather_step
     | arith_binary_step
+    | i128_div_step
     | checked_op_step
     | arith_unary_step
     | compare_step
@@ -39,9 +42,12 @@ step: const_step
     | countif_step
     | predicate_not_step
     | select_step
+    | funnel_shift_step
     | store_step
+    | store_interleave_step
     | scatter_step
     | pack_step
+    | pack128_step
     | acc_arith_step
     | acc_predicate_step
     | acc_sum128_step
@@ -50,12 +56,14 @@ step: const_step
 
 const_step: "(" "step" step_id "const" scalar_dtype HEX_STRING ")"
 load_step: "(" "step" step_id "load" scalar_dtype arg_ref load_store_kind ")"
-load_splat_step: "(" "step" step_id "load-splat" scalar_dtype arg_ref ")"
+load_deinterleave_step: "(" "step" step_id "load-deinterleave" scalar_dtype arg_ref load_store_kind lane_count lane ")"
+load_splat_step: "(" "step" step_id "load-splat" scalar_dtype arg_ref INT? ")"
 index_step: "(" "step" step_id "index" scalar_dtype ")"
 gather_step: "(" "step" step_id "gather" scalar_dtype step_ref arg_ref ")"
 
 arith_binary_step: "(" "step" step_id "binary" scalar_dtype arith_binary_op step_ref step_ref arith_binary_flags? ")"
-checked_op_step: "(" "step" step_id "checked-op" scalar_dtype step_ref step_ref? ")"
+i128_div_step: "(" "step" step_id "i128-div" "i64" arith_binary_op step_ref step_ref step_ref step_ref bool_literal ")"
+checked_op_step: "(" "step" step_id "checked-op" scalar_dtype checked_op_kind step_ref step_ref? step_ref? step_ref? step_ref? ")"
 arith_unary_step: "(" "step" step_id "unary" scalar_dtype arith_unary_op step_ref ")"
 compare_step: "(" "step" step_id "cmp" scalar_dtype cmp_op step_ref step_ref true_literal? ")"
 int_cast_step: "(" "step" step_id "int-cast" scalar_dtype int_cast_kind step_ref ")"
@@ -66,14 +74,19 @@ predicate_binary_step: "(" "step" step_id "predicate-binary" scalar_dtype predic
 countif_step: "(" "step" step_id "countif" "i64" step_ref acc_ref ")"
 predicate_not_step: "(" "step" step_id "predicate-not" scalar_dtype step_ref ")"
 select_step: "(" "step" step_id "select" scalar_dtype step_ref step_ref step_ref ")"
+funnel_shift_step: "(" "step" step_id "funnel-shift" scalar_dtype step_ref step_ref step_ref funnel_shift_kind ")"
+
+funnel_shift_kind: "left" | "right"
 
 store_step: "(" "step" step_id "store" scalar_dtype step_ref arg_ref load_store_kind step_ref? ")"
+store_interleave_step: "(" "step" step_id "store-interleave" scalar_dtype step_ref step_ref arg_ref load_store_kind step_ref? ")"
 scatter_step: "(" "step" step_id "scatter" scalar_dtype step_ref step_ref arg_ref step_ref? ")"
 pack_step: "(" "step" step_id "pack" scalar_dtype step_ref step_ref arg_ref acc_ref ")"
+pack128_step: "(" "step" step_id "pack128" scalar_dtype step_ref step_ref step_ref arg_ref acc_ref ")"
 
 acc_arith_step: "(" "step" step_id "acc-arith-bin" scalar_dtype arith_binary_op step_ref acc_ref step_ref? ")"
 acc_predicate_step: "(" "step" step_id "acc-predicate-bin" scalar_dtype predicate_binary_op step_ref acc_ref ")"
-acc_sum128_step: "(" "step" step_id "sum128" scalar_dtype arith_binary_op step_ref acc_ref step_ref? ")"
+acc_sum128_step: "(" "step" step_id "sum128" scalar_dtype arith_binary_op step_ref step_ref acc_ref step_ref? ")"
 permute_step: "(" "step" step_id "permute" scalar_dtype step_ref HEX_STRING bool_literal ")"
 fpclass_step: "(" "step" step_id "fpclass" scalar_dtype step_ref fpclass_flags ")"
 
@@ -83,16 +96,10 @@ acc_ref: "(" "acc" acc_id ")"
 
 scalar_dtype: "i1" | "i8" | "i16" | "i32" | "i64" | "i128" | "f32" | "f64"
 
-arg_kind: arg_kind_atom | "(" arg_kind_atom+ ")"
-arg_kind_atom: "src-arr"
-             | "src-idx-arr"
-             | "src-const"
-             | "dst-arr"
-             | "dst-scalar"
-             | "src-gather-arr"
-             | "dst-overflow"
-
 load_store_kind: "aligned" | "unaligned"
+
+lane_count: INT
+lane: INT
 
 arith_binary_op: "add"
                | "sub"
@@ -116,6 +123,8 @@ arith_binary_op: "add"
                | "shll"
                | "rol"
                | "ror"
+
+checked_op_kind: "add" | "sub" | "mul" | "div" | "udiv" | "mod" | "umod" | "i128-div" | "i128-add-low" | "i128-add-high" | "i128-sub-low" | "i128-sub-high" | "i128-mul-low" | "i128-mul-high" | "i128-sll-low" | "i128-sll-high" | "i128-srl-low" | "i128-srl-high" | "i128-sra-low" | "i128-sra-high" | "i128-rotl-low" | "i128-rotl-high" | "i128-rotr-low" | "i128-rotr-high" | "i128-neg-low" | "i128-neg-high" | "i128-abs-low" | "i128-abs-high" | "i128-trunc" | "shra" | "shrl" | "shll" | "rol" | "ror" | "trunc" | "abs" | "neg"
 
 arith_unary_op: "not"
               | "neg"

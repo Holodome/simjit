@@ -399,12 +399,12 @@
   (define step-items '())
   (define root-items '())
 
-  (define (alloc-arg dtype kind)
+  (define (alloc-arg dtype)
     (define idx next-arg)
     (set! next-arg (add1 next-arg))
     (set! arg-items
           (append arg-items
-                  (list (format "(arg ~a ~a ~a)" idx dtype kind))))
+                  (list (format "(arg ~a ~a)" idx dtype))))
     idx)
 
   (define (alloc-step text)
@@ -422,14 +422,14 @@
       [(const-ir dtype bits)
        (alloc-step (format "const ~a \"~a\"" dtype bits))]
       [(load-ir dtype kind #f)
-       (define arg-id (alloc-arg dtype "src-arr"))
+       (define arg-id (alloc-arg dtype))
        (alloc-step (format "load ~a (arg ~a) ~a" dtype arg-id kind))]
       [(load-ir dtype _ #t)
-       (define arg-id (alloc-arg dtype "src-const"))
+       (define arg-id (alloc-arg dtype))
        (alloc-step (format "load-splat ~a (arg ~a)" dtype arg-id))]
       [(gather-ir dtype idx)
        (define idx-id (emit-expr idx))
-       (define arg-id (alloc-arg dtype "src-gather-arr"))
+       (define arg-id (alloc-arg dtype))
        (alloc-step (format "gather ~a ~a (arg ~a)" dtype (emit-ref idx-id) arg-id))]
       [(index-ir dtype)
        (alloc-step (format "index ~a" dtype))]
@@ -490,7 +490,7 @@
     (match root
       [(store-root-ir dtype expr kind #f)
        (define expr-id (emit-expr expr))
-       (define dst-id (alloc-arg dtype "dst-arr"))
+       (define dst-id (alloc-arg dtype))
        (define step-id
          (alloc-step (format "store ~a ~a (arg ~a) ~a"
                              dtype
@@ -501,7 +501,7 @@
       [(store-root-ir dtype expr kind cond)
        (define expr-id (emit-expr expr))
        (define cond-id (emit-expr cond))
-       (define dst-id (alloc-arg dtype "dst-arr"))
+       (define dst-id (alloc-arg dtype))
        (define step-id
          (alloc-step (format "store ~a ~a (arg ~a) ~a ~a"
                              dtype
@@ -513,7 +513,7 @@
       [(scatter-root-ir dtype expr idx #f)
        (define expr-id (emit-expr expr))
        (define idx-id (emit-expr idx))
-       (define dst-id (alloc-arg dtype "dst-arr"))
+       (define dst-id (alloc-arg dtype))
        (define step-id
          (alloc-step (format "scatter ~a ~a ~a (arg ~a)"
                              dtype
@@ -525,7 +525,7 @@
        (define expr-id (emit-expr expr))
        (define idx-id (emit-expr idx))
        (define cond-id (emit-expr cond))
-       (define dst-id (alloc-arg dtype "dst-arr"))
+       (define dst-id (alloc-arg dtype))
        (define step-id
          (alloc-step (format "scatter ~a ~a ~a (arg ~a) ~a"
                              dtype
@@ -536,7 +536,7 @@
        (set! root-items (append root-items (list (emit-ref step-id))))]
       [(agg-root-ir dtype op expr #f)
        (define expr-id (emit-expr expr))
-       (define dst-id (alloc-arg dtype "dst-scalar"))
+       (define dst-id (alloc-arg dtype))
        (define acc-id next-acc)
        (set! next-acc (add1 next-acc))
        (define step-id
@@ -556,7 +556,7 @@
       [(agg-root-ir dtype op expr cond)
        (define expr-id (emit-expr expr))
        (define cond-id (emit-expr cond))
-       (define dst-id (alloc-arg dtype "dst-scalar"))
+       (define dst-id (alloc-arg dtype))
        (define acc-id next-acc)
        (set! next-acc (add1 next-acc))
        (define step-id
@@ -576,7 +576,7 @@
        (set! root-items (append root-items (list (emit-ref step-id))))]
       [(pred-agg-root-ir op pred)
        (define pred-id (emit-expr pred))
-       (define dst-id (alloc-arg "i1" "dst-scalar"))
+       (define dst-id (alloc-arg "i1"))
        (define acc-id next-acc)
        (set! next-acc (add1 next-acc))
        (define step-id
@@ -593,7 +593,7 @@
        (set! root-items (append root-items (list (emit-ref step-id))))]
       [(countif-root-ir pred)
        (define pred-id (emit-expr pred))
-       (define dst-id (alloc-arg "i64" "dst-scalar"))
+       (define dst-id (alloc-arg "i64"))
        (define acc-id next-acc)
        (set! next-acc (add1 next-acc))
        (define step-id

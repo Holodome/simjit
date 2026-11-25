@@ -34,7 +34,7 @@ CPP_PARAM_RE = re.compile(
     r"\bvoid\s+expr\s*\(\s*size_t\s+\w+\s*,(?P<params>.*?)\)\s*\{", re.S
 )
 CPP_POINTER_PARAM_RE = re.compile(r"^(?:const\s+)?(?P<type>.+?)\s*\*")
-HIR_ARG_RE = re.compile(r"^@\d+\s+arg\s+dtype=(?P<dtype>[a-z0-9]+)\s+kind=", re.M)
+HIR_ARG_RE = re.compile(r"^@\d+\s+arg\s+dtype=(?P<dtype>[a-z0-9]+)$", re.M)
 DTYPE_TO_CPP = {
     "i1": "uint8_t",
     "i8": "int8_t",

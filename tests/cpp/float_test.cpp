@@ -178,6 +178,16 @@ def func(n, x, y):
     for i in range(n):
         x[i] = y[0]
         )FOO"},
+    {[](FunctionBuilder &b) {
+         Argument x = b.arg(F64);
+         Argument y = b.arg(F64);
+         b.store(b.load_splat(y, sizeof(double)), x);
+     },
+     PASS_ALL, R"FOO(
+def func(n, x, y):
+    for i in range(n):
+        x[i] = y[1]
+        )FOO"},
     // unaligned load
     {[](FunctionBuilder &b) {
          Argument x = b.arg(F32);
@@ -262,22 +272,21 @@ def func(n, x, y):
          Value idx = b.input_arg(I32);
          Argument dst = b.arg(F32);
          b.scatter(x, idx, dst);
-     },
-    LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+     }},
     {[](FunctionBuilder &b) {
          Value x = b.input_arg(F64);
          Value idx = b.input_arg(I32);
          Argument dst = b.arg(F64);
          b.scatter(x, idx, dst);
      },
-    LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+    LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::CoefficientRangeNeedsNormalization)},
     {[](FunctionBuilder &b) {
          Value x = b.input_arg(F32);
          Value idx = b.input_arg(I32);
          Argument dst = b.arg(F64);
          b.scatter(b.float_cast(x, F64), idx, dst);
      },
-    LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+    LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::CoefficientRangeNeedsNormalization)},
     // scatter 64
     {[](FunctionBuilder &b) {
          Value x = b.input_arg(F32);
@@ -285,14 +294,13 @@ def func(n, x, y):
          Argument dst = b.arg(F32);
          b.scatter(x, idx, dst);
      },
-    LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+    LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::CoefficientRangeNeedsNormalization)},
     {[](FunctionBuilder &b) {
          Value x = b.input_arg(F64);
          Value idx = b.input_arg(I64);
          Argument dst = b.arg(F64);
          b.scatter(x, idx, dst);
-     },
-    LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+     }},
     // cond_store
     {[](FunctionBuilder &b) {
          Value x = b.input_arg(F32);

@@ -153,50 +153,52 @@ template <typename T> void write_float_values(Buffer &buffer, size_t rows, Rando
 }
 
 void generate_input(Buffer &buffer, const ArgumentInfo &arg, size_t rows, Random &random) {
-    if (arg.kind == ArgumentKind::Sequence) {
-        switch (arg.dtype) {
+    ScalarDataType value_dtype = arg.interleaved_half_dtype.value_or(arg.dtype);
+    size_t value_count = rows * (arg.interleaved_half_dtype ? 2 : 1);
+    if (arg.kind == BundleArgumentKind::Sequence) {
+        switch (value_dtype) {
         case ScalarDataType::I1:
         case ScalarDataType::I8:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<int8_t *>(buffer.data())[i] = static_cast<int8_t>(i);
+            for (size_t i = 0; i < value_count; ++i)
+                static_cast<int8_t *>(buffer.data())[i] = static_cast<int8_t>(i % rows);
             break;
         case ScalarDataType::I16:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<int16_t *>(buffer.data())[i] = static_cast<int16_t>(i);
+            for (size_t i = 0; i < value_count; ++i)
+                static_cast<int16_t *>(buffer.data())[i] = static_cast<int16_t>(i % rows);
             break;
         case ScalarDataType::I32:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<int32_t *>(buffer.data())[i] = static_cast<int32_t>(i);
+            for (size_t i = 0; i < value_count; ++i)
+                static_cast<int32_t *>(buffer.data())[i] = static_cast<int32_t>(i % rows);
             break;
         case ScalarDataType::I64:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<int64_t *>(buffer.data())[i] = static_cast<int64_t>(i);
+            for (size_t i = 0; i < value_count; ++i)
+                static_cast<int64_t *>(buffer.data())[i] = static_cast<int64_t>(i % rows);
             break;
         case ScalarDataType::I128:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<__int128 *>(buffer.data())[i] = i;
+            for (size_t i = 0; i < value_count; ++i)
+                static_cast<__int128 *>(buffer.data())[i] = i % rows;
             break;
         case ScalarDataType::F32:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<float *>(buffer.data())[i] = static_cast<float>(i);
+            for (size_t i = 0; i < value_count; ++i)
+                static_cast<float *>(buffer.data())[i] = static_cast<float>(i % rows);
             break;
         case ScalarDataType::F64:
-            for (size_t i = 0; i < rows; ++i)
-                static_cast<double *>(buffer.data())[i] = static_cast<double>(i);
+            for (size_t i = 0; i < value_count; ++i)
+                static_cast<double *>(buffer.data())[i] = static_cast<double>(i % rows);
             break;
         }
         return;
     }
-    if (arg.kind != ArgumentKind::Input) return;
-    switch (arg.dtype) {
+    if (arg.kind != BundleArgumentKind::Input) return;
+    switch (value_dtype) {
     case ScalarDataType::I1:
-    case ScalarDataType::I8: write_integer_values<int8_t>(buffer, rows, random); break;
-    case ScalarDataType::I16: write_integer_values<int16_t>(buffer, rows, random); break;
-    case ScalarDataType::I32: write_integer_values<int32_t>(buffer, rows, random); break;
-    case ScalarDataType::I64: write_integer_values<int64_t>(buffer, rows, random); break;
-    case ScalarDataType::I128: write_integer_values<__int128>(buffer, rows, random); break;
-    case ScalarDataType::F32: write_float_values<float>(buffer, rows, random); break;
-    case ScalarDataType::F64: write_float_values<double>(buffer, rows, random); break;
+    case ScalarDataType::I8: write_integer_values<int8_t>(buffer, value_count, random); break;
+    case ScalarDataType::I16: write_integer_values<int16_t>(buffer, value_count, random); break;
+    case ScalarDataType::I32: write_integer_values<int32_t>(buffer, value_count, random); break;
+    case ScalarDataType::I64: write_integer_values<int64_t>(buffer, value_count, random); break;
+    case ScalarDataType::I128: write_integer_values<__int128>(buffer, value_count, random); break;
+    case ScalarDataType::F32: write_float_values<float>(buffer, value_count, random); break;
+    case ScalarDataType::F64: write_float_values<double>(buffer, value_count, random); break;
     }
 }
 
@@ -355,8 +357,9 @@ size_t run_registered_benchmarks(const std::vector<BenchmarkInvocationPtr> &invo
     return count;
 }
 
-bool is_output(ArgumentKind kind) {
-    return kind == ArgumentKind::Output || kind == ArgumentKind::OutputScalar || kind == ArgumentKind::SafetyCheck;
+bool is_output(BundleArgumentKind kind) {
+    return kind == BundleArgumentKind::Output || kind == BundleArgumentKind::OutputScalar ||
+           kind == BundleArgumentKind::SafetyCheck;
 }
 
 std::string_view lowering_kind(const BundleCase &item, const Implementation &implementation) {
@@ -422,13 +425,16 @@ CaseResult execute_case(const BundleCase &item, const RunnerOptions &options) {
                 const auto &right = implementation_outputs[baseline][output_index];
                 size_t mismatch_count = 0;
                 std::string samples;
-                for (size_t row = 0; row < options.rows; ++row) {
-                    if (row_value_equal(item.args[arg_index].dtype, left.data(), right.data(), row)) continue;
+                ScalarDataType value_dtype =
+                    item.args[arg_index].interleaved_half_dtype.value_or(item.args[arg_index].dtype);
+                size_t value_count = options.rows * (item.args[arg_index].interleaved_half_dtype ? 2 : 1);
+                for (size_t row = 0; row < value_count; ++row) {
+                    if (row_value_equal(value_dtype, left.data(), right.data(), row)) continue;
                     ++mismatch_count;
                     if (mismatch_count <= 40) {
                         samples += std::format(" (idx={} left={} right={})", row,
-                                               row_value_string(item.args[arg_index].dtype, left.data(), row),
-                                               row_value_string(item.args[arg_index].dtype, right.data(), row));
+                                               row_value_string(value_dtype, left.data(), row),
+                                               row_value_string(value_dtype, right.data(), row));
                     }
                 }
                 if (mismatch_count != 0) {

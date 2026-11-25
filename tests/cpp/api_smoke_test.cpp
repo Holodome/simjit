@@ -3,6 +3,10 @@
 // See LICENSE for license and copyright information
 // SPDX-License-Identifier: Zlib
 
+#include "simjit/asmjit.h"
+#include "simjit/compiler.h"
+#include "simjit/core/hir.h"
+#include "simjit/core/mir.h"
 #include "simjit/jit.h"
 
 #include <array>
@@ -86,6 +90,29 @@ static void api_smoke_build_many_outputs(FunctionBuilder &b) {
     }
 }
 
+static void api_smoke_raw_build_callbacks() {
+    JitContext ctx{};
+    ctx.set_policy(CompilePolicy::Scalar);
+
+    int32_t offset = 7;
+    void *temporary_lambda = ctx.build_and_compile("api-smoke-temporary-builder", [offset](FunctionBuilder &b) {
+        Value src = b.input_arg(I32);
+        b.sum(b.add(src, b.i32(offset)), b.arg(I32));
+    });
+    require_api_smoke(temporary_lambda != nullptr, "temporary builder lambda");
+
+    auto mutable_builder = [offset](FunctionBuilder &b) mutable {
+        Value src = b.input_arg(I32);
+        b.sum(b.add(src, b.i32(offset)), b.arg(I32));
+    };
+    void *mutable_callable = ctx.build_and_compile("api-smoke-mutable-builder", mutable_builder);
+    require_api_smoke(mutable_callable != nullptr, "mutable builder callable");
+
+    const auto const_builder = [](FunctionBuilder &b) { api_smoke_build_sum_i32(b); };
+    void *const_callable = ctx.build_and_compile("api-smoke-const-builder", const_builder);
+    require_api_smoke(const_callable != nullptr, "const builder callable");
+}
+
 static Arch api_smoke_host_arch() {
 #if defined(__aarch64__) || defined(_M_ARM64)
     return Arch::Arm64_NEON;
@@ -96,11 +123,93 @@ static Arch api_smoke_host_arch() {
 #endif
 }
 
+static bool api_smoke_host_supports_vectorization() {
+    AsmjitSession session(Arch::Native);
+    return session.host_supports_vectorization();
+}
+
+template <typename BuildFn>
+static void require_api_smoke_cascade_scalar_special_op(hir::SpecialOp expected, BuildFn build_fn,
+                                                        const char *message) {
+    MemoryArena arena{};
+    Context context{arena, "cascade-lake", CodeTransformations::All, Arch::Amd64_AVX512};
+    hir::SpecialOp ice_lake = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+    context.host_supported_vector_special_ops =
+        ice_lake & ~(hir::SpecialOp::SmallPack | hir::SpecialOp::ArbitraryBitPermute | hir::SpecialOp::I8ConstantShift |
+                     hir::SpecialOp::SmallPopcount | hir::SpecialOp::LargePopcount);
+    FunctionBuilder builder{context};
+    build_fn(builder);
+    hir::Function *fn = builder.build();
+    require_api_smoke(fn->is_scalar_only(), message);
+    require_api_smoke(bool(fn->unsupported_vector_special_ops() & expected), message);
+}
+
+static void api_smoke_special_op_capabilities() {
+    using hir::SpecialOp;
+
+    SpecialOp ice_lake = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+    require_api_smoke(bool(ice_lake & SpecialOp::SmallPack), "Ice Lake small pack capability");
+    require_api_smoke(bool(ice_lake & SpecialOp::ArbitraryBitPermute), "Ice Lake GFNI capability");
+    require_api_smoke(bool(ice_lake & SpecialOp::SmallPopcount), "Ice Lake small popcount capability");
+    require_api_smoke(bool(ice_lake & SpecialOp::LargePopcount), "Ice Lake large popcount capability");
+
+    SpecialOp arm = hir::supported_vector_special_ops_for_arch(Arch::Arm64_NEON);
+    require_api_smoke(bool(arm & SpecialOp::SmallPack), "Arm small pack capability");
+    require_api_smoke(bool(arm & SpecialOp::SmallPopcount), "Arm small popcount capability");
+    require_api_smoke(bool(arm & SpecialOp::LargePopcount), "Arm large popcount capability");
+    require_api_smoke(!bool(arm & SpecialOp::ArbitraryBitPermute), "Arm arbitrary bit permute capability");
+
+    MemoryArena scalar_arena{};
+    Context scalar_context{scalar_arena, "cascade-lake", CodeTransformations::All, Arch::Amd64_AVX512};
+    // Synthetic Cascade Lake host mask: retain the AVX-512 baseline but exclude the Ice Lake extensions.
+    scalar_context.host_supported_vector_special_ops =
+        ice_lake & ~(SpecialOp::SmallPack | SpecialOp::ArbitraryBitPermute | SpecialOp::I8ConstantShift |
+                     SpecialOp::SmallPopcount | SpecialOp::LargePopcount);
+    FunctionBuilder scalar_builder{scalar_context};
+    scalar_builder.pack(scalar_builder.input_arg(I8), scalar_builder.input_predicate_arg(), scalar_builder.arg(I8),
+                        scalar_builder.arg(I64));
+    hir::Function *scalar_fn = scalar_builder.build();
+    require_api_smoke(scalar_fn->is_scalar_only(), "Cascade small pack forces scalar");
+    require_api_smoke(bool(scalar_fn->unsupported_vector_special_ops() & SpecialOp::SmallPack),
+                      "Cascade small pack reason");
+    require_api_smoke_contains(hir::print_function(scalar_fn), "unsupported-vector-special-ops=small-pack",
+                               "Cascade special op HIR report");
+
+    require_api_smoke_cascade_scalar_special_op(
+        SpecialOp::SmallPopcount, [](FunctionBuilder &b) { b.output_arg(b.popcnt(b.input_arg(I8))); },
+        "Cascade small popcount forces scalar");
+    require_api_smoke_cascade_scalar_special_op(
+        SpecialOp::LargePopcount, [](FunctionBuilder &b) { b.output_arg(b.popcnt(b.input_arg(I32))); },
+        "Cascade large popcount forces scalar");
+    require_api_smoke_cascade_scalar_special_op(
+        SpecialOp::ArbitraryBitPermute,
+        [](FunctionBuilder &b) { b.output_arg(b.permute_i8_bits(b.input_arg(I8), 1, 2, 3, 4, 5, 6, 7, 0)); },
+        "Cascade arbitrary bit permute forces scalar");
+    require_api_smoke_cascade_scalar_special_op(
+        SpecialOp::I8ConstantShift, [](FunctionBuilder &b) { b.output_arg(b.sll(b.input_arg(I8), b.i8(1))); },
+        "Cascade i8 constant shift forces scalar");
+
+    MemoryArena vector_arena{};
+    Context vector_context{vector_arena, "cascade-lake", CodeTransformations::All, Arch::Amd64_AVX512};
+    vector_context.host_supported_vector_special_ops = scalar_context.host_supported_vector_special_ops;
+    FunctionBuilder vector_builder{vector_context};
+    vector_builder.output_arg(vector_builder.input_arg(I32));
+    hir::Function *vector_fn = vector_builder.build();
+    require_api_smoke(!vector_fn->is_scalar_only(), "Cascade baseline vector HIR remains eligible");
+}
+
 static void api_smoke_sum() {
     JitContext ctx{};
     ctx.set_policy(CompilePolicy::Scalar);
+    require_api_smoke(ctx.statistics().last_compilation_ns == 0, "initial compilation timing");
 
     auto func = vectorized_function<InputArr<I32>, OutputScalar<I32>>(ctx, "api-smoke-sum", api_smoke_build_sum_i32);
+    const uint64_t compilation_ns = ctx.statistics().last_compilation_ns;
+    require_api_smoke(compilation_ns > 0, "successful compilation timing");
+
+    auto cached = find_vectorized_function<InputArr<I32>, OutputScalar<I32>>(ctx, "api-smoke-sum");
+    require_api_smoke(cached.has_value(), "sum cache hit");
+    require_api_smoke(ctx.statistics().last_compilation_ns == compilation_ns, "cache hit preserves compilation timing");
 
     int32_t input[1000];
     for (int32_t i = 0; i < 1000; ++i) {
@@ -124,6 +233,21 @@ static void api_smoke_try_compile_and_debug() {
     require_api_smoke(!ctx.debug_snapshot().hir.empty(), "debug HIR should be captured on error");
 }
 
+static void api_smoke_serialized_debug_stage() {
+#if SIMJIT_ENABLE_SERIALIZATION
+    JitContext ctx{};
+    ctx.set_policy(CompilePolicy::Scalar);
+    ctx.debug_options().capture_on_success = true;
+    ctx.debug_options().stages = DebugStage::Serialized;
+
+    (void)vectorized_function<InputArr<I32>, OutputScalar<I32>>(ctx, "api-smoke-serialized-debug-stage",
+                                                                api_smoke_build_sum_i32);
+    const DebugSnapshot &snapshot = ctx.debug_snapshot();
+    require_api_smoke(snapshot.hir.empty(), "serialized debug stage does not capture HIR");
+    require_api_smoke(!snapshot.serialized.empty(), "serialized debug stage captures serialized HIR");
+#endif
+}
+
 static void api_smoke_try_compile_generic_error() {
     JitContext ctx{};
     ctx.set_policy(CompilePolicy::Scalar);
@@ -140,6 +264,7 @@ static void api_smoke_try_compile_generic_error() {
     require_api_smoke(stats.compilation_attempts == 1, "std::exception attempt count");
     require_api_smoke(stats.compilation_failures == 1, "std::exception failure count");
     require_api_smoke(stats.compilation_successes == 0, "std::exception success count");
+    require_api_smoke(stats.last_compilation_ns > 0, "std::exception compilation timing");
 }
 
 static void api_smoke_cache_and_casts() {
@@ -188,10 +313,10 @@ static void api_smoke_cache_error_paths() {
         ErrorKind::JitFailure, ErrorSubKind::ArgumentMismatch, "cached argument count mismatch");
     require_api_smoke_contains(count_mismatch.message, "Argument count mismatch", "count mismatch message");
 
-    ErrorInfo kind_mismatch = expect_api_smoke_simjit_error(
+    ErrorInfo role_mismatch = expect_api_smoke_simjit_error(
         [&]() { (void)find_vectorized_function<InputConst<I32>, OutputScalar<I32>>(ctx, "api-smoke-cache-errors"); },
-        ErrorModule::JIT, ErrorKind::JitFailure, ErrorSubKind::ArgumentMismatch, "cached argument kind mismatch");
-    require_api_smoke_contains(kind_mismatch.message, "kind mismatch", "kind mismatch message");
+        ErrorModule::JIT, ErrorKind::JitFailure, ErrorSubKind::ArgumentMismatch, "cached argument role mismatch");
+    require_api_smoke_contains(role_mismatch.message, "role mismatch", "role mismatch message");
 
     ErrorInfo type_mismatch = expect_api_smoke_simjit_error(
         [&]() { (void)find_vectorized_function<InputArr<I32>, OutputScalar<I64>>(ctx, "api-smoke-cache-errors"); },
@@ -227,6 +352,15 @@ static void api_smoke_cache_limit_error() {
 
 static void api_smoke_vectorized_policy_error() {
     JitContext ctx{};
+    if (!api_smoke_host_supports_vectorization()) {
+        ErrorInfo info = expect_api_smoke_simjit_error(
+            [&]() { ctx.set_policy(CompilePolicy::Vectorized); }, ErrorModule::JIT, ErrorKind::JitFailure,
+            ErrorSubKind::UnsupportedHostFeature, "vectorized policy host capability");
+        require_api_smoke_contains(info.message, "does not support vectorization", "vectorized policy host message");
+        require_api_smoke(ctx.policy() == CompilePolicy::BestEffort,
+                          "rejected vectorized policy leaves policy unchanged");
+        return;
+    }
     ctx.set_policy(CompilePolicy::Vectorized);
 
     ErrorInfo info = expect_api_smoke_simjit_error(
@@ -247,9 +381,14 @@ static void api_smoke_best_effort_records_vectorization_error() {
 
     void *fn = ctx.build_and_compile("api-smoke-best-effort-vectorization-error", api_smoke_build_many_outputs);
     require_api_smoke(fn != nullptr, "best-effort fallback compile");
-    require_api_smoke(!ctx.debug_snapshot().vectorization_exception.empty(), "recorded vectorization error");
-    require_api_smoke_contains(ctx.debug_snapshot().vectorization_exception, "too many roots",
-                               "vectorization error details");
+    if (api_smoke_host_supports_vectorization()) {
+        require_api_smoke(!ctx.debug_snapshot().vectorization_exception.empty(), "recorded vectorization error");
+        require_api_smoke_contains(ctx.debug_snapshot().vectorization_exception, "too many roots",
+                                   "vectorization error details");
+    } else {
+        require_api_smoke(ctx.debug_snapshot().vectorization_exception.empty(),
+                          "no vectorization attempt without host support");
+    }
 }
 
 static void api_smoke_raw_call_errors() {
@@ -270,9 +409,11 @@ static void api_smoke_bug_report() {
     require_api_smoke_contains(empty_report, "function_identifiers: <empty>", "empty bug report identifiers");
     require_api_smoke_contains(empty_report, "=== HIR ===\n<empty>", "empty bug report section");
 
-    JitContext vectorized_ctx{};
-    vectorized_ctx.set_policy(CompilePolicy::Vectorized);
-    require_api_smoke_contains(vectorized_ctx.bug_report(), "policy: vectorized", "vectorized bug report policy");
+    if (api_smoke_host_supports_vectorization()) {
+        JitContext vectorized_ctx{};
+        vectorized_ctx.set_policy(CompilePolicy::Vectorized);
+        require_api_smoke_contains(vectorized_ctx.bug_report(), "policy: vectorized", "vectorized bug report policy");
+    }
 
     JitContext ctx{};
     ctx.set_policy(CompilePolicy::Scalar);
@@ -345,6 +486,7 @@ static void api_smoke_jit_context_move_constructor() {
     require_api_smoke(moved.debug_options().stages == DebugStage::HIR, "move ctor debug stages");
     require_api_smoke(!moved.debug_snapshot().hir.empty(), "move ctor debug snapshot");
     require_api_smoke(moved.statistics().function_count == 1, "move ctor moved function count");
+    require_api_smoke(moved.statistics().last_compilation_ns > 0, "move ctor compilation timing");
     require_api_smoke_identifier(moved.function_identifiers(), "api-smoke-move-ctor", "move ctor function identifier");
 
     auto cached = find_vectorized_function<InputArr<I32>, OutputScalar<I32>>(moved, "api-smoke-move-ctor");
@@ -361,7 +503,7 @@ static void api_smoke_jit_context_move_constructor() {
 
 static void api_smoke_jit_context_move_assignment() {
     JitContext old_owner{};
-    old_owner.set_policy(CompilePolicy::Vectorized);
+    old_owner.set_policy(CompilePolicy::Scalar);
     (void)vectorized_function<InputArr<I32>, OutputScalar<I32>>(old_owner, "api-smoke-move-assign-old",
                                                                 api_smoke_build_sum_i32);
     require_api_smoke(old_owner.statistics().function_count == 1, "move assignment old owner function count");
@@ -405,6 +547,8 @@ static void api_smoke_jit_context_move_assignment() {
     require_api_smoke(old_owner.policy() == CompilePolicy::Scalar, "move assignment clear preserves policy");
     require_api_smoke(old_owner.debug_options().capture_on_success, "move assignment clear preserves debug options");
     require_api_smoke(old_owner.statistics().function_count == 0, "move assignment clear function count");
+    require_api_smoke(old_owner.statistics().last_compilation_ns == 0,
+                      "move assignment clear resets compilation timing");
 }
 
 static void api_smoke_bitmask_roundtrip() {
@@ -490,10 +634,567 @@ static void api_smoke_transform_and_aggregate() {
 }
 #endif
 
+static void api_smoke_load_deinterleave() {
+    using hir::SpecialOp;
+
+    // Repeated calls share lane steps (CSE), and the carrier keeps its explicit
+    // interleaved-half declaration.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg_interleaved(I32);
+        DeinterleavedPair first = builder.load2(src);
+        DeinterleavedPair second = builder.load2(src);
+        require_api_smoke(first.even.step_ == second.even.step_, "deinterleave even lane CSE");
+        require_api_smoke(first.odd.step_ == second.odd.step_, "deinterleave odd lane CSE");
+        require_api_smoke(first.even.step_ != first.odd.step_, "deinterleave lanes are distinct steps");
+        builder.store(builder.add(first.even, builder.i32(1)), builder.arg(I32));
+        builder.store(second.odd, builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->args[src.idx_].dtype == I64 && fn->args[src.idx_].interleaved &&
+                              fn->args[src.idx_].interleaved_half_dtype == I32,
+                          "deinterleave carrier declaration");
+        size_t lane_count = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                if (!step->is(hir::StepKind::LoadDeinterleave)) { return; }
+                auto &data = step->step_data<hir::StepKind::LoadDeinterleave>();
+                require_api_smoke(data.lane_count == 2, "deinterleave lane count is 2");
+                require_api_smoke(data.lane < data.lane_count, "deinterleave lane index in range");
+                ++lane_count;
+            });
+        }
+        require_api_smoke(lane_count == 2, "CSE collapses repeated deinterleave to two lane steps");
+    }
+
+    // x86 vectorizes deinterleave through vpermi2var.
+    {
+        SpecialOp x86_ops = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+        require_api_smoke(bool(x86_ops & SpecialOp::SmallDeinterleave), "x86 small deinterleave capability");
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
+        FunctionBuilder builder{context};
+        DeinterleavedPair pair = builder.load2(builder.arg_interleaved(I32));
+        builder.store(pair.even, builder.arg(I32));
+        builder.store(pair.odd, builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(!fn->is_scalar_only(), "x86 deinterleave vectorizes");
+    }
+
+    // i8 lanes require VBMI; hosts without it stage them to scalar while wider lanes stay vectorized.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
+        context.host_supported_vector_special_ops =
+            hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512) & ~SpecialOp::SmallDeinterleave;
+        FunctionBuilder builder{context};
+        DeinterleavedPair i8_pair = builder.load2(builder.arg_interleaved(I8));
+        builder.store(i8_pair.even, builder.arg(I8));
+        builder.store(i8_pair.odd, builder.arg(I8));
+        builder.store(builder.load2(builder.arg_interleaved(I32)).even, builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->special_ops & SpecialOp::SmallDeinterleave), "i8 deinterleave op recorded");
+        require_api_smoke(fn->is_scalar_only(), "i8 deinterleave stages to scalar without VBMI");
+        require_api_smoke(bool(fn->unsupported_vector_special_ops() & SpecialOp::SmallDeinterleave),
+                          "i8 deinterleave unsupported without VBMI");
+    }
+
+    // A gather fed by a deinterleave lane marks the interleaved input as a bounded index source.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument pairs = builder.arg_interleaved(I32);
+        DeinterleavedPair lanes = builder.load2(pairs);
+        builder.store(builder.gather(lanes.even, builder.arg(I32)), builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->argument_usage[pairs.idx_] & hir::ArgumentUsage::BoundedIndex),
+                          "deinterleaved gather index marks input bounded");
+        require_api_smoke(fn->args[pairs.idx_].interleaved, "deinterleaved gather input stays marked");
+    }
+
+    // The single-lane API produces the same leaves as the pair API (cross-API CSE).
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg_interleaved(I32);
+        Value single = builder.load2_1(src);
+        DeinterleavedPair pair = builder.load2(src);
+        require_api_smoke(single.step_ == pair.odd.step_, "single-lane API unifies with pair odd lane");
+        require_api_smoke(pair.even.step_ != nullptr, "pair even lane materialized");
+        builder.store(single, builder.arg(I32));
+        hir::Function *fn = builder.build();
+        size_t lane_count = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                if (step->is(hir::StepKind::LoadDeinterleave)) { ++lane_count; }
+            });
+        }
+        require_api_smoke(lane_count == 1, "only the consumed lane is reachable");
+    }
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.load_deinterleave(builder.arg_interleaved(I32), 2, 2);
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidConfiguration,
+        "out-of-range deinterleave lane is rejected");
+    // N-way interleaving is not implemented yet: the general API is restricted to pairs.
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.load_deinterleave(builder.arg_interleaved(I32), 3, 0);
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::InvalidConfiguration,
+        "3-way deinterleave is rejected");
+
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.load2(builder.arg(I32));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "unmarked deinterleave is rejected");
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument arg = builder.arg(I128);
+        builder.mark_arg_interleave(arg, I64);
+        DeinterleavedPair pair = builder.load2(arg);
+        require_api_smoke(pair.even.dtype() == I64 && pair.odd.dtype() == I64, "i128 carrier yields i64 pair values");
+    }
+
+    // store_interleave: pair operations use explicit declarations, while ordinary
+    // carrier accesses remain legal on the same argument.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument dst = builder.arg_interleaved(I32);
+        DeinterleavedPair pair = builder.load2(builder.arg_interleaved(I32));
+        builder.store_interleave(dst, pair.even, pair.odd);
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->argument_usage[dst.idx_] & hir::ArgumentUsage::SequentialWrite),
+                          "store interleave marks dst sequential write");
+        require_api_smoke(fn->args[dst.idx_].interleaved, "store interleave destination is marked");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument dst = builder.arg_interleaved(I32);
+        DeinterleavedPair pair = builder.load2(builder.arg_interleaved(I32));
+        Predicate cond = builder.input_predicate_arg();
+        builder.cond_store_interleave(pair.even, pair.odd, cond, dst, LoadStoreKind::Aligned);
+        hir::Function *fn = builder.build();
+        hir::Step *root = fn->step_roots[0];
+        require_api_smoke(root->is(hir::StepKind::StoreInterleave), "conditional interleave store root kind");
+        require_api_smoke(root->step_data<hir::StepKind::StoreInterleave>().cond == cond.step_,
+                          "conditional interleave store keeps predicate");
+        require_api_smoke(root->step_data<hir::StepKind::StoreInterleave>().kind == LoadStoreKind::Aligned,
+                          "conditional interleave store keeps store kind");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument dst = builder.arg_interleaved(I32);
+        DeinterleavedPair pair = builder.load2(builder.arg_interleaved(I32));
+        builder.cond_store_interleave(pair.even, pair.odd, builder.true_(), dst);
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots[0]->step_data<hir::StepKind::StoreInterleave>().cond == nullptr,
+                          "true conditional interleave store simplifies to unconditional");
+    }
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.store_interleave(builder.arg(I32), builder.i32(0), builder.i32(1));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "unmarked store-interleave is rejected");
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            Argument dst = builder.arg_interleaved(I64);
+            builder.store_interleave(dst, builder.i32(0), builder.i32(1));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "mismatched interleave half is rejected");
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument mixed_src = builder.arg_interleaved(I32);
+        Argument raw_dst = builder.arg(I64);
+        Argument pair_dst = builder.arg_interleaved(I32);
+        Value raw = builder.load(mixed_src);
+        DeinterleavedPair pair = builder.load2(mixed_src);
+        builder.store(raw, raw_dst);
+        builder.store_interleave(pair_dst, pair.even, pair.odd);
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots.size() == 2, "mixed carrier and pair accesses both remain roots");
+        require_api_smoke(fn->step_roots[0]->is(hir::StepKind::Store), "mixed carrier access keeps ordinary store");
+        require_api_smoke(fn->step_roots[1]->is(hir::StepKind::StoreInterleave),
+                          "mixed pair access keeps interleaved store");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument left = builder.arg(I128);
+        Argument right = builder.arg(I128);
+        Argument dst = builder.arg(I128);
+        Predicate cond = builder.input_predicate_arg();
+        builder.cond_store(builder.add(builder.load(left), builder.load(right)), cond, dst, LoadStoreKind::Aligned);
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->args[left.idx_].interleaved && fn->args[left.idx_].interleaved_half_dtype == I64,
+                          "ordinary i128 input becomes i64 interleaved carrier");
+        hir::Step *root = fn->step_roots[0];
+        require_api_smoke(root->is(hir::StepKind::StoreInterleave), "ordinary i128 store rewrites to pair store");
+        const auto &store = root->step_data<hir::StepKind::StoreInterleave>();
+        require_api_smoke(store.cond == cond.step_ && store.kind == LoadStoreKind::Aligned,
+                          "i128 store preserves predicate and kind");
+        size_t pair_loads = 0;
+        size_t i64_adds = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *step_root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(step_root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "rewritten i128 value is not reachable");
+                if (step->is(hir::StepKind::LoadDeinterleave)) { ++pair_loads; }
+                if (step->is(hir::StepKind::ArithBinary) && step->dtype == I64) { ++i64_adds; }
+            });
+        }
+        require_api_smoke(pair_loads == 4, "i128 add has four pair load lanes");
+        require_api_smoke(i64_adds == 3, "i128 add has low, high, and carry additions");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument left = builder.arg(I128);
+        Argument right = builder.arg(I128);
+        builder.store(builder.umod(builder.load(left), builder.load(right)), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->is_scalar_only(), "i128 division is scalar-only even with all transformations enabled");
+        size_t i128_div_words = 0;
+        hir::Step *first_word = nullptr;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        hir::traverse_steps_postorder_unique(fn->step_roots[0], traversal_state, [&](hir::Step *step) {
+            require_api_smoke(step->dtype != I128, "i128 division rewrite leaves no ordinary i128 step");
+            if (!step->is(hir::StepKind::I128Div)) { return; }
+            ++i128_div_words;
+            require_api_smoke(step->dtype == I64, "i128 division result words are i64");
+            require_api_smoke(step->step_data<hir::StepKind::I128Div>().op == ArithBinaryOp::UMod,
+                              "i128 division preserves its operation");
+            if (first_word == nullptr) {
+                first_word = step;
+            } else {
+                require_api_smoke(step->step_data<hir::StepKind::I128Div>().partner == first_word,
+                                  "i128 division words are mutual partners");
+            }
+        });
+        require_api_smoke(i128_div_words == 2, "i128 division has two result words");
+        mir::Function *mir_fn = lower_scalar(fn);
+        size_t mir_i128_div_words = 0;
+        std::vector<uint8_t> mir_traversal_state(mir_fn->step_id_count, 0);
+        for (mir::Step *root : mir_fn->remainder_roots) {
+            mir::traverse_steps_postorder_unique(root, mir_traversal_state, [&](mir::Step *step) {
+                if (step->is(mir::StepKind::I128Div)) { ++mir_i128_div_words; }
+            });
+        }
+        require_api_smoke(mir_i128_div_words == 2, "scalar MIR retains the paired i128 division words");
+        require_api_smoke_contains(emit_llvm_ir(mir_fn), "urem i128", "LLVM emits native i128 remainder IR");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        builder.store(builder.udiv(builder.input_arg(I128), builder.con(7, I128)), builder.arg(I128));
+        require_api_smoke(builder.build()->is_scalar_only(),
+                          "constant i128 division bypasses the const-division vector peephole");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::I128Rewrite, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        builder.store(builder.div(builder.input_arg(I128), builder.input_arg(I128)), builder.arg(I128));
+        expect_api_smoke_simjit_error([&] { (void)builder.build(); }, ErrorModule::HIR, ErrorKind::Unsupported,
+                                      ErrorSubKind::UnsupportedFeature,
+                                      "build rejects unlowered i128 division when rewrite is disabled");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Value value = builder.input_arg(I128);
+        Predicate cond = builder.input_predicate_arg();
+        builder.min_agg(value, builder.arg(I128));
+        builder.umax_agg_if(value, cond, builder.arg(I128));
+        builder.andnot_agg(value, builder.arg(I128));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots.size() == 3, "i128 aggregate roots are retained");
+        for (hir::Step *root : fn->step_roots) {
+            require_api_smoke(root->is(hir::StepKind::AccI128), "i128 aggregate has dedicated HIR root");
+            const auto &agg = root->step_data<hir::StepKind::AccI128>();
+            require_api_smoke(agg.low->dtype == I64 && agg.high->dtype == I64,
+                              "i128 aggregate consumes rewritten i64 pair");
+        }
+        const auto &conditional = fn->step_roots[1]->step_data<hir::StepKind::AccI128>();
+        require_api_smoke(conditional.cond == cond.step_, "i128 aggregate preserves its predicate");
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->is(hir::StepKind::AccI128) || step->dtype != I128,
+                                  "i128 aggregate leaves no ordinary i128 step reachable");
+            });
+        }
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::I128Rewrite, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        builder.min_agg(builder.input_arg(I128), builder.arg(I128));
+        expect_api_smoke_simjit_error([&] { (void)builder.build(); }, ErrorModule::HIR, ErrorKind::Unsupported,
+                                      ErrorSubKind::UnsupportedFeature,
+                                      "build rejects an unlowered i128 aggregate when rewrite is disabled");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        builder.sum(builder.input_arg(I8), builder.arg(I16));
+        builder.sum(builder.input_arg(I16), builder.arg(I32));
+        builder.sum(builder.input_arg(I32), builder.arg(I64));
+        Value i64 = builder.input_arg(I64);
+        builder.sum(i64, builder.arg(I128));
+
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots.size() == 4, "all integer sum widths retain a widening root");
+        for (size_t i = 0; i < 3; ++i) {
+            const auto &sum = fn->step_roots[i]->step_data<hir::StepKind::AccArithBinary>();
+            require_api_smoke(sum.arg->is(hir::StepKind::IntCast) &&
+                                  sum.arg->step_data<hir::StepKind::IntCast>().kind == IntCastKind::Sext,
+                              "automatic widening sum uses an ordinary sign extension");
+        }
+        const auto &i128_sum = fn->step_roots[3]->step_data<hir::StepKind::AccI128>();
+        require_api_smoke(i128_sum.low == i64.step_, "automatic i128 sum widening preserves the low i64 word");
+        require_api_smoke(i128_sum.high->is(hir::StepKind::ArithBinary) &&
+                              i128_sum.high->step_data<hir::StepKind::ArithBinary>().op ==
+                                  ArithBinaryOp::ShiftRightArith,
+                          "automatic i128 sum widening sign-extends the high i64 word");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::SumAutoSext, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        expect_api_smoke_simjit_error([&] { builder.sum(builder.input_arg(I32), builder.arg(I64)); }, ErrorModule::HIR,
+                                      ErrorKind::Unsupported, ErrorSubKind::UnsupportedFeature,
+                                      "integer sum widening can be disabled");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::SumAutoSext, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        builder.sum(builder.sext(builder.input_arg(I32), I64), builder.arg(I64));
+        require_api_smoke(builder.build()->step_roots[0]->is(hir::StepKind::AccArithBinary),
+                          "explicit sum sign extension works without SumAutoSext");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I128);
+        builder.store(builder.rotl(builder.load(src), builder.con(64, I128)), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        size_t arith_count = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "i128 rotate rewrite leaves no i128 step");
+                if (step->is(hir::StepKind::ArithBinary)) { ++arith_count; }
+            });
+        }
+        require_api_smoke(arith_count == 0, "i128 rotate by 64 only swaps pair halves");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I128);
+        Argument count = builder.arg(I128);
+        builder.store(builder.sll(builder.load(src), builder.load(count)), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        size_t i64_funnels = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "variable i128 shift rewrite leaves no i128 step");
+                if (step->is(hir::StepKind::FunnelShift)) { ++i64_funnels; }
+            });
+        }
+        require_api_smoke(i64_funnels == 1, "variable i128 shift uses one i64 funnel shift");
+        require_api_smoke(bool(fn->special_ops & SpecialOp::FunnelShift), "i128 shift records funnel shift use");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument left = builder.arg(I128);
+        Argument right = builder.arg(I128);
+        builder.store(builder.mul(builder.load(left), builder.load(right)), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        size_t mul32_count = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "i128 multiply rewrite leaves no i128 step");
+                if (step->is(hir::StepKind::ArithBinary) &&
+                    step->step_data<hir::StepKind::ArithBinary>().op == ArithBinaryOp::Mul64ZE) {
+                    ++mul32_count;
+                }
+            });
+        }
+        require_api_smoke(mul32_count == 10, "i128 multiply uses ten 32x32 partial products");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I128);
+        builder.store(builder.float_cast(builder.load(src), F64, true), builder.arg(F64));
+        hir::Function *fn = builder.build();
+        size_t casts = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "i128 to float rewrite leaves no i128 step");
+                if (!step->is(hir::StepKind::FloatCast)) { return; }
+                const auto &cast = step->step_data<hir::StepKind::FloatCast>();
+                require_api_smoke(cast.arg->dtype == I64 && step->dtype == F64,
+                                  "i128 to float rewrite uses ordinary i64 casts");
+                ++casts;
+            });
+        }
+        require_api_smoke(casts == 2, "i128 to float rewrites both pair halves");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(F32);
+        builder.store(builder.float_cast(builder.load(src), I128), builder.arg(I128));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->step_roots[0]->is(hir::StepKind::StoreInterleave),
+                          "float to i128 rewrites to pair store");
+        size_t casts = 0;
+        std::vector<uint8_t> traversal_state(fn->step_id_count, 0);
+        for (hir::Step *root : fn->step_roots) {
+            hir::traverse_steps_postorder_unique(root, traversal_state, [&](hir::Step *step) {
+                require_api_smoke(step->dtype != I128, "float to i128 rewrite leaves no i128 step");
+                if (!step->is(hir::StepKind::FloatCast)) { return; }
+                const auto &cast = step->step_data<hir::StepKind::FloatCast>();
+                require_api_smoke((cast.arg->dtype == F32 && step->dtype == F64) ||
+                                      (cast.arg->dtype == F64 && step->dtype == F32) ||
+                                      (cast.arg->dtype == F64 && step->dtype == I64) ||
+                                      (cast.arg->dtype == I64 && step->dtype == F64),
+                                  "float to i128 rewrite follows regular cast decomposition");
+                ++casts;
+            });
+        }
+        require_api_smoke(casts == 6, "float to i128 bridges each i64/f32 conversion through f64");
+    }
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All & ~CodeTransformations::I128Rewrite, Arch::Arm64_NEON};
+        FunctionBuilder builder{context};
+        Argument src = builder.arg(I128);
+        builder.store(builder.float_cast(builder.load(src), F64), builder.arg(F64));
+        expect_api_smoke_simjit_error([&] { (void)builder.build(); }, ErrorModule::HIR, ErrorKind::Unsupported,
+                                      ErrorSubKind::UnsupportedFeature,
+                                      "build rejects unlowered i128 float cast when rewrite is disabled");
+    }
+}
+
+static void api_smoke_funnel_shift() {
+    using hir::SpecialOp;
+
+    {
+        SpecialOp x86_ops = hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512);
+        require_api_smoke(bool(x86_ops & SpecialOp::FunnelShift), "x86 funnel shift capability");
+        SpecialOp arm_ops = hir::supported_vector_special_ops_for_arch(Arch::Arm64_NEON);
+        require_api_smoke(bool(arm_ops & SpecialOp::FunnelShift), "arm funnel shift capability");
+    }
+
+    // x86 vectorizes funnel shifts through vpshldv, and the special op is recorded.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
+        FunctionBuilder builder{context};
+        Value y = builder.input_arg(I32);
+        Value z = builder.input_arg(I32);
+        Value w = builder.input_arg(I32);
+        builder.store(builder.funnel_shift_left(y, z, w), builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(bool(fn->special_ops & SpecialOp::FunnelShift), "funnel shift op recorded");
+        require_api_smoke(!fn->is_scalar_only(), "x86 funnel shift vectorizes");
+    }
+
+    // Hosts without VBMI2 stage funnel shift functions to scalar.
+    {
+        MemoryArena arena{};
+        Context context{arena, "expr", CodeTransformations::All, Arch::Amd64_AVX512};
+        context.host_supported_vector_special_ops =
+            hir::supported_vector_special_ops_for_arch(Arch::Amd64_AVX512) & ~SpecialOp::FunnelShift;
+        FunctionBuilder builder{context};
+        Value y = builder.input_arg(I32);
+        Value z = builder.input_arg(I32);
+        Value w = builder.input_arg(I32);
+        builder.store(builder.funnel_shift_left(y, z, w), builder.arg(I32));
+        hir::Function *fn = builder.build();
+        require_api_smoke(fn->is_scalar_only(), "funnel shift stages to scalar without VBMI2");
+        require_api_smoke(bool(fn->unsupported_vector_special_ops() & SpecialOp::FunnelShift),
+                          "funnel shift unsupported without VBMI2");
+    }
+
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.funnel_shift_left(builder.i8(1), builder.i8(2), builder.i8(3));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "i8 funnel shift is rejected");
+    expect_api_smoke_simjit_error(
+        [&] {
+            MemoryArena arena{};
+            Context context{arena, "expr", CodeTransformations::All, Arch::Arm64_NEON};
+            FunctionBuilder builder{context};
+            builder.funnel_shift_right(builder.i64(1), builder.i32(2), builder.i64(3));
+        },
+        ErrorModule::HIR, ErrorKind::InvalidInput, ErrorSubKind::TypeError, "mixed funnel shift types are rejected");
+}
+
 static void run_public_api_smoke_tests() {
 #if SIMJIT_ASMJIT_BACKEND
     api_smoke_sum();
+    api_smoke_special_op_capabilities();
+    api_smoke_load_deinterleave();
+    api_smoke_funnel_shift();
+    api_smoke_raw_build_callbacks();
     api_smoke_try_compile_and_debug();
+    api_smoke_serialized_debug_stage();
     api_smoke_try_compile_generic_error();
     api_smoke_cache_and_casts();
     api_smoke_cache_error_paths();

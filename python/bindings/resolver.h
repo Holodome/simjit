@@ -86,7 +86,8 @@ struct LogicalType {
 
     bool is_int() const {
         return dtype == sj::ScalarDataType::I8 || dtype == sj::ScalarDataType::I16 ||
-               dtype == sj::ScalarDataType::I32 || dtype == sj::ScalarDataType::I64;
+               dtype == sj::ScalarDataType::I32 || dtype == sj::ScalarDataType::I64 ||
+               dtype == sj::ScalarDataType::I128;
     }
     bool is_float() const { return dtype == sj::ScalarDataType::F32 || dtype == sj::ScalarDataType::F64; }
     bool is_timestamp() const { return semantic == SemanticKind::Timestamp64; }
@@ -122,7 +123,7 @@ enum class ConstPayloadKind : uint8_t {
 struct ConstPayload {
     ConstPayloadKind kind = ConstPayloadKind::None;
     union {
-        bool bool_value;
+        bool bool_value = false;
         int64_t signed_int;
         uint64_t unsigned_int;
         double float_value;
@@ -458,11 +459,11 @@ enum class DslFunctionGroup : uint8_t {
 static constexpr uint16_t kDslVariadicFunctionArgs = std::numeric_limits<uint16_t>::max();
 
 struct DslFunctionSpec {
-    DslFunctionKind kind;
+    DslFunctionKind kind{};
     std::string_view name;
-    DslFunctionGroup group;
-    uint16_t min_args;
-    uint16_t max_args;
+    DslFunctionGroup group{};
+    uint16_t min_args = 0;
+    uint16_t max_args = 0;
 
     bool accepts_arg_count(uint32_t count) const;
 };

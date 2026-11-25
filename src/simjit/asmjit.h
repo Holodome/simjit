@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 
 #include "simjit/simjit.h"
@@ -18,6 +19,10 @@
 #include "asmjit/core/jitruntime.h"
 
 namespace simjit {
+
+namespace hir {
+enum class SpecialOp : uint16_t;
+}
 
 struct AsmjitAllocatorStatistics {
     size_t block_count = 0;
@@ -48,6 +53,7 @@ public:
     Arch host_arch() const;
     bool host_supports_x86_backend() const noexcept;
     bool host_supports_vectorization() const noexcept;
+    hir::SpecialOp host_supported_vector_special_ops() const noexcept;
 
     void *add_compiled_function();
     void release_compiled_function(void *fn_ptr);

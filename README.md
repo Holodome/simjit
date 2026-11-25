@@ -8,9 +8,9 @@ Simjit is a low-latency JIT compiler for column expressions.
 
 Required for the C++ library:
 
-- CMake 3.25 or newer
+- CMake 3.20 or newer
 - C++17 compiler
-- make
+- make (optional; used by the project build wrappers)
 - git submodules checked out
 
 Required for the Python package:
@@ -40,6 +40,27 @@ target_link_libraries(your_target PRIVATE simjit::simjit)
 ```
 
 The `toolkit` install profile additionally exposes internal compiler headers.
+
+`CMakePresets.json` is a convenience for newer CMake releases. With CMake
+3.20, configure directly as above, adding any desired `-D` options instead of
+using `--preset`.
+
+### Embedded build
+
+Projects that vendor Simjit can use it directly without installing a package:
+
+```cmake
+set(SIMJIT_ENABLE_LLVM OFF CACHE BOOL "" FORCE)
+set(SIMJIT_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/simjit EXCLUDE_FROM_ALL)
+target_link_libraries(my_target PRIVATE simjit::simjit)
+```
+
+`SIMJIT_ENABLE_INSTALL` defaults to `ON` only when Simjit is the top-level
+project and defaults to `OFF` when embedded. LLVM and host-specific
+`-march=native` are also disabled by default for direct CMake consumers; enable
+them explicitly when the deployment target permits them. The optional LLVM
+inspection backend supports LLVM 20 through 23.
 
 ## Quick Start
 

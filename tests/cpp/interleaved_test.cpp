@@ -1,0 +1,678 @@
+// This file is part of Simjit project <https://simjit.org>
+//
+// See LICENSE for license and copyright information
+// SPDX-License-Identifier: Zlib
+
+#include "test.h"
+
+using namespace simjit;
+using namespace simjit::types;
+
+namespace {
+
+// ---- Complex-arithmetic helpers over deinterleaved lane pairs ----
+
+struct ComplexLanes {
+    Value re;
+    Value im;
+};
+
+ComplexLanes complex_add(FunctionBuilder &b, ComplexLanes x, ComplexLanes y) {
+    return {b.add(x.re, y.re), b.add(x.im, y.im)};
+}
+
+ComplexLanes complex_mul(FunctionBuilder &b, ComplexLanes x, ComplexLanes y) {
+    return {b.sub(b.mul(x.re, y.re), b.mul(x.im, y.im)), b.add(b.mul(x.re, y.im), b.mul(x.im, y.re))};
+}
+
+// (x.re + x.im*i) / (y.re + y.im*i), multiplied out to real divisions.
+ComplexLanes complex_div(FunctionBuilder &b, ComplexLanes x, ComplexLanes y) {
+    Value d = b.add(b.mul(y.re, y.re), b.mul(y.im, y.im));
+    return {b.div(b.add(b.mul(x.re, y.re), b.mul(x.im, y.im)), d),
+            b.div(b.sub(b.mul(x.im, y.re), b.mul(x.re, y.im)), d)};
+}
+
+// Deinterleave (re, im) pairs and store a complex result back to two outputs.
+ComplexLanes load_complex(FunctionBuilder &b, Argument src) {
+    DeinterleavedPair lanes = b.load2(src);
+    return {lanes.even, lanes.odd};
+}
+
+void store_complex(FunctionBuilder &b, ComplexLanes z, Argument dst) {
+    b.store_interleave(dst, z.re, z.im);
+}
+
+// Deinterleave both lanes, add a constant to the even lane, store both lanes.
+#define ADD_DEINTERLEAVE_ACCESS_TEST(tests, dt, const_fn)                         \
+    tests.push_back(Test{[](FunctionBuilder &b) {                                 \
+                             Argument src = b.arg_interleaved(dt);                \
+                             Argument even_dst = b.arg(dt);                       \
+                             Argument odd_dst = b.arg(dt);                        \
+                             DeinterleavedPair lanes = b.load2(src);              \
+                             b.store(b.add(lanes.even, b.const_fn(1)), even_dst); \
+                             b.store(lanes.odd, odd_dst);                         \
+                         },                                                       \
+                         PASS_ALL, R"FOO(
+def func(n, src, even_dst, odd_dst):
+    for i in range(n):
+        even_dst[i] = src[2*i] + 1
+        odd_dst[i] = src[2*i+1]
+        )FOO"});
+
+// Consume a single lane of the interleave; the other lane must be dropped.
+#define ADD_DEINTERLEAVE_SINGLE_LANE_TEST(tests, dt, const_fn, lane_value, py)        \
+    tests.push_back(Test{[](FunctionBuilder &b) {                                     \
+                             Argument src = b.arg_interleaved(dt);                    \
+                             Argument dst = b.arg(dt);                                \
+                             DeinterleavedPair lanes = b.load2(src);                  \
+                             Value lane = (lane_value) == 0 ? lanes.even : lanes.odd; \
+                             b.store(b.add(lane, b.const_fn(2)), dst);                \
+                         },                                                           \
+                         PASS_ALL, py});
+
+std::vector<Test> make_interleaved_tests() {
+    std::vector<Test> tests;
+
+    // Basic access over every supported element type.
+    ADD_DEINTERLEAVE_ACCESS_TEST(tests, I8, i8)
+    ADD_DEINTERLEAVE_ACCESS_TEST(tests, I16, i16)
+    ADD_DEINTERLEAVE_ACCESS_TEST(tests, I32, i32)
+    ADD_DEINTERLEAVE_ACCESS_TEST(tests, I64, i64)
+    ADD_DEINTERLEAVE_ACCESS_TEST(tests, F32, f32)
+    ADD_DEINTERLEAVE_ACCESS_TEST(tests, F64, f64)
+
+    // Single-lane consumption: even-only and odd-only.
+    ADD_DEINTERLEAVE_SINGLE_LANE_TEST(tests, I32, i32, 0, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[i] = src[2*i] + 2
+        )FOO")
+    ADD_DEINTERLEAVE_SINGLE_LANE_TEST(tests, I32, i32, 1, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[i] = src[2*i+1] + 2
+        )FOO")
+    ADD_DEINTERLEAVE_SINGLE_LANE_TEST(tests, F64, f64, 0, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[i] = src[2*i] + 2
+        )FOO")
+    ADD_DEINTERLEAVE_SINGLE_LANE_TEST(tests, F64, f64, 1, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[i] = src[2*i+1] + 2
+        )FOO")
+
+    // The single-lane API mixes with the pair API: CSE unifies the leaves.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I32);
+                             Argument even_dst = b.arg(I32);
+                             Argument odd_dst = b.arg(I32);
+                             Value even = b.load2_0(src);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store(b.add(even, b.i32(1)), even_dst);
+                             b.store(b.add(lanes.odd, b.i32(2)), odd_dst);
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, even_dst, odd_dst):
+    for i in range(n):
+        even_dst[i] = src[2*i] + 1
+        odd_dst[i] = src[2*i+1] + 2
+        )FOO"});
+
+    // One marked argument may be read both as a full carrier record and as a
+    // pair. The two representations are copied independently.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I32);
+                             Argument raw_dst = b.arg(I64);
+                             Argument pair_dst = b.arg_interleaved(I32);
+                             Value raw = b.load(src);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store(raw, raw_dst);
+                             b.store_interleave(pair_dst, lanes.even, lanes.odd);
+                         },
+                         PASS_ALL});
+
+    // i64 arithmetic: lanes as (real, imag) of a complex number, squared.
+    // Vectorized i64 mul is an x86-only special op; arm falls back to scalar.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I64);
+                             Argument re_dst = b.arg(I64);
+                             Argument im_dst = b.arg(I64);
+                             DeinterleavedPair lanes = b.load2(src);
+                             Value re = lanes.even;
+                             Value im = lanes.odd;
+                             b.store(b.sub(b.mul(re, re), b.mul(im, im)), re_dst);
+                             b.store(b.mul(b.add(im, im), re), im_dst);
+                         },
+                         test_meta()
+                             .limitation(TestVariant::ArmVector)
+                             .structured_error(TestVariant::ArmVector, ErrorModule::A64, ErrorKind::Unsupported,
+                                               ErrorSubKind::UnsupportedBackendFeature),
+                         R"FOO(
+def func(n, src, re_dst, im_dst):
+    for i in range(n):
+        e = src[2*i]
+        o = src[2*i+1]
+        re_dst[i] = e*e - o*o
+        im_dst[i] = 2*e*o
+        )FOO"});
+
+    // i64 arithmetic: division and modulo by constants (constant-division lowering).
+    // Arm vector lowering of i64 const-div/-mod requires i64 mul, which is x86-only.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I64);
+                             Argument div_dst = b.arg(I64);
+                             Argument mod_dst = b.arg(I64);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store(b.div(lanes.even, b.i64(7)), div_dst);
+                             b.store(b.mod(lanes.odd, b.i64(-7)), mod_dst);
+                         },
+                         test_meta()
+                             .limitation(TestVariant::ArmVector)
+                             .structured_error(TestVariant::ArmVector, ErrorModule::A64, ErrorKind::Unsupported,
+                                               ErrorSubKind::UnsupportedBackendFeature),
+                         R"FOO(
+def func(n, src, div_dst, mod_dst):
+    for i in range(n):
+        div_dst[i] = src[2*i] // 7
+        mod_dst[i] = src[2*i+1] % 7
+        )FOO"});
+
+    // i64 arithmetic: shifts and bit operations over both lanes.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I64);
+                             Argument dst = b.arg(I64);
+                             DeinterleavedPair lanes = b.load2(src);
+                             Value shifted = b.sra(lanes.even, b.i64(3));
+                             b.store(b.xor_(shifted, b.and_(lanes.odd, b.i64(0xff))), dst);
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[i] = (src[2*i] >> 3) ^ (src[2*i+1] & 0xff)
+        )FOO"});
+
+    // Asymmetric lane consumers force different vectorizer widths per lane.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I32);
+                             Argument even_dst = b.arg(I16);
+                             Argument odd_dst = b.arg(I32);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store(b.trunc(lanes.even, I16), even_dst);
+                             b.store(lanes.odd, odd_dst);
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, even_dst, odd_dst):
+    for i in range(n):
+        even_dst[i] = src[2*i] & 0xffff
+        odd_dst[i] = src[2*i+1]
+        )FOO"});
+
+    // Repeated load2 calls share lane steps (CSE).
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I32);
+                             Argument even_dst = b.arg(I32);
+                             Argument odd_dst = b.arg(I32);
+                             DeinterleavedPair first = b.load2(src);
+                             DeinterleavedPair second = b.load2(src);
+                             b.store(b.add(first.even, second.odd), even_dst);
+                             b.store(b.add(first.odd, b.i32(7)), odd_dst);
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, even_dst, odd_dst):
+    for i in range(n):
+        even_dst[i] = src[2*i] + src[2*i+1]
+        odd_dst[i] = src[2*i+1] + 7
+        )FOO"});
+
+    // gather with interleaved index/value pairs (even slots hold indices)
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument pairs = b.arg_interleaved(I32);
+                             Argument data = b.arg(I32);
+                             Argument dst = b.arg(I32);
+                             DeinterleavedPair lanes = b.load2(pairs);
+                             b.store(b.gather(lanes.even, data), dst);
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, pairs, data, dst):
+    for i in range(n):
+        dst[i] = data[2*i]
+        )FOO"});
+
+    // scatter with interleaved index/value pairs (even slots hold indices)
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument pairs = b.arg_interleaved(I32);
+                             Value values = b.input_arg(I32);
+                             Argument dst = b.arg(I32);
+                             DeinterleavedPair lanes = b.load2(pairs);
+                             b.scatter(values, lanes.even, dst);
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, pairs, values, dst):
+    for i in range(n):
+        dst[2*i] = values[i]
+        )FOO"});
+
+    // Interleaved store over every supported element type (load2 -> store_interleave identity).
+#define ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, dt)                          \
+    tests.push_back(Test{[](FunctionBuilder &b) {                            \
+                             Argument src = b.arg_interleaved(dt);           \
+                             Argument dst = b.arg_interleaved(dt);           \
+                             DeinterleavedPair lanes = b.load2(src);         \
+                             b.store_interleave(dst, lanes.even, lanes.odd); \
+                         },                                                  \
+                         PASS_ALL, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[2*i] = src[2*i]
+        dst[2*i+1] = src[2*i+1]
+        )FOO"});
+
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, I8)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, I16)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, I32)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, I64)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, F32)
+    ADD_INTERLEAVE_STORE_ACCESS_TEST(tests, F64)
+
+    // Conditional interleaved stores update or preserve both elements of each destination pair together.
+#define ADD_COND_INTERLEAVE_STORE_TEST(tests, dt, const_fn)                                       \
+    tests.push_back(Test{[](FunctionBuilder &b) {                                                 \
+                             Argument src = b.arg_interleaved(dt);                                \
+                             Argument dst = b.arg_interleaved(dt);                                \
+                             Predicate cond = b.cmp_eq(b.index(I64), b.index(I64));               \
+                             DeinterleavedPair lanes = b.load2(src);                              \
+                             b.cond_store_interleave(b.add(lanes.even, b.const_fn(1)),            \
+                                                     b.sub(lanes.odd, b.const_fn(1)), cond, dst); \
+                         },                                                                       \
+                         PASS_ALL, R"FOO(                                                        \
+def func(n, src, dst):                                                                            \
+    for i in range(n):                                                                            \
+        dst[2*i] = src[2*i] + 1                                                                   \
+        dst[2*i+1] = src[2*i+1] - 1                                                              \
+        )FOO"});
+
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, I8, i8)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, I16, i16)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, I32, i32)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, I64, i64)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, F32, f32)
+    ADD_COND_INTERLEAVE_STORE_TEST(tests, F64, f64)
+#undef ADD_COND_INTERLEAVE_STORE_TEST
+
+    // Interleaved store with swapped lanes.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I64);
+                             Argument dst = b.arg_interleaved(I64);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store_interleave(dst, lanes.odd, lanes.even);
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[2*i] = src[2*i+1]
+        dst[2*i+1] = src[2*i]
+        )FOO"});
+
+    // Interleaved store of computed lanes over an interleaved source (i8 exercises the pair pack).
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(I8);
+                             Argument dst = b.arg_interleaved(I8);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store_interleave(dst, lanes.odd, b.add(lanes.even, lanes.odd));
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        dst[2*i] = src[2*i+1]
+        dst[2*i+1] = src[2*i] + src[2*i+1]
+        )FOO"});
+
+    // f32 basic access with distinct lane expressions.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(F32);
+                             Argument even_dst = b.arg(F32);
+                             Argument odd_dst = b.arg(F32);
+                             DeinterleavedPair lanes = b.load2(src);
+                             b.store(b.add(lanes.even, b.f32(0.5f)), even_dst);
+                             b.store(b.mul(lanes.odd, b.f32(2.0f)), odd_dst);
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, even_dst, odd_dst):
+    for i in range(n):
+        even_dst[i] = src[2*i] + 0.5
+        odd_dst[i] = src[2*i+1] * 2
+        )FOO"});
+
+    // f32 arithmetic: lanes as (real, imag), scaled rotation by a fixed angle, interleaved store.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg_interleaved(F32);
+                             Argument dst = b.arg_interleaved(F32);
+                             DeinterleavedPair lanes = b.load2(src);
+                             Value re = lanes.even;
+                             Value im = lanes.odd;
+                             Value half_sqrt2 = b.f32(0.7071067811865476f);
+                             b.store_interleave(dst, b.mul(b.sub(re, im), half_sqrt2),
+                                                b.mul(b.add(re, im), half_sqrt2));
+                         },
+                         PASS_ALL, R"FOO(
+def func(n, src, dst):
+    for i in range(n):
+        e = src[2*i]
+        o = src[2*i+1]
+        dst[2*i] = (e - o) * 0.7071067811865476
+        dst[2*i+1] = (e + o) * 0.7071067811865476
+        )FOO"});
+
+    // f64 series impedance Z(R, L, C, f) = R + i*2*pi*f*L + 1/(i*2*pi*f*C).
+    // R and L arrive as one interleaved stream, C and f as another.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument rl_arg = b.arg_interleaved(F64);
+                             Argument cf_arg = b.arg_interleaved(F64);
+                             Argument dst = b.arg_interleaved(F64);
+                             ComplexLanes rl = load_complex(b, rl_arg);
+                             ComplexLanes cf = load_complex(b, cf_arg);
+                             Value omega = b.mul(cf.im, b.f64(6.283185307179586));
+                             ComplexLanes resistance = {rl.re, b.f64(0)};
+                             ComplexLanes inductor = {b.f64(0), b.mul(omega, rl.im)};
+                             ComplexLanes capacitor =
+                                 complex_div(b, {b.f64(1), b.f64(0)}, {b.f64(0), b.mul(cf.re, omega)});
+                             ComplexLanes z = complex_add(b, complex_add(b, resistance, inductor), capacitor);
+                             store_complex(b, z, dst);
+                         },
+                         PASS_ALL});
+
+    // f64 parallel impedance Z_parallel = 1 / (1/R + 1/(i*2*pi*f*L) + i*2*pi*f*C).
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument rl_arg = b.arg_interleaved(F64);
+                             Argument cf_arg = b.arg_interleaved(F64);
+                             Argument dst = b.arg_interleaved(F64);
+                             ComplexLanes rl = load_complex(b, rl_arg);
+                             ComplexLanes cf = load_complex(b, cf_arg);
+                             Value omega = b.mul(cf.im, b.f64(6.283185307179586));
+                             ComplexLanes inductor_term =
+                                 complex_div(b, {b.f64(1), b.f64(0)}, {b.f64(0), b.mul(rl.im, omega)});
+                             ComplexLanes denominator =
+                                 complex_add(b, {b.div(b.f64(1), rl.re), b.mul(cf.re, omega)}, inductor_term);
+                             ComplexLanes zp = complex_div(b, {b.f64(1), b.f64(0)}, denominator);
+                             store_complex(b, zp, dst);
+                         },
+                         PASS_ALL});
+
+    // f64 low-pass filter H(w, R, L, C) = 1 / (1 - w*w*L*C + i*w*R*C).
+    // R and L arrive as one interleaved stream, C and w as another.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument rl_arg = b.arg_interleaved(F64);
+                             Argument cw_arg = b.arg_interleaved(F64);
+                             Argument dst = b.arg_interleaved(F64);
+                             ComplexLanes rl = load_complex(b, rl_arg);
+                             ComplexLanes cw = load_complex(b, cw_arg);
+                             Value omega = cw.im;
+                             Value capacitance = cw.re;
+                             Value real_denom = b.sub(b.f64(1), b.mul(b.mul(rl.im, capacitance), omega));
+                             Value imag_denom = b.mul(b.mul(rl.re, capacitance), omega);
+                             ComplexLanes h = complex_div(b, {b.f64(1), b.f64(0)}, {real_denom, imag_denom});
+                             store_complex(b, h, dst);
+                         },
+                         PASS_ALL});
+
+    // f32 mandelbrot iteration: z_{k+1} = z_k^2 + c, four iterations per row.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument z_arg = b.arg_interleaved(F32);
+                             Argument c_arg = b.arg_interleaved(F32);
+                             Argument dst = b.arg_interleaved(F32);
+                             ComplexLanes z = load_complex(b, z_arg);
+                             ComplexLanes c = load_complex(b, c_arg);
+                             for (int iteration = 0; iteration < 4; ++iteration) {
+                                 z = complex_add(b, complex_mul(b, z, z), c);
+                             }
+                             store_complex(b, z, dst);
+                         },
+                         PASS_ALL});
+
+    // Public i128 values desugar during build into i64 pair accesses. The
+    // test harness treats the marked i128 carriers as two i64 values per row.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg(I128);
+                             Argument dst = b.arg(I128);
+                             b.store(b.load(src), dst);
+                         },
+                         PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg(I128);
+                             Argument dst = b.arg(I128);
+                             b.store(b.load_splat(src, sizeof(__int128)), dst);
+                         },
+                         PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg(I128);
+                             Argument dst = b.arg(I128);
+                             Value value = b.add(b.load_splat(src), b.load_splat(src, sizeof(__int128)));
+                             b.cond_store(value, b.input_predicate_arg(), dst, LoadStoreKind::Unaligned);
+                         },
+                         PASS_ALL});
+#define i128_bop(op)                                                          \
+    tests.push_back(Test{[](FunctionBuilder &b) {                             \
+                             Argument left = b.arg(I128);                     \
+                             Argument right = b.arg(I128);                    \
+                             Argument dst = b.arg(I128);                      \
+                             b.store(b.op(b.load(left), b.load(right)), dst); \
+                         },                                                   \
+                         PASS_ALL})
+    i128_bop(add);
+    i128_bop(sub);
+    i128_bop(mul);
+    i128_bop(xor_);
+    i128_bop(and_);
+    i128_bop(or_);
+    i128_bop(andnot);
+    i128_bop(min);
+    i128_bop(umin);
+    i128_bop(max);
+    i128_bop(umax);
+
+    // MulConstPeephole runs before i128 desugaring, including either operand order.
+    for (int64_t constant : std::initializer_list<int64_t>{0, 1, -1, 2, 3, 7, 13, 15, -6, INT64_C(1) << 40}) {
+        tests.push_back(Test{[constant](FunctionBuilder &b) {
+                                 Argument value = b.arg(I128);
+                                 Value input = b.load(value);
+                                 Value con = b.con(constant, I128);
+                                 b.store(b.mul(input, con), b.arg(I128));
+                             },
+                             PASS_ALL});
+        tests.push_back(Test{[constant](FunctionBuilder &b) {
+                                 Argument value = b.arg(I128);
+                                 Value input = b.load(value);
+                                 Value con = b.con(constant, I128);
+                                 b.store(b.mul(con, input), b.arg(I128));
+                             },
+                             PASS_ALL});
+    }
+
+    // HIR i128 identities are applied before pair desugaring.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Value x = b.input_arg(I128);
+                             Value zero = b.con(0, I128);
+                             Value value = b.and_(b.or_(b.add(x, zero), zero), b.con(-1, I128));
+                             b.store(b.sll(value, zero), b.arg(I128));
+                         },
+                         PASS_ALL});
+
+    // Commutative CSE must share public i128 expressions before their pairs are created.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Value x = b.input_arg(I128);
+                             Value y = b.input_arg(I128);
+                             b.store(b.sub(b.add(x, y), b.add(y, x)), b.arg(I128));
+                         },
+                         PASS_ALL});
+
+    // CastPeephole eliminates these public i128 round trips before desugaring.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Value x = b.input_arg(I64);
+                             b.store(b.trunc(b.sext(x, I128), I64), b.arg(I64));
+                         },
+                         PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Value x = b.input_arg(I64);
+                             b.store(b.trunc(b.zext(x, I128), I64), b.arg(I64));
+                         },
+                         PASS_ALL});
+
+    // Keep two constant funnel shifts live at once. This exercises the AArch64
+    // register-allocation pressure that previously exposed the AsmJit SRI bug.
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument first = b.arg(I128);
+                             Argument second = b.arg(I128);
+                             Value constant = b.con(-6, I128);
+                             b.store(b.mul(b.load(first), constant), b.arg(I128));
+                             b.store(b.mul(b.load(second), constant), b.arg(I128));
+                         },
+                         PASS_ALL});
+
+#define i128_shift(op)                                                         \
+    tests.push_back(Test{[](FunctionBuilder &b) {                              \
+                             Argument value = b.arg(I128);                     \
+                             Argument count = b.arg(I128);                     \
+                             Argument dst = b.arg(I128);                       \
+                             b.store(b.op(b.load(value), b.load(count)), dst); \
+                         },                                                    \
+                         PASS_ALL})
+    i128_shift(sll);
+    i128_shift(srl);
+    i128_shift(sra);
+    i128_shift(rotl);
+    i128_shift(rotr);
+
+    for (int64_t count : {0, 1, 63, 64, 65, 127, 128, 129, -1}) {
+        tests.push_back(Test{[count](FunctionBuilder &b) {
+                                 Argument value = b.arg(I128);
+                                 b.store(b.rotl(b.load(value), b.con(count, I128)), b.arg(I128));
+                             },
+                             PASS_ALL});
+    }
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument value = b.arg(I128);
+                             Argument count = b.arg(I128);
+                             Argument dst = b.arg(I128);
+                             b.cond_store(b.rotr(b.load(value), b.load(count)), b.input_predicate_arg(), dst,
+                                          LoadStoreKind::Unaligned);
+                         },
+                         PASS_ALL});
+
+#define i128_uop(op)                                          \
+    tests.push_back(Test{[](FunctionBuilder &b) {             \
+                             Argument arg = b.arg(I128);      \
+                             Argument dst = b.arg(I128);      \
+                             b.store(b.op(b.load(arg)), dst); \
+                         },                                   \
+                         PASS_ALL})
+
+    i128_uop(not_);
+    i128_uop(negate);
+    i128_uop(popcnt);
+    i128_uop(lzcnt);
+    i128_uop(tzcnt);
+    i128_uop(abs);
+
+    tests.push_back(Test{[](FunctionBuilder &b) { b.store(b.con(0, I128), b.arg(I128)); }, PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) { b.store(b.con(-1, I128), b.arg(I128)); }, PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) { b.store(b.con(42, I128), b.arg(I128)); }, PASS_ALL});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+                             Argument src = b.arg(I128);
+                             b.store(b.add(b.load(src), b.con(-1, I128)), b.arg(I128));
+                         },
+                         PASS_ALL});
+
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.trunc(b.input_arg(I128), I64), b.arg(I64)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.trunc(b.input_arg(I128), I32), b.arg(I32)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.trunc(b.input_arg(I128), I16), b.arg(I16)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.trunc(b.input_arg(I128), I8), b.arg(I8)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.sext(b.input_arg(I8), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.sext(b.input_arg(I16), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.sext(b.input_arg(I32), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.sext(b.input_arg(I64), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.zext(b.input_arg(I8), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.zext(b.input_arg(I16), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.zext(b.input_arg(I32), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        b.store(b.zext(b.input_arg(I64), I128), b.arg(I128)); //
+    }});
+    tests.push_back(Test{[](FunctionBuilder &b) {
+        Argument truthy = b.arg(I128);
+        Argument falsy = b.arg(I128);
+        b.store(b.select(b.input_predicate_arg(), b.load(truthy), b.load(falsy)), b.arg(I128));
+    }});
+
+#define i128_float_cast(from, to, is_unsigned, meta)                                   \
+    tests.push_back(Test{[](FunctionBuilder &b) {                                      \
+                             Argument src = b.arg(from);                               \
+                             Argument dst = b.arg(to);                                 \
+                             b.store(b.float_cast(b.load(src), to, is_unsigned), dst); \
+                         },                                                            \
+                         meta})
+    i128_float_cast(
+        I128, F32, false,
+        LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, ErrorSubKind::ConflictingGraphCoefficient));
+    i128_float_cast(I128, F32, true, PASS_ALL);
+    i128_float_cast(I128, F64, false, PASS_ALL);
+    i128_float_cast(I128, F64, true, PASS_ALL);
+    i128_float_cast(
+        F32, I128, false,
+        LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, ErrorSubKind::ConflictingGraphCoefficient));
+    i128_float_cast(
+        F32, I128, true,
+        LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, ErrorSubKind::ConflictingGraphCoefficient));
+    i128_float_cast(F64, I128, false, PASS_ALL);
+    i128_float_cast(F64, I128, true, PASS_ALL);
+#undef i128_float_cast
+
+#define i128_cmp(op, is_unsigned)                                                               \
+    tests.push_back(Test{[](FunctionBuilder &b) {                                               \
+                             Argument left = b.arg(I128);                                       \
+                             Argument right = b.arg(I128);                                      \
+                             Argument dst = b.arg(I1);                                          \
+                             b.store(b.cmp(b.load(left), b.load(right), op, is_unsigned), dst); \
+                         },                                                                     \
+                         PASS_ALL})
+
+    i128_cmp(CmpOp::Equal, true);
+    i128_cmp(CmpOp::Equal, false);
+    i128_cmp(CmpOp::NotEqual, true);
+    i128_cmp(CmpOp::NotEqual, false);
+    i128_cmp(CmpOp::Less, true);
+    i128_cmp(CmpOp::Less, false);
+    i128_cmp(CmpOp::LessEqual, true);
+    i128_cmp(CmpOp::LessEqual, false);
+    i128_cmp(CmpOp::Greater, true);
+    i128_cmp(CmpOp::Greater, false);
+    i128_cmp(CmpOp::GreaterEqual, true);
+    i128_cmp(CmpOp::GreaterEqual, false);
+    return tests;
+}
+
+} // namespace
+
+std::vector<Test> interleaved_tests = make_interleaved_tests();

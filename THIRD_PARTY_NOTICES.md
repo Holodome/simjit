@@ -17,6 +17,11 @@ Python builds have one place to audit.
 - License files:
   - `thirdparty/asmjit/LICENSE.md`
   - `thirdparty/asmjit/db/LICENSE.md`
+- Version note: Simjit intentionally remains on the pre-C++20 AsmJit line
+  (`0bd5787`, March 2026), using the `Holodome/asmjit` `simjit` branch to
+  carry [upstream PR #528](https://github.com/asmjit/asmjit/pull/528). Later
+  2026 AsmJit revisions require C++20; Simjit currently supports C++17 and
+  cannot adopt those revisions wholesale.
 
 ### libdivide
 

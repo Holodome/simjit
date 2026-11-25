@@ -9,8 +9,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 base_dir="${1:-"$root/build/install-check"}"
 workers="${2:-4}"
+mode="${3:-full}"
 cmake_bin="${CMAKE:-cmake}"
 cxx_bin="${CXX:-c++}"
+
+if [[ "$mode" != "full" && "$mode" != "quick" ]]; then
+  printf 'unknown install-check mode: %s\n' "$mode" >&2
+  exit 2
+fi
 
 configure_and_install() {
   local profile="$1"
@@ -86,7 +92,7 @@ write_jit_consumer() {
 
   mkdir -p "$consumer_dir"
   cat > "$consumer_dir/CMakeLists.txt" <<'CMAKE'
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.20)
 project(simjit_jit_consumer LANGUAGES CXX)
 
 find_package(simjit 0.1 CONFIG REQUIRED)
@@ -152,7 +158,7 @@ write_toolkit_consumer() {
 
   mkdir -p "$consumer_dir"
   cat > "$consumer_dir/CMakeLists.txt" <<'CMAKE'
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.20)
 project(simjit_toolkit_consumer LANGUAGES CXX)
 
 find_package(simjit 0.1 CONFIG REQUIRED)
@@ -232,7 +238,7 @@ build_and_run_consumer() {
   fi
 
   "$cmake_bin" "${args[@]}"
-  "$cmake_bin" --build "$build_dir" --parallel "$workers"
+  "$cmake_bin" --build "$build_dir" --target "${targets[@]}" --parallel "$workers"
 
   for target in "${targets[@]}"; do
     "$build_dir/$target"
@@ -286,6 +292,11 @@ reject_include "$jit_install" "simjit/asmjit.h"
 reject_include "$jit_install" "simjit/core/hir.h"
 
 write_jit_consumer "$base_dir/jit-consumer"
+if [[ "$mode" == "quick" ]]; then
+  build_and_run_consumer jit jit_smoke_17
+  printf 'quick JIT install check passed: %s\n' "$base_dir"
+  exit 0
+fi
 build_and_run_consumer jit jit_smoke_17 jit_smoke_20
 
 configure_and_install toolkit

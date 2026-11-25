@@ -68,12 +68,12 @@ static ScalarDataType parse_dtype(llvm::StringRef text, size_t line) {
     throw std::runtime_error(std::format("bundle line {} has unknown dtype '{}'", line, text.str()));
 }
 
-static ArgumentKind parse_kind(llvm::StringRef text, size_t line) {
-    if (text == "in") return ArgumentKind::Input;
-    if (text == "out") return ArgumentKind::Output;
-    if (text == "outs") return ArgumentKind::OutputScalar;
-    if (text == "safety") return ArgumentKind::SafetyCheck;
-    if (text == "sv") return ArgumentKind::Sequence;
+static BundleArgumentKind parse_kind(llvm::StringRef text, size_t line) {
+    if (text == "in") return BundleArgumentKind::Input;
+    if (text == "out") return BundleArgumentKind::Output;
+    if (text == "outs") return BundleArgumentKind::OutputScalar;
+    if (text == "safety") return BundleArgumentKind::SafetyCheck;
+    if (text == "sv") return BundleArgumentKind::Sequence;
     throw std::runtime_error(std::format("bundle line {} has unknown argument kind '{}'", line, text.str()));
 }
 
@@ -205,8 +205,13 @@ BundleCasePtr parse_bundle_line(std::string_view line, size_t line_number, size_
     for (const auto &arg_value : *args) {
         auto *arg = arg_value.getAsObject();
         if (!arg) { throw std::runtime_error(std::format("bundle line {} has a non-object argument", line_number)); }
+        std::optional<ScalarDataType> interleaved_half_dtype{};
+        if (auto value = arg->getString("interleaved_dtype")) {
+            interleaved_half_dtype = parse_dtype(*value, line_number);
+        }
         item->args.push_back(ArgumentInfo{parse_dtype(required_string(*arg, "dtype", line_number), line_number),
-                                          parse_kind(required_string(*arg, "kind", line_number), line_number)});
+                                          parse_kind(required_string(*arg, "kind", line_number), line_number),
+                                          interleaved_half_dtype});
     }
 
     for (const auto &code_value : *codes) {

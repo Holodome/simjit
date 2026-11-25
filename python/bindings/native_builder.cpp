@@ -560,12 +560,24 @@ struct NativeBuilderImpl {
                                   : builder.i32(static_cast<int32_t>(signed_value()));
         case sj::ScalarDataType::I64:
             return ty.is_unsigned ? builder.u64(unsigned_value()) : builder.i64(signed_value());
+        case sj::ScalarDataType::I128: {
+            int64_t value = 0;
+            if (ty.is_unsigned) {
+                uint64_t unsigned_constant = unsigned_value();
+                if (unsigned_constant > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                    throw_native_value_error("i128 constants must fit in signed i64");
+                }
+                value = static_cast<int64_t>(unsigned_constant);
+            } else {
+                value = signed_value();
+            }
+            return builder.con(value, sj::ScalarDataType::I128);
+        }
         case sj::ScalarDataType::F32: return builder.f32(static_cast<float>(float_value()));
         case sj::ScalarDataType::F64: return builder.f64(float_value());
         case sj::ScalarDataType::I1:
             if (payload.kind != ConstPayloadKind::Bool) { throw_native_type_error("bool constant expected"); }
             return payload.bool_value ? builder.true_() : builder.false_();
-        case sj::ScalarDataType::I128: throw_native_value_error("i128 constants are not supported");
         }
         SIMJIT_UNREACHABLE();
     }
@@ -797,7 +809,7 @@ struct NativeBuilderImpl {
                 null = rhs.null;
             return sj::nullable::NullablePredicate{builder.cmp(lhs.v, rhs.v, op, true), null};
         }
-        return builder.cmp(lhs_val.as_value(), rhs_val.as_value(), op);
+        return builder.cmp(lhs_val.as_value(), rhs_val.as_value(), op, is_unsigned);
     }
 
     LoweredValue int_cast_expr(NodeId id, LogicalType ty) {
@@ -966,7 +978,7 @@ struct NativeBuilderImpl {
             builder.cond_store(builder.bit2bool(null_mask), cond, out_null, sj::LoadStoreKind::Unaligned);
     }
 
-    void store_expr(NodeId id, LogicalType ty, std::string_view output_name) {
+    void store_expr(NodeId id, const LogicalType &ty, std::string_view output_name) {
         const DslNode &node = native_node(id);
         mark_buffer_usage(output_name, BufferUsageFlags::BufferUsageOutputVector);
         sj::Argument out = get_output(output_name, ty);
@@ -999,7 +1011,7 @@ struct NativeBuilderImpl {
         }
     }
 
-    void scatter_expr(NodeId id, LogicalType ty, std::string_view output_name) {
+    void scatter_expr(NodeId id, const LogicalType &ty, std::string_view output_name) {
         const DslNode &node = native_node(id);
         mark_buffer_usage(output_name, BufferUsageFlags::BufferUsageOutputTable);
         sj::Argument out = get_output(output_name, ty);

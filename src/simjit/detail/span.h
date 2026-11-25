@@ -821,7 +821,7 @@ inline void report_contract_violation(char const *msg) {
 #else // span_CONFIG( CONTRACT_VIOLATION_THROWS_V )
 
 span_noreturn inline void report_contract_violation(char const * /*msg*/) span_noexcept {
-    std::terminate();
+    __builtin_abort();
 }
 
 #endif // span_CONFIG( CONTRACT_VIOLATION_THROWS_V )

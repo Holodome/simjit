@@ -14,6 +14,7 @@
 namespace simjit {
 
 namespace hir {
+enum class SpecialOp : uint16_t;
 struct Function;
 struct Step;
 
@@ -67,6 +68,9 @@ struct Context {
     CodeTransformations transformations = CodeTransformations::All;
 
     Arch arch = Arch::Native;
+
+    // JIT contexts set this from CPUID. By default unrestricted.
+    hir::SpecialOp host_supported_vector_special_ops = static_cast<hir::SpecialOp>(UINT16_MAX);
 
     BuildLimits build_limits{};
 };

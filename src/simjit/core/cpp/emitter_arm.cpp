@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Zlib
 
 #include "simjit/core/cpp/emitter_internal.h"
+#include "simjit/core/hir.h"
 
 #include <math.h>
 #include <type_traits>
@@ -483,6 +484,7 @@ struct ArmNeonCppEmitter : CppEmitterBase {
         arm_special_constants = 0;
         arm_helpers = 0;
         std::vector<MaskShiftWriterCandidate> candidates(func->args.size());
+        const auto &usages = func->source_hir->argument_usage;
 
         for (Step *root : func->main_loop_roots) {
             if (!is_vector_mask_shift_writer_store(root)) { continue; }
@@ -538,6 +540,7 @@ struct ArmNeonCppEmitter : CppEmitterBase {
 
         for (size_t arg = 0; arg < candidates.size(); ++arg) {
             MaskShiftWriterCandidate candidate = candidates[arg];
+            if (bool(usages[arg] & (hir::ArgumentUsage::SequentialRead | hir::ArgumentUsage::RandomRead))) { continue; }
             if (candidate.state != MaskShiftWriterCandidateState::ScalarOnly &&
                 candidate.state != MaskShiftWriterCandidateState::VectorAndScalar) {
                 continue;
@@ -928,14 +931,15 @@ struct ArmNeonCppEmitter : CppEmitterBase {
             format_to(result, "else *mask_byte_%zu_%zu = (uint8_t)(*mask_byte_%zu_%zu & ~mask_bit_%zu_%zu);\n", id,
                       lane, id, lane, id, lane);
         }
-        result += "}";
+        result += '}';
         return result;
     }
 
     std::string mask_splat_to_cpp(const Step *step, const LoadData &data) const {
         MaskDataType dtype = step->dtype.as_mask();
-        return cpp_var_decl(step) + format("%s((*arg%zu & 1) ? %s : 0)", arm_mask_dup_intrin_name(dtype).c_str(),
-                                           data.addr.arg, arm_mask_lane_all_ones(dtype));
+        return cpp_var_decl(step) + format("%s((*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0)",
+                                           arm_mask_dup_intrin_name(dtype).c_str(), data.addr.arg, data.byte_offset,
+                                           arm_mask_lane_all_ones(dtype));
     }
 
     bool can_inline_acc_store_arg(const Step *arg) const {
@@ -969,14 +973,19 @@ struct ArmNeonCppEmitter : CppEmitterBase {
 
         if (arg->is(StepKind::LoadSplat)) {
             const auto &data = arg->step_data<StepKind::LoadSplat>();
-            if (arg->dtype.is_scalar()) { return format("*arg%zu", data.addr.arg); }
+            if (arg->dtype.is_scalar()) {
+                return format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(arg->dtype), data.addr.arg,
+                              data.byte_offset);
+            }
             if (arg->dtype.is_mask()) {
                 MaskDataType dtype = arg->dtype.as_mask();
-                return format("%s((*arg%zu & 1) ? %s : 0)", arm_mask_dup_intrin_name(dtype).c_str(), data.addr.arg,
+                return format("%s((*(const uint8_t *)((const char *)arg%zu + %zu) & 1) ? %s : 0)",
+                              arm_mask_dup_intrin_name(dtype).c_str(), data.addr.arg, data.byte_offset,
                               arm_mask_lane_all_ones(dtype));
             }
             VecDataType dtype = arg->dtype.as_vec();
-            return format("%s(*arg%zu)", arm_dup_intrin_name(dtype).c_str(), data.addr.arg);
+            return format("%s(*(const %s *)((const char *)arg%zu + %zu))", arm_dup_intrin_name(dtype).c_str(),
+                          cpp_dtype(dtype.to_scalar()), data.addr.arg, data.byte_offset);
         }
 
         SIMJIT_UNREACHABLE();
@@ -1099,14 +1108,43 @@ struct ArmNeonCppEmitter : CppEmitterBase {
         }
 
         size_t id = step->id;
+        const ArgumentDecl &data_arg = func->args[data.data];
+        std::string data_expr = data_arg.dtype == dtype.to_scalar()
+                                    ? format("arg%zu", data.data)
+                                    : format("((const %s *)arg%zu)", cpp_dtype(dtype.to_scalar()), data.data);
         std::string values =
             format("const %s gather_values_%zu[%zu] = {", cpp_dtype(dtype.to_scalar()), id, dtype.nelems());
         for (size_t lane = 0; lane < dtype.nelems(); ++lane) {
             if (lane != 0) { values += ", "; }
-            format_to(values, "arg%zu[%s]", data.data, lane_expr(data.idx, lane).c_str());
+            format_to(values, "%s[%s]", data_expr.c_str(), lane_expr(data.idx, lane).c_str());
         }
         format_to(values, "};\n%s%s(gather_values_%zu)", cpp_var_decl(step).c_str(),
                   arm_intrin_name("ld1", dtype).c_str(), id);
+        return values;
+    }
+
+    std::string vector_scatter_to_cpp(const Step *step, const ScatterData &data) {
+        if (!step->dtype.is_vec() || !data.idx->dtype.is_vec()) {
+            return unexpected_step_dtype(step, "vector gather with vector index");
+        }
+
+        VecDataType dtype = step->dtype.as_vec();
+        VecDataType idx_dtype = data.idx->dtype.as_vec();
+        if ((idx_dtype.elem != VecElemType::I32 && idx_dtype.elem != VecElemType::I64) ||
+            idx_dtype.nelems() != dtype.nelems()) {
+            return unexpected_step_dtype(step, "vector gather with matching i32 or i64 index");
+        }
+
+        std::string values{};
+        const ArgumentDecl &dst = func->args[data.dst];
+        std::string dst_expr = dst.dtype == dtype.to_scalar()
+                                   ? format("arg%zu", data.dst)
+                                   : format("((%s *)arg%zu)", cpp_dtype(dtype.to_scalar()), data.dst);
+        for (size_t lane = 0; lane < dtype.nelems(); ++lane) {
+            format_to(values, "%s[%s] = %s;", dst_expr.c_str(), lane_expr(data.idx, lane).c_str(),
+                      lane_expr(data.arg, lane).c_str());
+        }
+
         return values;
     }
 
@@ -1741,7 +1779,31 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             format_to(result, "if (%s) arg%zu[acc%zu++] = pack_values_%zu[%zu];\n", lane_expr(data.cond, lane).c_str(),
                       data.dst, func->accs.index(data.acc), id, lane);
         }
-        result += "}";
+        result += '}';
+        return result;
+    }
+
+    std::string pack128_to_cpp(const Pack128Data &data, const Step *step) {
+        if (!step->dtype.is_vec() || !data.low->dtype.is_vec() || !data.high->dtype.is_vec() ||
+            !data.cond->dtype.is_mask()) {
+            return unexpected_step_dtype(step, "vector i128 pack");
+        }
+        VecDataType dtype = step->dtype.as_vec();
+        size_t id = step->id;
+        std::string result = format("{\n"
+                                    "int64_t pack_low_%zu[%zu];\n"
+                                    "int64_t pack_high_%zu[%zu];\n",
+                                    id, dtype.nelems(), id, dtype.nelems());
+        format_to(result, "%s(pack_low_%zu, %s);\n", arm_intrin_name("st1", dtype).c_str(), id, show(data.low));
+        format_to(result, "%s(pack_high_%zu, %s);\n", arm_intrin_name("st1", dtype).c_str(), id, show(data.high));
+        for (size_t lane = 0; lane < dtype.nelems(); ++lane) {
+            format_to(result,
+                      "if (%s) { size_t pack_pos_%zu_%zu = acc%zu++; ((int64_t *)arg%zu)[2 * pack_pos_%zu_%zu] = "
+                      "pack_low_%zu[%zu]; ((int64_t *)arg%zu)[2 * pack_pos_%zu_%zu + 1] = pack_high_%zu[%zu]; }\n",
+                      lane_expr(data.cond, lane).c_str(), id, lane, func->accs.index(data.acc), data.dst, id, lane, id,
+                      lane, data.dst, id, lane, id, lane);
+        }
+        result += '}';
         return result;
     }
 
@@ -1997,61 +2059,20 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
                                            show(data.arg), (unsigned)std::underlying_type_t<FpClass>(data.flags));
     }
 
-    std::string store_sum128_to_cpp(const StoreSum128Data &data) override {
-        std::string result = "{\n"
-                             "uint64_t sum128_low = 0;\n"
-                             "uint64_t sum128_carry = 0;\n"
-                             "uint64_t sum128_prev = 0;\n";
-        size_t low_idx = 0;
-        for (auto *low : data.low_steps) {
-            if (low->dtype.is_vec()) {
-                VecDataType dtype = low->dtype.as_vec();
-                std::string values = format("sum128_values_%zu", low_idx++);
-                format_to(result,
-                          "alignas(16) uint64_t %s[%zu];\n"
-                          "%s(("
-                          "%s *)"
-                          "%s, "
-                          "%s);\n",
-                          values.c_str(), dtype.nelems(),         //
-                          arm_intrin_name("st1", dtype).c_str(),  //
-                          scalar_dtype_to_cpp(dtype.to_scalar()), //
-                          values.c_str(),                         //
-                          show(low));
-                format_to(result,
-                          "for (size_t sum128_i = 0; "
-                          "sum128_i < %zu; "
-                          "++sum128_i) {\n"
-                          "sum128_prev = sum128_low;\n"
-                          "sum128_low += %s[sum128_i];\n"
-                          "sum128_carry += (sum128_low < sum128_prev);\n"
-                          "}\n",
-                          dtype.nelems(), //
-                          values.c_str());
-                continue;
-            }
-            format_to(result,
-                      "sum128_prev = sum128_low;\n"
-                      "sum128_low += (uint64_t)%s;\n"
-                      "sum128_carry += (sum128_low < sum128_prev);\n",
-                      show_scalar_operand(low));
-        }
-        format_to(result,
-                  "__int128 sum128_hi = (__int128)%s + "
-                  "(__int128)sum128_carry;\n"
-                  "*arg%zu = (sum128_hi << 64) + "
-                  "(unsigned __int128)sum128_low;\n",
-                  show_scalar_operand(data.hi_combined), //
-                  data.dst);
-        result += "}";
-        return result;
+    std::string vec_extract_to_cpp(const Step *step, const VecExtractData &data) {
+        VecDataType dtype = data.arg->dtype.as_vec();
+        SIMJIT_ASSERT(dtype.elem == VecElemType::I64 && data.lane < dtype.nelems());
+        return cpp_var_decl(step) + format("vgetq_lane_s64(%s, %u)", show(data.arg), data.lane);
     }
 
     std::string backend_step_to_cpp(const Step *step, const MaskPushdownInfo *mask_pushdown) override {
         if (mask_pushdown != nullptr) {
             messed_up("ARM C++ emitter does not support mask pushdown for %s", show_step_kind(step->kind));
         }
-        if (step->kind != StepKind::StoreSum128 && step->dtype.is_scalar() && is_scalar_step(step->kind)) {
+        if (step->is(StepKind::VecExtract)) {
+            return vec_extract_to_cpp(step, step->step_data<StepKind::VecExtract>());
+        }
+        if (step->dtype.is_scalar() && is_scalar_step(step->kind)) {
             if (step->is(StepKind::ArithUnary)) {
                 const auto &data = step->step_data<StepKind::ArithUnary>();
                 if (auto code = scalar_refined_reciprocal_to_cpp(step, data)) { return *code; }
@@ -2064,7 +2085,9 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
         case StepKind::ScalarIndex:
         case StepKind::ScalarArithBinaryOverflow:
         case StepKind::ScalarPermute:
+        case StepKind::VecExtract:
         case StepKind::ConstDiv:
+        case StepKind::I128Div:
             messed_up("Unexpected ARM C++ instruction %s", show_step_kind(step->kind));
             SIMJIT_UNREACHABLE();
 
@@ -2073,7 +2096,9 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             if (step->dtype.is_mask()) { return mask_splat_to_cpp(step, data); }
             if (!step->dtype.is_vec()) { return unexpected_step_dtype(step, "vector or mask"); }
             VecDataType dtype = step->dtype.as_vec();
-            return cpp_var_decl(step) + format("%s(*arg%zu)", arm_dup_intrin_name(dtype).c_str(), data.addr.arg);
+            return cpp_var_decl(step) + format("%s(*(const %s *)((const char *)arg%zu + %zu))",
+                                               arm_dup_intrin_name(dtype).c_str(), cpp_dtype(dtype.to_scalar()),
+                                               data.addr.arg, data.byte_offset);
         }
         case StepKind::Const: {
             const auto &data = step->step_data<StepKind::Const>();
@@ -2107,6 +2132,25 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             return cpp_var_decl(step) +
                    format("%s(arg%zu + i%s)", arm_intrin_name("ld1", dtype).c_str(), data.addr.arg, offset.c_str());
         }
+        case StepKind::LoadDeinterleave: {
+            const auto &data = step->step_data<StepKind::LoadDeinterleave>();
+            if (step->dtype.is_mask() || !step->dtype.is_vec()) { return unexpected_step_dtype(step, "vector"); }
+            if (data.lane_count != 2 || data.lane >= data.lane_count) {
+                unsupported("Unsupported deinterleave lane %u of %u", data.lane, data.lane_count);
+            }
+            VecDataType dtype = step->dtype.as_vec();
+            const ArgumentDecl &arg = func->args[data.addr.arg];
+            std::string vec_type = arm_vec_dtype_cpp(dtype);
+            std::string pair_type = vec_type.substr(0, vec_type.size() - 2) + "x2_t";
+            std::string tmp = format("ld2%u", step->id);
+            std::string half_ptr = cpp_dtype(dtype.to_scalar());
+            std::string ptr =
+                format("(const %s *)((const char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.addr.arg,
+                       scalar_dtype_size(arg.dtype), data.addr.offset * scalar_dtype_size(arg.dtype));
+            return format("%s %s = %s(%s);\n", pair_type.c_str(), tmp.c_str(), arm_intrin_name("ld2", dtype).c_str(),
+                          ptr.c_str()) +
+                   cpp_var_decl(step) + format("%s.val[%u]", tmp.c_str(), data.lane);
+        }
         case StepKind::Store: {
             const auto &data = step->step_data<StepKind::Store>();
             if (step->dtype.is_mask()) { return mask_store_to_cpp(data, step); }
@@ -2115,6 +2159,34 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             std::string offset = offset_suffix(data.addr.offset);
             return format("%s(arg%zu + i%s, %s)", arm_intrin_name("st1", dtype).c_str(), data.addr.arg, offset.c_str(),
                           show(data.what));
+        }
+        case StepKind::StoreInterleave: {
+            const auto &data = step->step_data<StepKind::StoreInterleave>();
+            if (step->dtype.is_mask()) { return unexpected_step_dtype(step, "vector"); }
+            VecDataType dtype = step->dtype.as_vec();
+            const ArgumentDecl &arg = func->args[data.dst.arg];
+            std::string vec_type = arm_vec_dtype_cpp(dtype);
+            std::string pair_type = vec_type.substr(0, vec_type.size() - 2) + "x2_t";
+            std::string half_ptr = cpp_dtype(dtype.to_scalar());
+            std::string ptr = format("(%s *)((char *)arg%zu + i * %zu + %zu)", half_ptr.c_str(), data.dst.arg,
+                                     scalar_dtype_size(arg.dtype), data.dst.offset * scalar_dtype_size(arg.dtype));
+            if (data.cond != nullptr) {
+                std::string cond = mask_to_vec_mask_expr(data.cond->dtype.as_mask(), dtype, show(data.cond));
+                size_t id = step->id;
+                return format(R"STR(do {
+%s old_%zu = %s(%s);
+%s even_%zu = %s(%s, %s, old_%zu.val[0]);
+%s odd_%zu = %s(%s, %s, old_%zu.val[1]);
+%s(%s, ((%s){even_%zu, odd_%zu}));
+} while (false))STR",
+                              pair_type.c_str(), id, arm_intrin_name("ld2", dtype).c_str(), ptr.c_str(),
+                              vec_type.c_str(), id, arm_intrin_name("bsl", dtype).c_str(), cond.c_str(),
+                              show(data.even), id, vec_type.c_str(), id, arm_intrin_name("bsl", dtype).c_str(),
+                              cond.c_str(), show(data.odd), id, arm_intrin_name("st2", dtype).c_str(), ptr.c_str(),
+                              pair_type.c_str(), id, id);
+            }
+            return format("%s(%s, ((%s){%s, %s}))", arm_intrin_name("st2", dtype).c_str(), ptr.c_str(),
+                          pair_type.c_str(), show(data.even), show(data.odd));
         }
         case StepKind::CondStore: {
             const auto &data = step->step_data<StepKind::CondStore>();
@@ -2126,6 +2198,48 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             if (auto expr = binary_expr(step, data)) { return cpp_var_decl(step) + *expr; }
             unsupported("Do not support ARM C++ vector %s of %s", show_arith_binary_op(data.op),
                         show_vec_dtype(step->dtype.as_vec()));
+        }
+        case StepKind::FunnelShift: {
+            const auto &data = step->step_data<StepKind::FunnelShift>();
+            if (!step->dtype.is_vec()) { return unexpected_step_dtype(step, "vector"); }
+            VecDataType dtype = step->dtype.as_vec();
+            std::string left = show(data.left);
+            std::string right = show(data.right);
+            std::string funnel;
+            if (data.amount->is(StepKind::Const)) {
+                uint64_t amount = data.amount->step_data<StepKind::Const>().as_unsigned();
+                uint64_t complement = dtype.element_size_bits() - amount;
+                if (data.kind == FunnelShiftKind::Left) {
+                    std::string lhs = format("%s(%s, %llu)", arm_shift_imm_intrin_name("shl", dtype).c_str(),
+                                             left.c_str(), (unsigned long long)amount);
+                    std::string rhs = logical_shift_right_imm_expr(dtype, right.c_str(), complement);
+                    funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
+                } else {
+                    std::string lhs = format("%s(%s, %llu)", arm_shift_imm_intrin_name("shl", dtype).c_str(),
+                                             left.c_str(), (unsigned long long)complement);
+                    std::string rhs = logical_shift_right_imm_expr(dtype, right.c_str(), amount);
+                    funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
+                }
+            } else {
+                std::string amount = show(data.amount);
+                std::string bits = format("%s(%zu)", arm_dup_intrin_name(dtype).c_str(), dtype.element_size_bits());
+                std::string complement =
+                    format("%s(%s, %s)", arm_intrin_name("sub", dtype).c_str(), bits.c_str(), amount.c_str());
+                if (data.kind == FunnelShiftKind::Left) {
+                    std::string lhs =
+                        variable_shift_expr(dtype, ArithBinaryOp::ShiftLeftLogical, left.c_str(), amount.c_str());
+                    std::string rhs =
+                        variable_shift_expr(dtype, ArithBinaryOp::ShiftRightLogical, right.c_str(), complement.c_str());
+                    funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
+                } else {
+                    std::string lhs =
+                        variable_shift_expr(dtype, ArithBinaryOp::ShiftRightLogical, right.c_str(), amount.c_str());
+                    std::string rhs =
+                        variable_shift_expr(dtype, ArithBinaryOp::ShiftLeftLogical, left.c_str(), complement.c_str());
+                    funnel = vector_bitwise_expr(dtype, "orr", lhs.c_str(), rhs.c_str());
+                }
+            }
+            return cpp_var_decl(step) + funnel;
         }
         case StepKind::ArithUnary: {
             const auto &data = step->step_data<StepKind::ArithUnary>();
@@ -2172,9 +2286,10 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
         case StepKind::IntCast: return int_cast_to_cpp(step, step->step_data<StepKind::IntCast>());
         case StepKind::FloatCast: return float_cast_to_cpp(step, step->step_data<StepKind::FloatCast>());
         case StepKind::Gather: return vector_gather_to_cpp(step, step->step_data<StepKind::Gather>());
-        case StepKind::Scatter: unsupported("Do not support scatter");
+        case StepKind::Scatter: return vector_scatter_to_cpp(step, step->step_data<StepKind::Scatter>());
         case StepKind::CondScatter: unsupported("Do not support cond scatter");
         case StepKind::Pack: return pack_to_cpp(step->step_data<StepKind::Pack>(), step);
+        case StepKind::Pack128: return pack128_to_cpp(step->step_data<StepKind::Pack128>(), step);
         case StepKind::Ternarylogic: return ternarylogic_to_cpp(step, step->step_data<StepKind::Ternarylogic>());
         case StepKind::VecReduce: return vec_reduce_to_cpp(step, step->step_data<StepKind::VecReduce>());
         case StepKind::MaskReduce: return mask_reduce_to_cpp(step, step->step_data<StepKind::MaskReduce>());
@@ -2194,7 +2309,6 @@ return vreinterpretq_s64_s32(vbslq_s32(high_zero, vaddq_s32(high32, clz32), high
             return float_narrow_combine_to_cpp(step, step->step_data<StepKind::VecFloatNarrowCombine>());
         case StepKind::VecPermute: return vec_permute_to_cpp(step, step->step_data<StepKind::VecPermute>());
         case StepKind::Fpclass: return fpclass_to_cpp(step, step->step_data<StepKind::Fpclass>());
-        case StepKind::StoreSum128: return store_sum128_to_cpp(step->step_data<StepKind::StoreSum128>());
         }
         SIMJIT_UNREACHABLE();
     }

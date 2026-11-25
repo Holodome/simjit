@@ -139,6 +139,16 @@ def func(n, x, y):
         x[i] = y[0]
         )FOO"},
     Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I32);
+             Argument y = b.arg(I32);
+             b.store(b.add(b.load_splat(y), b.load_splat(y, sizeof(int32_t))), x);
+         },
+         PASS_ALL, R"FOO(
+def func(n, x, y):
+    for i in range(n):
+        x[i] = y[0] + y[1]
+        )FOO"},
+    Test{[](FunctionBuilder &b) {
              Argument x = b.arg(I64);
              Argument y = b.arg(I64);
              b.store(b.load_splat(y), x);
@@ -455,6 +465,33 @@ def func(n, x, y, z):
 def func(n, x, y, z): 
     for i in range(n):
         x[i] = y[i] * z[i]
+        )FOO"},
+    // Mul64* must ignore upper input bits, not merely rely on the builder's widening-multiply peephole.
+    Test{[](FunctionBuilder &b) {
+             Argument dst = b.arg(I64);
+             Value left = b.input_arg(I64);
+             Value right = b.input_arg(I64);
+             b.store(b.arith_binary(left, right, ArithBinaryOp::Mul64ZE), dst);
+         },
+         PASS_ALL,
+         R"FOO(
+def func(n, dst, left, right):
+    for i in range(n):
+        dst[i] = (left[i] & 0xffffffff) * (right[i] & 0xffffffff)
+        )FOO"},
+    Test{[](FunctionBuilder &b) {
+             Argument dst = b.arg(I64);
+             Value left = b.input_arg(I64);
+             Value right = b.input_arg(I64);
+             b.store(b.arith_binary(left, right, ArithBinaryOp::Mul64SE), dst);
+         },
+         PASS_ALL,
+         R"FOO(
+def func(n, dst, left, right):
+    for i in range(n):
+        lhs = ((left[i] & 0xffffffff) ^ 0x80000000) - 0x80000000
+        rhs = ((right[i] & 0xffffffff) ^ 0x80000000) - 0x80000000
+        dst[i] = lhs * rhs
         )FOO"},
     // div
     Test{[](FunctionBuilder &b) {
@@ -4030,6 +4067,101 @@ def func(n, x, idx, dst):
     for i in range(n):
         dst[i] = x[idx[i]]
         )FOO"},
+    // I128 gather rewrites to two i64 gathers at indices 2 * idx and 2 * idx + 1.
+    Test{[](FunctionBuilder &b) { b.store(b.gather(b.input_arg(I32), b.arg(I128)), b.arg(I128)); },
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector,
+                                                simjit::ErrorSubKind::CoefficientRangeNeedsNormalization)},
+    Test{[](FunctionBuilder &b) { b.store(b.gather(b.input_arg(I64), b.arg(I128)), b.arg(I128)); }, PASS_ALL},
+    // i128 division is scalar-only and uses a paired i64 representation.
+    Test{[](FunctionBuilder &b) { b.store(b.div(b.input_arg(I128), b.input_arg(I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) { b.store(b.udiv(b.input_arg(I128), b.input_arg(I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) { b.store(b.mod(b.input_arg(I128), b.input_arg(I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) { b.store(b.umod(b.input_arg(I128), b.input_arg(I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) { b.store(b.div(b.input_arg(I128), b.con(0, I128)), b.arg(I128)); }, ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             Value min = b.sll(b.con(1, I128), b.con(127, I128));
+             b.store(b.div(min, b.con(-1, I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             Value x = b.input_arg(I128);
+             b.store(b.div_checked(x, b.sub(x, x)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             Value min = b.sll(b.con(1, I128), b.con(127, I128));
+             b.store(b.mod_checked(min, b.con(-1, I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             Value x = b.input_arg(I128);
+             b.store(b.umod_checked(x, b.sub(x, x)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    // Checked i128 operations use paired i64 checked roots and remain scalar-only.
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.add_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             Predicate active = b.input_predicate_arg();
+             b.store(b.checked_op(b.add(b.input_arg(I128), b.input_arg(I128)), active), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.sub_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.mul_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.sll_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.sra_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.rotl_checked(b.input_arg(I128), b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.negate_checked(b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.abs_checked(b.input_arg(I128)), b.arg(I128));
+         },
+         ONLY_SCALAR},
+    Test{[](FunctionBuilder &b) {
+             b.arg_safety_check();
+             b.store(b.trunc_checked(b.input_arg(I128), I32), b.arg(I32));
+         },
+         ONLY_SCALAR},
+    // I128 pack rewrites to one Pack128 root carrying the two i64 words.
+    Test{[](FunctionBuilder &b) {
+             Value x = b.input_arg(I128);
+             Value control = b.input_arg(I64);
+             Argument dst = b.arg(I128);
+             Argument dst_size = b.arg(I64);
+             b.pack(b.add(x, b.con(17, I128)), b.cmp_ge(control, b.i64(0)), dst, dst_size);
+         },
+         PASS_ALL},
     // scatter 32
     Test{[](FunctionBuilder &b) {
              Value x = b.input_arg(I32);
@@ -4037,7 +4169,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I32);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, x, idx, dst):
     for i in range(n):
@@ -4049,7 +4181,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I32);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, x, idx, dst):
     for i in range(n):
@@ -4061,7 +4193,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I8);
              b.scatter(x, idx, dst);
          },
-         ONLY_SCALAR,
+         {},
          R"FOO(
 def func(n, x, idx, dst): 
     for i in range(n):
@@ -4085,7 +4217,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I32);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, x, idx, dst): 
     for i in range(n):
@@ -4097,12 +4229,18 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I64);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector,
+                                                simjit::ErrorSubKind::CoefficientRangeNeedsNormalization),
          R"FOO(
 def func(n, x, idx, dst): 
     for i in range(n):
         dst[idx[i]] = x[i]
         )FOO"},
+    // I128 scatter rewrites to two i64 scatters at indices 2 * idx and 2 * idx + 1.
+    Test{[](FunctionBuilder &b) { b.scatter(b.input_arg(I128), b.input_arg(I32), b.arg(I128)); },
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector,
+                                                simjit::ErrorSubKind::CoefficientRangeNeedsNormalization)},
+    Test{[](FunctionBuilder &b) { b.scatter(b.input_arg(I128), b.input_arg(I64), b.arg(I128)); }, PASS_ALL},
     // scatter 64
     Test{[](FunctionBuilder &b) {
              Value x = b.input_arg(I8);
@@ -4134,7 +4272,8 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I32);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector,
+                                                simjit::ErrorSubKind::CoefficientRangeNeedsNormalization),
          R"FOO(
 def func(n, x, idx, dst): 
     for i in range(n):
@@ -4146,7 +4285,7 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I64);
              b.scatter(x, idx, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, x, idx, dst):
     for i in range(n):
@@ -4213,6 +4352,10 @@ def func(n, x, idx, dst):
              Argument dst = b.arg(I64);
              Predicate cond = b.input_predicate_arg();
              b.cond_scatter(x, idx, cond, dst);
+         },
+         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
+    Test{[](FunctionBuilder &b) {
+             b.cond_scatter(b.input_arg(I128), b.input_arg(I32), b.input_predicate_arg(), b.arg(I128));
          },
          LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps)},
     // cond scatter 64
@@ -4646,7 +4789,7 @@ def func(n, dst, chosen, dead_cond_input):
              Predicate cond = b.cmp_eq(dead_cond_input, dead_cond_input);
              b.cond_scatter(chosen, b.index(I32), cond, dst);
          },
-         LIMIT_ARM_VECTOR.vectorization_failure(TestVariant::ArmVector, simjit::ErrorSubKind::UnsupportedSpecialOps),
+         {},
          R"FOO(
 def func(n, dst, chosen, dead_cond_input):
     for i in range(n):
@@ -5732,6 +5875,11 @@ def func(n, arg, dst):
         Value tmp = b.log2(x);
         b.output_arg(tmp);
     }},
+    Test{[](FunctionBuilder &b) { b.store(b.log2(b.input_arg(I128)), b.arg(I128)); }},
+    Test{[](FunctionBuilder &b) {
+        Value x = b.or_(b.input_arg(I128), b.con(1, I128));
+        b.store(b.log2_no_zero(x), b.arg(I128));
+    }},
     // sign_no_zero
     Test{[](FunctionBuilder &b) {
         Value x = b.input_arg(I64);
@@ -6305,6 +6453,7 @@ def func(n, arg, dst):
         Value x = b.input_arg(I64);
         b.store(b.has_single_bit(x), dst);
     }},
+    Test{[](FunctionBuilder &b) { b.store(b.has_single_bit(b.input_arg(I128)), b.arg(I1)); }},
     // bit_floor
     Test{[](FunctionBuilder &b) {
         Argument dst = b.arg(I32);
@@ -6316,6 +6465,7 @@ def func(n, arg, dst):
         Value x = b.input_arg(I64);
         b.store(b.bit_floor(x), dst);
     }},
+    Test{[](FunctionBuilder &b) { b.store(b.bit_floor(b.input_arg(I128)), b.arg(I128)); }},
     // bit_ceil
     Test{[](FunctionBuilder &b) {
         Argument dst = b.arg(I32);
@@ -6328,6 +6478,10 @@ def func(n, arg, dst):
         Value x = b.input_arg(I64);
         x = b.and_(x, b.i64(0x7FFFFFFFFFFFFFFF));
         b.store(b.bit_ceil(x), dst);
+    }},
+    Test{[](FunctionBuilder &b) {
+        Value x = b.srl(b.input_arg(I128), b.con(1, I128));
+        b.store(b.bit_ceil(x), b.arg(I128));
     }},
     // sll overflow
     Test{[](FunctionBuilder &b) {
@@ -7130,4 +7284,86 @@ def func(n, x, idx, dst):
         b.store(b.trunc_checked(y, I16), b.arg(I16));
         b.store(b.trunc_checked(y, I8), b.arg(I8));
     }},
+    // funnel shift left with constant amounts, including values that normalize modulo the width
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I64);
+             Value y = b.input_arg(I64);
+             Value z = b.input_arg(I64);
+             Value r1 = b.funnel_shift_left(y, z, b.i64(12));
+             Value r2 = b.funnel_shift_right(r1, y, b.i64(52));
+             Value r3 = b.funnel_shift_left(r2, r1, b.i64(0));
+             Value r4 = b.funnel_shift_right(r3, r2, b.i64(64));
+             b.store(b.funnel_shift_left(r4, r3, b.i64(71)), x);
+         },
+         PASS_ALL},
+    // funnel shift right with constant amounts
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I64);
+             Value y = b.input_arg(I64);
+             Value z = b.input_arg(I64);
+             Value r1 = b.funnel_shift_right(y, z, b.i64(7));
+             Value r2 = b.funnel_shift_left(r1, z, b.i64(57));
+             Value r3 = b.funnel_shift_right(r2, r1, b.i64(63));
+             Value r4 = b.funnel_shift_left(r3, r2, b.i64(64));
+             b.store(b.funnel_shift_right(r4, r3, b.i64(128)), x);
+         },
+         PASS_ALL},
+    // i32 and i16 funnel shifts with constant amounts
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I32);
+             Value y = b.input_arg(I32);
+             Value z = b.input_arg(I32);
+             Value r1 = b.funnel_shift_left(y, z, b.i32(9));
+             Value r2 = b.funnel_shift_right(r1, z, b.i32(23));
+             Value r3 = b.funnel_shift_left(r2, r1, b.i32(32));
+             b.store(b.funnel_shift_right(r3, r2, b.i32(40)), x);
+         },
+         PASS_ALL},
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I16);
+             Value y = b.input_arg(I16);
+             Value z = b.input_arg(I16);
+             Value r1 = b.funnel_shift_left(y, z, b.i16(5));
+             Value r2 = b.funnel_shift_right(r1, z, b.i16(11));
+             Value r3 = b.funnel_shift_left(r2, r1, b.i16(16));
+             b.store(b.funnel_shift_right(r3, r2, b.i16(19)), x);
+         },
+         PASS_ALL},
+    // funnel shifts with variable amounts, wraparound semantics included
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I64);
+             Argument y = b.arg(I64);
+             Argument z = b.arg(I64);
+             Argument w = b.arg(I64);
+             Value amount1 = b.load(w, LoadStoreKind::Unaligned);
+             Value amount2 = b.add(amount1, b.i64(64));
+             b.store(
+                 b.funnel_shift_left(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned), amount2),
+                 x);
+         },
+         PASS_ALL},
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I32);
+             Argument y = b.arg(I32);
+             Argument z = b.arg(I32);
+             Argument w = b.arg(I32);
+             Value amount1 = b.load(w, LoadStoreKind::Unaligned);
+             Value amount2 = b.mul(amount1, b.i32(7));
+             b.store(b.funnel_shift_right(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned),
+                                          amount2),
+                     x);
+         },
+         PASS_ALL},
+    Test{[](FunctionBuilder &b) {
+             Argument x = b.arg(I16);
+             Argument y = b.arg(I16);
+             Argument z = b.arg(I16);
+             Argument w = b.arg(I16);
+             Value amount1 = b.load(w, LoadStoreKind::Unaligned);
+             Value amount2 = b.xor_(amount1, b.i16(0x1f));
+             b.store(
+                 b.funnel_shift_left(b.load(y, LoadStoreKind::Unaligned), b.load(z, LoadStoreKind::Unaligned), amount2),
+                 x);
+         },
+         PASS_ALL},
 };

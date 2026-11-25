@@ -1331,6 +1331,85 @@ def test_run_into_writes_explicit_numpy_and_scalar_outputs():
     assert total[0] == np.sum(x)
 
 
+def test_run_into_writes_explicit_i128_buffers():
+    def make_i128_buffer(values):
+        data = bytearray().join(
+            int(value).to_bytes(16, byteorder="little", signed=True)
+            for value in values
+        )
+        return np.frombuffer(data, dtype=np.dtype("V16"))
+
+    def read_i128_buffer(buf):
+        return [int.from_bytes(value.tobytes(), byteorder="little", signed=True) for value in buf]
+
+    values = [0, (1 << 64) + 3, -1, (1 << 127) - 1]
+    source = make_i128_buffer(values)
+    output = np.empty(len(source), dtype=np.dtype("V16"))
+    program = sj.query(result=sj.col("source", sj.I128) + sj.i128(7))
+
+    result = sj.run_into(
+        program,
+        {"source": ir.BufferHandle(ty=ir.I128, buf=source)},
+        {"result": ir.BufferHandle(ty=ir.I128, buf=output)},
+    )
+
+    expected = [((value + 7) & ((1 << 128) - 1)) for value in values]
+    expected = [value if value < (1 << 127) else value - (1 << 128) for value in expected]
+    assert result.result is output
+    assert read_i128_buffer(output) == expected
+
+
+def test_run_into_respects_u128_comparisons():
+    values = [0, 1, 1 << 127, (1 << 128) - 1]
+    source = np.frombuffer(
+        bytearray().join(
+            int(value).to_bytes(16, byteorder="little", signed=False)
+            for value in values
+        ),
+        dtype=np.dtype("V16"),
+    )
+    output = np.empty(len(source), dtype=np.bool_)
+    program = sj.query(result=sj.col("source", sj.U128) > sj.u128(0))
+
+    sj.run_into(
+        program,
+        {"source": ir.BufferHandle(ty=ir.U128, buf=source)},
+        {"result": ir.BufferHandle(ty=ir.I1, buf=output)},
+    )
+
+    assert_array_equal(output, np.array([False, True, True, True], dtype=np.bool_))
+
+
+def test_run_into_rejects_non_i128_buffer_carriers():
+    source = np.zeros(4, dtype=np.int64)
+    output = np.empty(4, dtype=np.dtype("V16"))
+    program = sj.query(result=sj.col("source", sj.I128))
+
+    assert_raises(
+        ValueError,
+        lambda: sj.run_into(
+            program,
+            {"source": ir.BufferHandle(ty=ir.I128, buf=source)},
+            {"result": ir.BufferHandle(ty=ir.I128, buf=output)},
+        ),
+        contains="must have 16-byte elements",
+    )
+
+
+def test_run_program_does_not_allocate_i128_numpy_output():
+    source = np.empty(1, dtype=np.dtype("V16"))
+    program = sj.query(result=sj.col("source", sj.I128))
+
+    assert_raises(
+        TypeError,
+        lambda: sj.run_program(
+            program,
+            {"source": ir.BufferHandle(ty=ir.I128, buf=source)},
+        ),
+        contains="unsupported simjit scalar type i128",
+    )
+
+
 def test_run_into_reuses_session_cache_and_validates_buffers():
     x = np.array([1, 2, 3], dtype=np.int32)
     y = np.array([10, 20, 30], dtype=np.int32)

@@ -354,6 +354,7 @@ def _compile_query(query: str, policy: str, arch: str, input_mode: str) -> Compi
             inspection = sj.inspect(
                 lowered.program,
                 _schema_for_inspection(lowered),
+                output="pyarrow",
                 policy=policy,
                 arch=arch,
             )

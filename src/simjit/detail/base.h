@@ -138,16 +138,16 @@ public:
 
     bool get(size_t idx) const noexcept {
         SIMJIT_ASSERT(idx < max_count_);
-        return (bits_[idx >> 6] & (1llu << (idx & 63))) != 0;
+        return (bits_[idx >> 6ull] & (1llu << (idx & 63ull))) != 0ull;
     }
 
     void set(size_t idx, bool value = true) noexcept {
         SIMJIT_ASSERT(idx < max_count_);
-        uint64_t mask = 1llu << (idx & 63);
+        uint64_t mask = 1llu << (idx & 63ull);
         if (value) {
-            bits_[idx >> 6] |= mask;
+            bits_[idx >> 6ull] |= mask;
         } else {
-            bits_[idx >> 6] &= ~mask;
+            bits_[idx >> 6ull] &= ~mask;
         }
     }
 
@@ -175,8 +175,9 @@ constexpr size_t nonzero_log2(size_t x) noexcept {
 
 constexpr uint64_t combine_i8_to_i64(uint8_t a1, uint8_t a2, uint8_t a3, uint8_t a4, uint8_t a5, uint8_t a6, uint8_t a7,
                                      uint8_t a8) noexcept {
-    return (((uint64_t)a8) << 56) | (((uint64_t)a7) << 48) | (((uint64_t)a6) << 40) | (((uint64_t)a5) << 32) |
-           (((uint64_t)a4) << 24) | (((uint64_t)a3) << 16) | (((uint64_t)a2) << 8) | ((uint64_t)a1);
+    return (((uint64_t)a8) << 56ull) | (((uint64_t)a7) << 48ull) | (((uint64_t)a6) << 40ull) |
+           (((uint64_t)a5) << 32ull) | (((uint64_t)a4) << 24ull) | (((uint64_t)a3) << 16ull) |
+           (((uint64_t)a2) << 8ull) | ((uint64_t)a1);
 }
 
 constexpr uint64_t REVERSE_BITS = combine_i8_to_i64(8, 7, 6, 5, 4, 3, 2, 1);

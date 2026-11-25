@@ -14,111 +14,218 @@ namespace hir {
 struct Step;
 
 struct ArithBinaryData {
-    ArithBinaryOp op;
-    Step *left;
-    Step *right;
-    ArithBinaryOpFlags flags = ArithBinaryOpFlags::No;
+    ArithBinaryOp op{};
+    Step *left{};
+    Step *right{};
+    ArithBinaryOpFlags flags{};
 };
 
+// Internal result word of an i128 division/remainder. `partner` is the other
+// result word and deliberately isn't a dependency: both words are produced by
+// one compiler-runtime call during scalar lowering.
+struct I128DivData {
+    ArithBinaryOp op{};
+    Step *left_low{};
+    Step *left_high{};
+    Step *right_low{};
+    Step *right_high{};
+    Step *partner{};
+    bool high_word = false;
+};
+
+enum class CheckedOpKind : uint8_t {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    UDiv,
+    Mod,
+    UMod,
+    I128Div,
+    I128AddLow,
+    I128AddHigh,
+    I128SubLow,
+    I128SubHigh,
+    I128MulLow,
+    I128MulHigh,
+    I128SllLow,
+    I128SllHigh,
+    I128SrlLow,
+    I128SrlHigh,
+    I128SraLow,
+    I128SraHigh,
+    I128RotlLow,
+    I128RotlHigh,
+    I128RotrLow,
+    I128RotrHigh,
+    I128NegateLow,
+    I128NegateHigh,
+    I128AbsLow,
+    I128AbsHigh,
+    I128Trunc,
+    ShiftRightArith,
+    ShiftRightLogical,
+    ShiftLeftLogical,
+    RotateLeft,
+    RotateRight,
+    Trunc,
+    Abs,
+    Negate,
+};
+
+const char *show_checked_op_kind(CheckedOpKind kind) noexcept;
+
 struct CheckedOpData {
-    Step *op;
-    Step *mask = nullptr;
+    CheckedOpKind kind{};
+    Step *op{};
+    Step *mask{};
+    // The other result word of an i128 checked operation.  This deliberately
+    // isn't a dependency: lowering emits and caches both words together.
+    Step *partner{};
+    // Explicit source words for a checked i128 operation.  They are regular
+    // dependencies, so the check never has to recover them from `op`.
+    Step *left_low{};
+    Step *left_high{};
+    Step *right_low{};
+    Step *right_high{};
 };
 
 struct ArithUnaryData {
-    ArithUnaryOp op;
-    Step *arg;
+    ArithUnaryOp op{};
+    Step *arg{};
 };
 
 struct IntCastData {
-    IntCastKind kind;
-    Step *arg;
+    IntCastKind kind{};
+    Step *arg{};
 };
 
 struct FloatCastData {
-    Step *arg;
+    Step *arg{};
     bool is_unsigned = false;
 };
 
 struct StoreData {
-    Step *what;
-    ArgumentIdx addr;
-    LoadStoreKind kind;
+    Step *what{};
+    ArgumentIdx addr{};
+    LoadStoreKind kind{};
     Step *cond = nullptr;
 };
 
 struct CmpData {
-    CmpOp op;
-    Step *left;
-    Step *right;
+    CmpOp op{};
+    Step *left{};
+    Step *right{};
     bool is_unsigned = false;
 };
 
 struct PredicateBinaryData {
-    Step *left;
-    Step *right;
-    PredicateBinaryOp op;
+    Step *left{};
+    Step *right{};
+    PredicateBinaryOp op{};
 };
 
 struct AccArithBinaryData {
-    ArithBinaryOp op;
-    Step *arg;
-    AccIdx acc;
-    Step *cond = nullptr;
+    ArithBinaryOp op{};
+    Step *arg{};
+    AccIdx acc{};
+    Step *cond{};
+};
+
+// Before i128 rewriting, low holds the public i128 input and high is null. The
+// rewrite replaces it with the two i64 words that MIR consumes.
+struct AccI128Data {
+    ArithBinaryOp op{};
+    Step *low{};
+    Step *high{};
+    AccIdx acc{};
+    Step *cond{};
 };
 
 struct AccPredicateBinData {
-    PredicateBinaryOp op;
-    Step *arg;
-    AccIdx acc;
+    PredicateBinaryOp op{};
+    Step *arg{};
+    AccIdx acc{};
 };
 
 struct SelectData {
-    Step *cond;
-    Step *truthy;
-    Step *falsy;
+    Step *cond{};
+    Step *truthy{};
+    Step *falsy{};
 };
 
 struct IndexData {};
 
 struct ScatterData {
-    Step *arg;
-    Step *idx;
-    ArgumentIdx dst;
-    Step *cond = nullptr;
+    Step *arg{};
+    Step *idx{};
+    ArgumentIdx dst{};
+    Step *cond{};
+};
+
+struct StoreInterleaveData {
+    Step *even{};
+    Step *odd{};
+    ArgumentIdx dst{};
+    LoadStoreKind kind{};
+    Step *cond{};
 };
 
 struct PackData {
-    Step *arg;
-    Step *cond;
-    ArgumentIdx dst;
-    AccIdx dst_size_acc;
+    Step *arg{};
+    Step *cond{};
+    ArgumentIdx dst{};
+    AccIdx dst_size_acc{};
+};
+
+struct Pack128Data {
+    Step *low{};
+    Step *high{};
+    Step *cond{};
+    ArgumentIdx dst{};
+    AccIdx dst_size_acc{};
 };
 
 struct GatherData {
-    Step *idx;
-    ArgumentIdx data;
+    Step *idx{};
+    ArgumentIdx data{};
 };
 
 struct PermuteData {
-    Step *arg;
-    uint64_t permute;
-    bool is_bit;
+    Step *arg{};
+    uint64_t permute{};
+    bool is_bit{};
 };
 
 struct LoadData {
-    ArgumentIdx idx;
-    LoadStoreKind kind;
+    ArgumentIdx idx{};
+    LoadStoreKind kind{};
+    size_t byte_offset{};
+};
+
+struct LoadDeinterleaveData {
+    ArgumentIdx idx{};
+    LoadStoreKind kind{};
+    uint8_t lane_count = 2;
+    uint8_t lane = 0;
+};
+
+struct FunnelShiftData {
+    Step *left{};
+    Step *right{};
+    Step *amount{};
+    FunnelShiftKind kind{};
 };
 
 struct FpclassData {
-    FpClass flags;
-    Step *arg;
+    FpClass flags{};
+    Step *arg{};
 };
 
 enum class StepKind : uint8_t {
     Const,
     ArithBinary,
+    I128Div,
     CheckedOp,
     ArithUnary,
     Compare,
@@ -128,6 +235,7 @@ enum class StepKind : uint8_t {
     PredicateBinary,
     PredicateNot,
     Select,
+    FunnelShift,
     Index,
     Permute,
     Fpclass,
@@ -136,16 +244,19 @@ enum class StepKind : uint8_t {
     Load,
     Gather,
     LoadSplat,
+    LoadDeinterleave,
 
     // Stores
     Store,
     Pack,
+    Pack128,
     Scatter,
+    StoreInterleave,
 
     // Accumulator
     AccArithBinary,
     AccPredicateBinary,
-    AccSum128,
+    AccI128,
     Countif
 };
 
@@ -174,49 +285,60 @@ private:
         StoreData store;
         SelectData select;
         ArithBinaryData ab;
+        I128DivData i128_div;
         CheckedOpData checked_op;
         LoadData load;
+        LoadDeinterleaveData load_deinterleave;
         ArithUnaryData au;
         ConstData con;
         GatherData gather;
         PredicateBinaryData pb;
         AccArithBinaryData acc_ab;
+        AccI128Data acc_i128;
         IndexData index;
         AccPredicateBinData acc_pb;
         ScatterData scatter;
         PackData pack;
+        Pack128Data pack128;
         IntCastData int_cast;
         FloatCastData float_cast;
         PermuteData permute;
         FpclassData fpclass;
+        FunnelShiftData funnel;
+        StoreInterleaveData store_interleave;
     };
 };
 
-#define HIR_STEP_DATA_LIST(X)                        \
-    X(con, Const, con)                               \
-    X(arith_bin, ArithBinary, ab)                    \
-    X(checked_op, CheckedOp, checked_op)             \
-    X(arith_un, ArithUnary, au)                      \
-    X(cmp, Compare, cmp)                             \
-    X(int_cast, IntCast, int_cast)                   \
-    X(float_cast, FloatCast, float_cast)             \
-    X(load, Load, load)                              \
-    X(load_splat, LoadSplat, load)                   \
-    X(gather, Gather, gather)                        \
-    X(store, Store, store)                           \
-    X(acc_arith_bin, AccArithBinary, acc_ab)         \
-    X(acc_predicate_bin, AccPredicateBinary, acc_pb) \
-    X(predicate_bin, PredicateBinary, pb)            \
-    X(predicate_not, PredicateNot, arg)              \
-    X(select, Select, select)                        \
-    X(index, Index, index)                           \
-    X(scatter, Scatter, scatter)                     \
-    X(pack, Pack, pack)                              \
-    X(sum128, AccSum128, acc_ab)                     \
-    X(permute, Permute, permute)                     \
-    X(bitcast, BitCast, arg)                         \
-    X(fpclass, Fpclass, fpclass)                     \
-    X(countif, Countif, acc_ab)
+#define HIR_STEP_DATA_LIST(X)                                 \
+    X(con, Const, con)                                        \
+    X(arith_bin, ArithBinary, ab)                             \
+    X(i128_div, I128Div, i128_div)                            \
+    X(checked_op, CheckedOp, checked_op)                      \
+    X(arith_un, ArithUnary, au)                               \
+    X(cmp, Compare, cmp)                                      \
+    X(int_cast, IntCast, int_cast)                            \
+    X(float_cast, FloatCast, float_cast)                      \
+    X(load, Load, load)                                       \
+    X(load_deinterleave, LoadDeinterleave, load_deinterleave) \
+    X(load_splat, LoadSplat, load)                            \
+    X(gather, Gather, gather)                                 \
+    X(store, Store, store)                                    \
+    X(acc_arith_bin, AccArithBinary, acc_ab)                  \
+    X(acc_predicate_bin, AccPredicateBinary, acc_pb)          \
+    X(predicate_bin, PredicateBinary, pb)                     \
+    X(predicate_not, PredicateNot, arg)                       \
+    X(select, Select, select)                                 \
+    X(funnel_shift, FunnelShift, funnel)                      \
+    X(index, Index, index)                                    \
+    X(scatter, Scatter, scatter)                              \
+    X(pack, Pack, pack)                                       \
+    X(pack128, Pack128, pack128)                              \
+    X(i128_agg, AccI128, acc_i128)                            \
+    X(permute, Permute, permute)                              \
+    X(bitcast, BitCast, arg)                                  \
+    X(fpclass, Fpclass, fpclass)                              \
+    X(countif, Countif, acc_ab)                               \
+    X(store_interleave, StoreInterleave, store_interleave)
 
 #define ASSOC_STEP_DATA(_0, _kind, _field)           \
     template <> struct Step::Data<StepKind::_kind> { \
@@ -285,31 +407,63 @@ struct Accumulator {
 };
 
 enum class SpecialOp : uint16_t {
-    None = 0,
-    I64Mul = 1 << 0,
-    Gather = 1 << 1,
-    Scatter = 1 << 2,
-    CondScatter = 1 << 3,
-    SmallPack = 1 << 4,
-    ArbitraryBitPermute = 1 << 5,
-    I8Mul = 1 << 6,
-    I8VariableShift = 1 << 7,
-    SmallLzcnt = 1 << 8,
-    SmallGather = 1 << 9,
+    None = 0x0,
+    I64Mul = 0x1,
+    Gather = 0x2,
+    Scatter = 0x4,
+    CondScatter = 0x8,
+    SmallPack = 0x10,
+    ArbitraryBitPermute = 0x20,
+    SmallGather = 0x200,
+    SmallPopcount = 0x400,
+    LargePopcount = 0x800,
+    I8ConstantShift = 0x1000,
+    SmallDeinterleave = 0x4000,
+    FunnelShift = 0x8000,
 };
 SIMJIT_DEFINE_ENUM_FLAGS(SpecialOp)
+
+// Early vectorization outcome recorded during HIR construction. Lowering has equivalent validation,
+// but this lets the JIT choose scalar code without beginning vectorization.
+enum class VectorizationHint : uint8_t {
+    None,
+    ScalarOnly,
+    UnsupportedSpecialOps,
+};
+
+enum class ArgumentUsage : uint16_t {
+    None = 0x0,
+    SequentialRead = 0x1,
+    SequentialWrite = 0x2,
+    RandomRead = 0x4,
+    RandomWrite = 0x8,
+    AppendWrite = 0x10,
+    AggregateWrite = 0x20,
+    AccessMask = 0x3f,
+    BoundedIndex = 0x40,
+    ArrayRead = 0x80,
+    SplatRead = 0x100,
+    SafetyCheck = 0x200,
+};
+SIMJIT_DEFINE_ENUM_FLAGS(ArgumentUsage)
 
 struct Function {
     Context *ctx = nullptr;
     size_t step_id_count = 0;
     ArenaArray<ArgumentDecl> args{};
+    ArenaArray<ArgumentUsage> argument_usage{};
     ArenaArray<Accumulator> accs{};
     ArenaArray<Step *> step_roots;
     std::optional<ArgumentIdx> safety_check_arg{};
     SpecialOp special_ops = SpecialOp::None;
-    bool scalar_only = false;
+    VectorizationHint vectorization_hint = VectorizationHint::None;
+
+    bool is_scalar_only() const noexcept { return vectorization_hint != VectorizationHint::None; }
+    SpecialOp unsupported_vector_special_ops() const noexcept;
 };
 
+SpecialOp supported_vector_special_ops_for_arch(Arch arch) noexcept;
+void analyze_argument_usage(Function *func);
 const char *show_step_kind(StepKind kind) noexcept;
 std::string show_special_ops(SpecialOp ops);
 
@@ -317,6 +471,7 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
     switch (step->kind) {
     case StepKind::Const:
     case StepKind::Load:
+    case StepKind::LoadDeinterleave:
     case StepKind::LoadSplat:
     case StepKind::Index:
         break;
@@ -330,9 +485,24 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.right);
             break;
         }
+        SIMJIT_MATCH (StepKind::I128Div) {
+            process(data.left_low);
+            process(data.left_high);
+            process(data.right_low);
+            process(data.right_high);
+            break;
+        }
         SIMJIT_MATCH (StepKind::CheckedOp) {
             process(data.op);
             if (data.mask) { process(data.mask); }
+            if (data.left_low) {
+                process(data.left_low);
+                process(data.left_high);
+            }
+            if (data.right_low) {
+                process(data.right_low);
+                process(data.right_high);
+            }
             break;
         }
         SIMJIT_MATCH (StepKind::ArithUnary) {
@@ -370,8 +540,14 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.arg);
             break;
         }
-        SIMJIT_MATCH2 (StepKind::AccArithBinary, StepKind::AccSum128) {
+        SIMJIT_MATCH (StepKind::AccArithBinary) {
             process(data.arg);
+            if (data.cond) process(data.cond);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::AccI128) {
+            process(data.low);
+            if (data.high) process(data.high);
             if (data.cond) process(data.cond);
             break;
         }
@@ -385,6 +561,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.falsy);
             break;
         }
+        SIMJIT_MATCH (StepKind::FunnelShift) {
+            process(data.left);
+            process(data.right);
+            process(data.amount);
+            break;
+        }
         SIMJIT_MATCH (StepKind::Scatter) {
             process(data.idx);
             process(data.arg);
@@ -393,6 +575,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
         }
         SIMJIT_MATCH (StepKind::Pack) {
             process(data.arg);
+            process(data.cond);
+            break;
+        }
+        SIMJIT_MATCH (StepKind::Pack128) {
+            process(data.low);
+            process(data.high);
             process(data.cond);
             break;
         }
@@ -408,6 +596,12 @@ template <typename Fn> SIMJIT_NO_ASAN void step_recurse(Step *step, Fn process) 
             process(data.arg);
             break;
         }
+        SIMJIT_MATCH (StepKind::StoreInterleave) {
+            process(data.even);
+            process(data.odd);
+            if (data.cond) process(data.cond);
+            break;
+        }
     }
 }
 
@@ -415,11 +609,13 @@ constexpr bool is_root_step(StepKind kind) {
     switch (kind) {
     case StepKind::Store:
     case StepKind::Pack:
+    case StepKind::Pack128:
     case StepKind::Scatter:
     case StepKind::AccArithBinary:
     case StepKind::AccPredicateBinary:
-    case StepKind::AccSum128:
-    case StepKind::Countif: return true;
+    case StepKind::AccI128:
+    case StepKind::Countif:
+    case StepKind::StoreInterleave: return true;
     default: break;
     }
     return false;

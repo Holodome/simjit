@@ -4,8 +4,9 @@
 // SPDX-License-Identifier: Zlib
 
 #include "simjit/core/cpp/emitter_internal.h"
+#include "simjit/core/hir.h"
 
-#include <math.h>
+#include <cmath>
 #include <type_traits>
 
 namespace simjit {
@@ -106,13 +107,14 @@ std::string format_scalar_arith_binary_expr(ScalarDataType result_dtype, ArithBi
     case ArithBinaryOp::Add:
     case ArithBinaryOp::Sub:
     case ArithBinaryOp::Mul:
-    case ArithBinaryOp::Mul64SE:
-    case ArithBinaryOp::Mul64ZE:
     case ArithBinaryOp::Div:
     case ArithBinaryOp::Mod:
     case ArithBinaryOp::And:
     case ArithBinaryOp::Or:
     case ArithBinaryOp::Xor: return format("%s %s %s", left, arith_binary_op_to_cpp(op), right);
+    case ArithBinaryOp::Mul64SE: return format("(int64_t)(int32_t)%s * (int64_t)(int32_t)%s", left, right);
+    case ArithBinaryOp::Mul64ZE:
+        return format("bit_cast<int64_t>((uint64_t)(uint32_t)%s * (uint64_t)(uint32_t)%s)", left, right);
     case ArithBinaryOp::UDiv:
         return format("(%s)%s / (%s)%s", scalar_dtype_to_cpp_unsigned(left_dtype), left,
                       scalar_dtype_to_cpp_unsigned(left_dtype), right);
@@ -246,7 +248,7 @@ template <typename T> static std::string format_float_literal_internal(T value) 
         if (literal.find('.') == std::string::npos && literal.find('e') == std::string::npos) {
             literal += ".0"; // Ensure it's treated as float
         }
-        if constexpr (std::is_same_v<T, float>) { literal += "f"; }
+        if constexpr (std::is_same_v<T, float>) { literal += 'f'; }
         return literal;
     }
 
@@ -421,9 +423,9 @@ CppEmitterBase::StepNameKind CppEmitterBase::classify_step_name(const Step *step
     case StepKind::Scatter:
     case StepKind::CondScatter:
     case StepKind::Pack:
+    case StepKind::Pack128:
     case StepKind::AccStore:
-    case StepKind::AggResult:
-    case StepKind::StoreSum128: return StepNameKind::None;
+    case StepKind::AggResult: return StepNameKind::None;
     default: return StepNameKind::Temp;
     }
 }
@@ -478,6 +480,10 @@ void CppEmitterBase::record_main_loop_acc_uses() {
                 break;
             }
             SIMJIT_MATCH (StepKind::Pack) {
+                mark_main_loop_acc_use(data.acc);
+                break;
+            }
+            SIMJIT_MATCH (StepKind::Pack128) {
                 mark_main_loop_acc_use(data.acc);
                 break;
             }
@@ -643,6 +649,10 @@ bool CppEmitterBase::can_inline_scalar_expr(const Step *step) const {
             if (use_counts[step->id] != 1) { return false; }
             return step->dtype != ScalarDataType::I1;
         }
+        SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+            if (use_counts[step->id] != 1) { return false; }
+            return step->dtype != ScalarDataType::I1;
+        }
         SIMJIT_MATCH (StepKind::LoadSplat) {
             if (use_counts[step->id] != 1) { return false; }
             return step->dtype != ScalarDataType::I1;
@@ -663,7 +673,17 @@ std::optional<std::string> CppEmitterBase::inline_scalar_leaf_expr(const Step *s
             SIMJIT_ASSERT(step->dtype != ScalarDataType::I1);
             return format("arg%zu[i]", data.addr.arg);
         }
-        SIMJIT_MATCH (StepKind::LoadSplat) { return format("*arg%zu", data.addr.arg); }
+        SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+            SIMJIT_ASSERT(step->dtype != ScalarDataType::I1);
+            const ArgumentDecl &arg = func->args[data.addr.arg];
+            size_t half_size = scalar_dtype_size(step->dtype.as_scalar());
+            return format("*(const %s *)((const char *)arg%zu + (i + %zu) * %zu + %zu)", cpp_dtype(step->dtype),
+                          data.addr.arg, data.addr.offset, scalar_dtype_size(arg.dtype), data.lane * half_size);
+        }
+        SIMJIT_MATCH (StepKind::LoadSplat) {
+            return format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(step->dtype), data.addr.arg,
+                          data.byte_offset);
+        }
         SIMJIT_MATCH (StepKind::Compare) {
             return scalar_compare_expr(data, show_scalar_operand(data.left), show_scalar_operand(data.right));
         }
@@ -728,12 +748,12 @@ bool CppEmitterBase::can_inline_store_arg(const Step *step) const {
 }
 std::string CppEmitterBase::scalar_output_arg_expr(const Step *step, bool allow_select) {
     if (can_inline_agg_result_arg(step)) {
-        auto &data = step->step_data<StepKind::ArithBinary>();
+        const auto &data = step->step_data<StepKind::ArithBinary>();
         return scalar_arith_binary_expr(step->dtype.as_scalar(), data, show_scalar_operand(data.left),
                                         show_scalar_operand(data.right));
     }
     if (allow_select && can_inline_store_value_arg(step) && step->is(StepKind::Select)) {
-        auto &data = step->step_data<StepKind::Select>();
+        const auto &data = step->step_data<StepKind::Select>();
         if (auto expr = scalar_select_bool_expr(data)) { return *expr; }
         return format("%s ? %s : %s", show_scalar_operand(data.cond), show_scalar_operand(data.truthy),
                       show_scalar_operand(data.falsy));
@@ -781,11 +801,28 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
                           show_scalar_operand(step), show_scalar_operand(step), data.addr.arg, size, offset_str.c_str(),
                           size);
         }
+        SIMJIT_MATCH (StepKind::LoadDeinterleave) {
+            SIMJIT_ASSERT(step->dtype != ScalarDataType::I1);
+            const ArgumentDecl &arg = func->args[data.addr.arg];
+            size_t half_size = scalar_dtype_size(sdtype);
+            return cpp_var_decl(step) + format("*(const %s *)((const char *)arg%zu + (i + %zu) * %zu + %zu)",
+                                               cpp_dtype(step->dtype), data.addr.arg, data.addr.offset,
+                                               scalar_dtype_size(arg.dtype), data.lane * half_size);
+        }
         SIMJIT_MATCH (StepKind::LoadSplat) {
-            if (sdtype == ScalarDataType::I1) { return cpp_var_decl(step) + format("*arg%zu & 1", data.addr.arg); }
-            return cpp_var_decl(step) + format("*arg%zu", data.addr.arg);
+            if (sdtype == ScalarDataType::I1) {
+                return cpp_var_decl(step) +
+                       format("*(const uint8_t *)((const char *)arg%zu + %zu) & 1", data.addr.arg, data.byte_offset);
+            }
+            return cpp_var_decl(step) + format("*(const %s *)((const char *)arg%zu + %zu)", cpp_dtype(step->dtype),
+                                               data.addr.arg, data.byte_offset);
         }
         SIMJIT_MATCH (StepKind::Gather) {
+            const ArgumentDecl &arg = func->args[data.data];
+            if (arg.dtype != step->dtype.as_scalar()) {
+                return cpp_var_decl(step) + format("((const %s *)arg%zu)[%s]", cpp_dtype(step->dtype), data.data,
+                                                   show_scalar_operand(data.idx));
+            }
             return cpp_var_decl(step) + format("arg%zu[%s]", data.data, show_scalar_operand(data.idx));
         }
         SIMJIT_MATCH (StepKind::Store) {
@@ -805,9 +842,71 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
             return format("memcpy((char *)arg%zu + i * %zu%s, &%s, %zu)", data.addr.arg, size, offset_str.c_str(),
                           show_scalar_operand(data.what), size);
         }
+        SIMJIT_MATCH (StepKind::StoreInterleave) {
+            const ArgumentDecl &arg = func->args[data.dst.arg];
+            size_t half_size = scalar_dtype_size(step->dtype.as_scalar());
+            size_t stride = scalar_dtype_size(arg.dtype);
+            const char *half_cpp_type = cpp_dtype(step->dtype);
+            if (data.cond) {
+                return format("if (%s) { *(%s *)((char *)arg%zu + (i + %zu) * %zu) = %s; "
+                              "*(%s *)((char *)arg%zu + (i + %zu) * %zu + %zu) = %s; }",
+                              show_scalar_operand(data.cond), half_cpp_type, data.dst.arg, data.dst.offset, stride,
+                              show_scalar_operand(data.even), half_cpp_type, data.dst.arg, data.dst.offset, stride,
+                              half_size, show_scalar_operand(data.odd));
+            }
+            return format("*(%s *)((char *)arg%zu + (i + %zu) * %zu) = %s;\n"
+                          "*(%s *)((char *)arg%zu + (i + %zu) * %zu + %zu) = %s",
+                          half_cpp_type, data.dst.arg, data.dst.offset, stride, show_scalar_operand(data.even),
+                          half_cpp_type, data.dst.arg, data.dst.offset, stride, half_size,
+                          show_scalar_operand(data.odd));
+        }
         SIMJIT_MATCH (StepKind::ArithBinary) {
             return cpp_var_decl(step) + scalar_arith_binary_expr(sdtype, data, show_scalar_operand(data.left),
                                                                  show_scalar_operand(data.right));
+        }
+        SIMJIT_MATCH (StepKind::I128Div) {
+            if (sdtype != ScalarDataType::I64 || data.partner == nullptr || data.partner->kind != StepKind::I128Div ||
+                data.partner->dtype != ScalarDataType::I64) {
+                messed_up("malformed scalar i128 division");
+            }
+            const Step *low = data.high_word ? data.partner : step;
+            const Step *high = data.high_word ? step : data.partner;
+            const char *wide_type =
+                data.op == ArithBinaryOp::Div || data.op == ArithBinaryOp::Mod ? "__int128" : "unsigned __int128";
+            const char *op = nullptr;
+            switch (data.op) {
+            case ArithBinaryOp::Div:
+            case ArithBinaryOp::UDiv: op = "/"; break;
+            case ArithBinaryOp::Mod:
+            case ArithBinaryOp::UMod: op = "%"; break;
+            default: messed_up("invalid i128 division op %s", show_arith_binary_op(data.op));
+            }
+            std::string value = format("i128div%zu", size_t(step->id));
+            std::string left = format("((unsigned __int128)(uint64_t)%s | ((unsigned __int128)(uint64_t)%s << 64))",
+                                      show_scalar_operand(data.left_low), show_scalar_operand(data.left_high));
+            std::string right = format("((unsigned __int128)(uint64_t)%s | ((unsigned __int128)(uint64_t)%s << 64))",
+                                       show_scalar_operand(data.right_low), show_scalar_operand(data.right_high));
+            return format("%s %s = (%s)%s %s (%s)%s;\nint64_t %s = bit_cast<int64_t>((uint64_t)%s);\n"
+                          "int64_t %s = bit_cast<int64_t>((uint64_t)((unsigned __int128)%s >> 64))",
+                          wide_type, value.c_str(), wide_type, left.c_str(), op, wide_type, right.c_str(), show(low),
+                          value.c_str(), show(high), value.c_str());
+        }
+        SIMJIT_MATCH (StepKind::FunnelShift) {
+            const char *left = show_scalar_operand(data.left);
+            const char *right = show_scalar_operand(data.right);
+            const char *amount = show_scalar_operand(data.amount);
+            size_t bits = scalar_dtype_bits(sdtype);
+            const char *utype = scalar_dtype_to_cpp_unsigned(sdtype);
+            if (data.kind == FunnelShiftKind::Left) {
+                return cpp_var_decl(step) +
+                       format("(%s & %zu) == 0 ? %s : (%s)(((%s)%s << (%s & %zu)) | ((%s)%s >> (%zu - (%s & %zu))))",
+                              amount, bits - 1, left, scalar_dtype_to_cpp(sdtype), utype, left, amount, bits - 1, utype,
+                              right, bits, amount, bits - 1);
+            }
+            return cpp_var_decl(step) +
+                   format("(%s & %zu) == 0 ? %s : (%s)(((%s)%s >> (%s & %zu)) | ((%s)%s << (%zu - (%s & %zu))))",
+                          amount, bits - 1, right, scalar_dtype_to_cpp(sdtype), utype, right, amount, bits - 1, utype,
+                          left, bits, amount, bits - 1);
         }
         SIMJIT_MATCH (StepKind::FMA) {
             const char *function = sdtype == ScalarDataType::F32 ? "fmaf" : "fma";
@@ -963,10 +1062,10 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
         }
         SIMJIT_MATCH (StepKind::AggResult) {
             std::string arg = agg_result_arg_expr(data.arg);
-            return format("*arg%zu = %s", data.dst, arg.c_str());
+            return format("*(%s *)((char *)arg%zu + %zu) = %s", cpp_dtype(step->dtype), data.dst, data.byte_offset,
+                          arg.c_str());
         }
 
-        SIMJIT_MATCH (StepKind::StoreSum128) { return store_sum128_to_cpp(data); }
         SIMJIT_MATCH (StepKind::PredicateNot) { return cpp_var_decl(step) + format("!%s", show_scalar_operand(data)); }
         SIMJIT_MATCH (StepKind::Select) {
             if (auto expr = scalar_select_bool_expr(data)) { return cpp_var_decl(step) + *expr; }
@@ -976,15 +1075,34 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
         SIMJIT_MATCH (StepKind::AccLoad) return cpp_var_decl(step) + format("acc%zu", func->accs.index(data));
         SIMJIT_MATCH (StepKind::AccStore) { return format_acc_store(data.acc, show_scalar_operand(data.arg)); }
         SIMJIT_MATCH (StepKind::Scatter) {
+            const ArgumentDecl &dst = func->args[data.dst];
+            const char *element_type = cpp_dtype(step->dtype);
+            if (dst.dtype != step->dtype.as_scalar()) {
+                return format("((%s *)arg%zu)[%s] = %s", element_type, data.dst, show_scalar_operand(data.idx),
+                              show_scalar_operand(data.arg));
+            }
             return format("arg%zu[%s] = %s", data.dst, show_scalar_operand(data.idx), show_scalar_operand(data.arg));
         }
         SIMJIT_MATCH (StepKind::CondScatter) {
+            const ArgumentDecl &dst = func->args[data.dst];
+            const char *element_type = cpp_dtype(step->dtype);
+            if (dst.dtype != step->dtype.as_scalar()) {
+                return format("if (%s) ((%s *)arg%zu)[%s] = %s", show_scalar_operand(data.cond), element_type, data.dst,
+                              show_scalar_operand(data.idx), show_scalar_operand(data.arg));
+            }
             return format("if (%s) arg%zu[%s] = %s", show_scalar_operand(data.cond), data.dst,
                           show_scalar_operand(data.idx), show_scalar_operand(data.arg));
         }
         SIMJIT_MATCH (StepKind::Pack) {
             return format("if(%s) arg%zu[acc%zu++] = %s", show_scalar_operand(data.cond), data.dst,
                           func->accs.index(data.acc), show_scalar_operand(data.arg));
+        }
+        SIMJIT_MATCH (StepKind::Pack128) {
+            return format("if(%s) { size_t pack_pos%zu = acc%zu++; ((int64_t *)arg%zu)[2 * pack_pos%zu] = %s; "
+                          "((int64_t *)arg%zu)[2 * pack_pos%zu + 1] = %s; }",
+                          show_scalar_operand(data.cond), size_t(step->id), func->accs.index(data.acc), data.dst,
+                          size_t(step->id), show_scalar_operand(data.low), data.dst, size_t(step->id),
+                          show_scalar_operand(data.high));
         }
         SIMJIT_MATCH (StepKind::CondStore) {
             return format("if (%s) arg%zu[i] = %s", show_scalar_operand(data.cond), data.addr.arg,
@@ -1055,7 +1173,6 @@ std::string CppEmitterBase::scalar_step_to_cpp(const Step *step) {
 
 std::string CppEmitterBase::step_to_cpp(const Step *step, const MaskPushdownInfo *mask_pushdown) {
     if (mask_pushdown != nullptr) { return backend_step_to_cpp(step, mask_pushdown); }
-    if (step->kind == StepKind::StoreSum128) { return store_sum128_to_cpp(step->step_data<StepKind::StoreSum128>()); }
     if (step->dtype.is_scalar() && is_scalar_step(step->kind)) { return backend_step_to_cpp(step, nullptr); }
     return backend_step_to_cpp(step, nullptr);
 }
@@ -1080,8 +1197,19 @@ std::string CppEmitterBase::compile_steps(nonstd::span<Step *const> step_roots, 
         ordered.push_back(x);
     });
 
+    std::vector<uint8_t> ordered_ids(func->step_id_count, 0);
+    for (Step *step : ordered)
+        ordered_ids[step->id] = 1;
+
     ArenaBitmap suppressed = ArenaBitmap::create(func->ctx->arena, func->step_id_count);
     for (Step *step : ordered) {
+        if (step->is(StepKind::I128Div)) {
+            const Step *partner = step->step_data<StepKind::I128Div>().partner;
+            if (partner != nullptr && ordered_ids[partner->id] && partner->id < step->id) {
+                suppressed.set(step->id);
+                continue;
+            }
+        }
         if (step->is(StepKind::AccLoad)) {
             suppressed.set(step->id);
             continue;
@@ -1128,6 +1256,13 @@ std::string CppEmitterBase::compile_steps(nonstd::span<Step *const> step_roots, 
         if (suppressed.get(step->id) && !keep_name_for_suppressed(step)) { continue; }
         if (auto name = assign_step_name(step, phase)) { seen[step->id] = std::move(*name); }
     }
+    for (Step *step : ordered) {
+        if (!step->is(StepKind::I128Div)) { continue; }
+        const Step *partner = step->step_data<StepKind::I128Div>().partner;
+        if (partner != nullptr && seen[partner->id].empty()) {
+            if (auto name = assign_step_name(partner, phase)) { seen[partner->id] = std::move(*name); }
+        }
+    }
 
     std::vector<std::optional<std::string>> compacted(func->step_id_count);
     for (Step *step : ordered) {
@@ -1165,10 +1300,12 @@ std::string CppEmitterBase::emit_source() {
     bool has_delayed_prologue = has_delayed_prologue_steps(func->prologue_roots);
 
     std::string decl = format("void %s(size_t nelems", func->ctx->symbol_name.c_str());
+    const auto &usages = func->source_hir->argument_usage;
     for (const ArgumentDecl &arg : func->args) {
         decl += ", ";
-        bool writable = bool(arg.kind & ArgumentKind::Dst) || bool(arg.kind & ArgumentKind::DstAgg) ||
-                        bool(arg.kind & ArgumentKind::DstSafetyCheck);
+        hir::ArgumentUsage usage = usages[arg.idx];
+        bool writable = bool(usage & (hir::ArgumentUsage::SequentialWrite | hir::ArgumentUsage::RandomWrite |
+                                      hir::ArgumentUsage::AppendWrite | hir::ArgumentUsage::AggregateWrite));
         if (!writable) { decl += "const "; }
         if (arg.dtype == ScalarDataType::I1) {
             decl += "uint8_t *";
@@ -1178,7 +1315,7 @@ std::string CppEmitterBase::emit_source() {
         if (true) { decl += " __restrict "; }
         decl += format("arg%zu", arg.idx);
     }
-    decl += ")";
+    decl += ')';
 
     std::string code{};
     const std::string indent1(4, ' ');
@@ -1209,7 +1346,7 @@ std::string CppEmitterBase::emit_source() {
     }
     code += after_loops_to_cpp(1);
     code += compile_steps(func->epilogue_roots, 1, EmitPhase::Epilogue);
-    code += "}";
+    code += '}';
     return code;
 }
 

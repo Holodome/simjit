@@ -173,9 +173,17 @@ const char *show_load_store_kind(LoadStoreKind kind) noexcept {
     SIMJIT_UNREACHABLE();
 }
 
+const char *show_funnel_shift_kind(FunnelShiftKind kind) noexcept {
+    switch (kind) {
+    case FunnelShiftKind::Left: return "left";
+    case FunnelShiftKind::Right: return "right";
+    }
+    SIMJIT_UNREACHABLE();
+}
+
 ConstData scalar_dtype_max(ScalarDataType dt) {
     switch (dt) {
-    case ScalarDataType::I128: messed_up("invalid dtype for dtype_max");
+    case ScalarDataType::I128: messed_up("invalid dtype for scalar_dtype_max");
     case ScalarDataType::I1: return ConstData::i1(true);
     case ScalarDataType::I8: return ConstData::i8(INT8_MAX);
     case ScalarDataType::I16: return ConstData::i16(INT16_MAX);
@@ -196,14 +204,14 @@ uint64_t scalar_dtype_umax(ScalarDataType dt) {
     case ScalarDataType::I64: return (int64_t)(uint64_t)UINT64_MAX;
     case ScalarDataType::I128:
     case ScalarDataType::F32:
-    case ScalarDataType::F64: messed_up("invalid dtype %s for dtype_max", show_scalar_dtype(dt));
+    case ScalarDataType::F64: messed_up("invalid dtype %s for scalar_dtype_umax", show_scalar_dtype(dt));
     }
     SIMJIT_UNREACHABLE();
 }
 
 ConstData scalar_dtype_min(ScalarDataType dt) {
     switch (dt) {
-    case ScalarDataType::I128: messed_up("invalid dtype %s for dtype_max", show_scalar_dtype(dt));
+    case ScalarDataType::I128: messed_up("invalid dtype %s for scalar_dtype_min", show_scalar_dtype(dt));
     case ScalarDataType::I1: return ConstData::i1(false);
     case ScalarDataType::I8: return ConstData::i8(INT8_MIN);
     case ScalarDataType::I16: return ConstData::i16(INT16_MIN);
@@ -215,31 +223,10 @@ ConstData scalar_dtype_min(ScalarDataType dt) {
     SIMJIT_UNREACHABLE();
 }
 
-std::string show_argument_kind(ArgumentKind kind) {
-    if (kind == ArgumentKind::Undefined) { return "undefined"; }
-    if (kind == ArgumentKind::Table) { return "table"; }
-
-    std::string result{};
-    auto append = [&](std::string_view v) {
-        if (!result.empty()) { result += "|"; }
-        result += v;
-    };
-
-    if (bool(kind & ArgumentKind::SrcArr)) append("src-arr");
-    if (bool(kind & ArgumentKind::SrcGatherArr)) append("src-gather-arr");
-    if (bool(kind & ArgumentKind::SrcIdxArr)) append("src-idx-arr");
-    if (bool(kind & ArgumentKind::SrcConst)) append("src-const");
-    if (bool(kind & ArgumentKind::Dst)) append("dst-arr");
-    if (bool(kind & ArgumentKind::DstAgg)) append("dst-scalar");
-    if (bool(kind & ArgumentKind::DstSafetyCheck)) append("dst-safety-check");
-
-    return result.empty() ? "unknown" : result;
-}
-
 std::string show_fpclass(FpClass flags) {
     std::string result{};
     auto append = [&](std::string_view v) {
-        if (!result.empty()) { result += "|"; };
+        if (!result.empty()) { result += '|'; };
         result += v;
     };
 
@@ -256,7 +243,7 @@ std::string show_fpclass(FpClass flags) {
 std::string show_arith_binary_flags(ArithBinaryOpFlags flags) {
     std::string result{};
     auto append = [&](std::string_view v) {
-        if (!result.empty()) { result += "|"; };
+        if (!result.empty()) { result += '|'; };
         result += v;
     };
     if (bool(flags & ArithBinaryOpFlags::SafetyCheck)) append("safety-check");

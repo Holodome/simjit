@@ -25,7 +25,9 @@
 #include "simjit/simjit.h"
 
 #include <algorithm>
+#include <limits>
 #include <unordered_map>
+#include <vector>
 
 #if SIMJIT_USE_LIBDIVIDE
 #include "libdivide.h"
@@ -70,7 +72,7 @@ struct ConstantKey {
 struct ConstQuotientKey {
     const mir::Step *numerator;
     ConstData divisor;
-    bool is_signed;
+    bool is_signed = false;
 
     bool operator==(const ConstQuotientKey &right) const noexcept {
         return numerator == right.numerator && divisor == right.divisor && is_signed == right.is_signed;
@@ -115,6 +117,37 @@ template <> struct std::hash<simjit::ContextualMirCacheKey> {
 
 namespace simjit {
 namespace mir {
+
+extern "C" {
+// NOLINTNEXTLINE(bugprone-reserved-identifier): compiler-runtime ABI symbol.
+__int128 __divti3(__int128, __int128);
+// NOLINTNEXTLINE(bugprone-reserved-identifier): compiler-runtime ABI symbol.
+unsigned __int128 __udivti3(unsigned __int128, unsigned __int128);
+// NOLINTNEXTLINE(bugprone-reserved-identifier): compiler-runtime ABI symbol.
+__int128 __modti3(__int128, __int128);
+// NOLINTNEXTLINE(bugprone-reserved-identifier): compiler-runtime ABI symbol.
+unsigned __int128 __umodti3(unsigned __int128, unsigned __int128);
+}
+
+const char *i128_div_helper_symbol(ArithBinaryOp op) {
+    switch (op) {
+    case ArithBinaryOp::Div: return "__divti3";
+    case ArithBinaryOp::UDiv: return "__udivti3";
+    case ArithBinaryOp::Mod: return "__modti3";
+    case ArithBinaryOp::UMod: return "__umodti3";
+    default: messed_up("invalid i128 division op %s", show_arith_binary_op(op));
+    }
+}
+
+void *i128_div_helper_address(ArithBinaryOp op) {
+    switch (op) {
+    case ArithBinaryOp::Div: return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(&__divti3));
+    case ArithBinaryOp::UDiv: return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(&__udivti3));
+    case ArithBinaryOp::Mod: return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(&__modti3));
+    case ArithBinaryOp::UMod: return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(&__umodti3));
+    default: messed_up("invalid i128 division op %s", show_arith_binary_op(op));
+    }
+}
 
 namespace {
 template <AllowedDataTypes Allowed> struct AllowedMap;
@@ -190,7 +223,7 @@ enum class AccKind : uint8_t {
     Pack,
     Overflow,
     OverflowMul,
-    Sum128
+    I128
 };
 
 struct AccRemap {
@@ -201,7 +234,7 @@ class AccGroup {
 public:
     AccGroup(AccKind k, ScalarDataType ty, AccIdx hir, const hir::Step *agg, ArgumentIdx dst) noexcept
         : kind(k), dst_dtype(ty), hir_idx(hir), agg_expr(agg), dst_arg(dst),
-          slots_per_copy(kind == AccKind::Sum128 ? 2 : 1) {}
+          slots_per_copy(kind == AccKind::I128 ? 2 : 1) {}
 
     // Fixed group description. These values are established with the HIR group and never change during lowering.
     const AccKind kind;
@@ -250,9 +283,9 @@ enum class SafetyCheckKind : uint8_t {
 };
 
 struct SafetyCheckInfo {
-    SafetyCheckKind kind;
+    SafetyCheckKind kind{};
     DataType acc_dtype;
-    AccId acc;
+    AccId acc{};
 };
 } // namespace
 
@@ -260,9 +293,11 @@ const char *show_step_kind(StepKind kind) noexcept {
     switch (kind) {
     case StepKind::Const: return "const";
     case StepKind::Load: return "load";
+    case StepKind::LoadDeinterleave: return "load-deinterleave";
     case StepKind::LoadSplat: return "load-splat";
     case StepKind::Gather: return "gather";
     case StepKind::ArithBinary: return "binary";
+    case StepKind::I128Div: return "i128-div";
     case StepKind::ArithUnary: return "unary";
     case StepKind::Store: return "store";
     case StepKind::Compare: return "cmp";
@@ -286,13 +321,15 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::ScalarIndex: return "scalar-index";
     case StepKind::Scatter: return "scatter";
     case StepKind::Pack: return "pack";
+    case StepKind::Pack128: return "pack128";
     case StepKind::Ternarylogic: return "ternarylogic";
     case StepKind::CondStore: return "cond-store";
     case StepKind::ScalarArithBinaryOverflow: return "ab-overflow";
     case StepKind::VecConst: return "vec-const";
+    case StepKind::FunnelShift: return "funnel-shift";
     case StepKind::VecPermute: return "vec-permute";
     case StepKind::ScalarPermute: return "scalar-permute";
-    case StepKind::StoreSum128: return "store-sum128";
+    case StepKind::VecExtract: return "vec-extract";
     case StepKind::CondScatter: return "cond-scatter";
     case StepKind::FMA: return "fma";
     case StepKind::BitCast: return "bitcast";
@@ -300,6 +337,7 @@ const char *show_step_kind(StepKind kind) noexcept {
     case StepKind::VecNarrowCombine: return "narrow-combine";
     case StepKind::VecFloatNarrowCombine: return "float-narrow-combine";
     case StepKind::ConstDiv: return "const-div";
+    case StepKind::StoreInterleave: return "store-interleave";
     }
     SIMJIT_UNREACHABLE();
 }
@@ -311,9 +349,10 @@ constexpr bool is_root_step(StepKind kind) noexcept {
     case StepKind::AccStore:
     case StepKind::Scatter:
     case StepKind::Pack:
+    case StepKind::Pack128:
     case StepKind::CondStore:
-    case StepKind::StoreSum128:
-    case StepKind::CondScatter: return true;
+    case StepKind::CondScatter:
+    case StepKind::StoreInterleave: return true;
     default: break;
     }
     return false;
@@ -390,10 +429,17 @@ struct ExprShowState {
                        .c_str());
             SIMJIT_MATCH (StepKind::Load)
                 wr("arg=@%zu offset=%zu kind=%s", data.addr.arg, data.addr.offset, show_load_store_kind(data.kind));
+            SIMJIT_MATCH (StepKind::LoadDeinterleave)
+                wr("arg=@%zu offset=%zu kind=%s lanes=%u/%u", data.addr.arg, data.addr.offset,
+                   show_load_store_kind(data.kind), data.lane, data.lane_count);
             SIMJIT_MATCH (StepKind::LoadSplat) wr("arg=@%zu", data.addr.arg);
             SIMJIT_MATCH (StepKind::Gather) wr("arg=%zu idx=%%%u", data.data, ref(data.idx));
             SIMJIT_MATCH (StepKind::ArithBinary)
                 wr("op=%s left=%%%u right=%%%u", show_arith_binary_op(data.op), ref(data.left), ref(data.right));
+            SIMJIT_MATCH (StepKind::I128Div)
+                wr("op=%s left_low=%%%u left_high=%%%u right_low=%%%u right_high=%%%u word=%s",
+                   show_arith_binary_op(data.op), ref(data.left_low), ref(data.left_high), ref(data.right_low),
+                   ref(data.right_high), data.high_word ? "high" : "low");
             SIMJIT_MATCH (StepKind::ScalarArithBinaryOverflow) {
                 wr_("op=%s left=%%%u right=%%%u", show_arith_binary_op(data.op), ref(data.left), ref(data.right));
                 if (data.mask != nullptr) wr_(" mask=%%%u", ref(data.mask));
@@ -406,10 +452,17 @@ struct ExprShowState {
             SIMJIT_MATCH (StepKind::Store)
                 wr("dst=@%zu src=%%%u offset=%zu kind=%s", data.addr.arg, ref(data.what), data.addr.offset,
                    show_load_store_kind(data.kind));
+            SIMJIT_MATCH (StepKind::StoreInterleave) {
+                wr_("even=%%%u odd=%%%u dst=@%zu offset=%zu kind=%s", ref(data.even), ref(data.odd), data.dst.arg,
+                    data.dst.offset, show_load_store_kind(data.kind));
+                if (data.cond) wr_(" cond=%%%u", ref(data.cond));
+                return;
+            }
             SIMJIT_MATCH (StepKind::Compare)
                 wr("op=%s left=%%%u right=%%%u is_unsigned=%s", show_cmp_op(data.op), ref(data.left), ref(data.right),
                    data.is_unsigned ? "true" : "false");
-            SIMJIT_MATCH (StepKind::AggResult) wr("dst=%zu arg=%%%u", data.dst, ref(data.arg));
+            SIMJIT_MATCH (StepKind::AggResult)
+                wr("dst=%zu offset=%zu arg=%%%u", data.dst, data.byte_offset, ref(data.arg));
             SIMJIT_MATCH (StepKind::AccLoad)
                 wr("acc=$%lld:%llu", (long long)data.group, (unsigned long long)data.local);
             SIMJIT_MATCH (StepKind::AccStore)
@@ -436,19 +489,25 @@ struct ExprShowState {
             SIMJIT_MATCH (StepKind::Pack)
                 wr("arg=%%%u cond=%%%u dst=%zu acc=$%lld:%llu", ref(data.arg), ref(data.cond), data.dst,
                    (long long)data.acc.group, (unsigned long long)data.acc.local);
+            SIMJIT_MATCH (StepKind::Pack128)
+                wr("low=%%%u high=%%%u cond=%%%u dst=%zu acc=$%lld:%llu", ref(data.low), ref(data.high), ref(data.cond),
+                   data.dst, (long long)data.acc.group, (unsigned long long)data.acc.local);
             SIMJIT_MATCH (StepKind::CondStore)
                 wr("arg=%%%u cond=%%%u dst=@%zu offset=%zu", ref(data.arg), ref(data.cond), data.addr.arg,
                    data.addr.offset);
             SIMJIT_MATCH (StepKind::Ternarylogic)
                 wr("a=%%%u b=%%%u c=%%%u fn=%x", ref(data.a), ref(data.b), ref(data.c), data.fun);
             SIMJIT_MATCH (StepKind::VecConst) return;
+            SIMJIT_MATCH (StepKind::FunnelShift)
+                wr("left=%%%u right=%%%u amount=%%%u kind=%s", ref(data.left), ref(data.right), ref(data.amount),
+                   show_funnel_shift_kind(data.kind));
             SIMJIT_MATCH (StepKind::VecPermute)
                 wr("arg=%%%u permute_idxs=%%%u is_bit=%s", ref(data.arg), ref(data.permute_idxs),
                    data.is_bit ? "true" : "false");
             SIMJIT_MATCH (StepKind::ScalarPermute)
                 wr("arg=%%%u permute_idxs=%llx is_bit=%s", ref(data.arg), (unsigned long long)data.permute,
                    data.is_bit ? "true" : "false");
-            SIMJIT_MATCH (StepKind::StoreSum128) wr("dst=%zu", data.dst);
+            SIMJIT_MATCH (StepKind::VecExtract) wr("arg=%%%u lane=%u", ref(data.arg), data.lane);
             SIMJIT_MATCH (StepKind::FMA)
                 wr("kind=%s x1=%%%u x2=%%%u x3=%%%u", show_fma_kind(data.kind), ref(data.x1), ref(data.x2),
                    ref(data.x3));
@@ -558,6 +617,11 @@ static ArchTraits get_arch_traits(Arch arch) {
         return traits;
     }
     messed_up("unsupported arch %x", (unsigned)arch);
+}
+
+// x86 funnel shifts take the count modulo 64 regardless of element width, so i64 needs no count fixup
+static bool vec_funnel_needs_count_mask(Arch arch, VecDataType vdtype) {
+    return !(is_x86_arch(arch) && vdtype.elem == VecElemType::I64);
 }
 
 namespace {
@@ -686,6 +750,7 @@ private:
         case hir::StepKind::Const:
         case hir::StepKind::LoadSplat: return true;
         case hir::StepKind::ArithBinary:
+        case hir::StepKind::I128Div:
         case hir::StepKind::ArithUnary:
         case hir::StepKind::Select:
         case hir::StepKind::Compare:
@@ -705,7 +770,7 @@ private:
         switch (node->step->kind) {
         case hir::StepKind::AccArithBinary:
         case hir::StepKind::AccPredicateBinary:
-        case hir::StepKind::AccSum128:
+        case hir::StepKind::AccI128:
         case hir::StepKind::Countif: return true;
         case hir::StepKind::CheckedOp: return true;
         default: return false;
@@ -756,6 +821,45 @@ struct MirConstructState {
     ArchTraits arch_traits;
 
     MirConstructState() = delete;
+    // Deinterleave lane pairs of one argument under construction; lanes match on
+    // (offset, dtype, kind, lane_count) and fill their own slot.
+    struct InterleavePairDraft {
+        size_t offset{};
+        DataType dtype{};
+        LoadStoreKind kind{};
+        uint8_t lane_count = 0;
+        bool store = false;
+        Step *even = nullptr;
+        Step *odd = nullptr;
+    };
+    std::vector<std::vector<InterleavePairDraft>> interleave_pairs{};
+
+    void collect_interleave_lane(Step *lane) {
+        const auto &data = lane->step_data<StepKind::LoadDeinterleave>();
+        collect_interleave_pair(data.addr.arg, data.addr.offset, lane->dtype, data.kind, data.lane_count, false,
+                                data.lane == 0 ? lane : nullptr, data.lane == 1 ? lane : nullptr);
+    }
+
+    void collect_interleave_store(Step *root) {
+        const auto &data = root->step_data<StepKind::StoreInterleave>();
+        collect_interleave_pair(data.dst.arg, data.dst.offset, root->dtype, data.kind, 2, true, data.even, data.odd);
+    }
+
+    void collect_interleave_pair(ArgumentIdx arg, size_t offset, DataType dtype, LoadStoreKind kind, uint8_t lane_count,
+                                 bool store, Step *even, Step *odd) {
+        if (arg >= interleave_pairs.size()) { interleave_pairs.resize(arg + 1); }
+        auto &pairs = interleave_pairs[arg];
+        for (InterleavePairDraft &pair : pairs) {
+            if (pair.offset != offset || pair.dtype != dtype || pair.kind != kind || pair.lane_count != lane_count) {
+                continue;
+            }
+            if (pair.even == nullptr && even != nullptr) { pair.even = even; }
+            if (pair.odd == nullptr && odd != nullptr) { pair.odd = odd; }
+            return;
+        }
+        pairs.push_back(InterleavePairDraft{offset, dtype, kind, lane_count, store, even, odd});
+    }
+
     explicit MirConstructState(Context *ctx) : sm(ctx->arena), arch_traits(get_arch_traits(ctx->arch)) {}
 
     void count_vectorizer_node_refs_rec(const vect::Node *node, ArenaBitmap &visited) noexcept {
@@ -862,6 +966,35 @@ struct MirConstructState {
         return sm.vec_narrow_combine({low, high}, dtype);
     }
 
+    Step *mulhi_u64(Step *left, Step *right) {
+        DataType dtype = left->dtype;
+        invariant_same_type(left, right);
+        Step *mask32 = make_const(ConstData::u64(0xffffffffull), dtype);
+        Step *left_lo = sm.arith_bin({left, mask32, ArithBinaryOp::And}, dtype);
+        Step *left_hi = sm.arith_bin({left, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+        Step *right_lo = sm.arith_bin({right, mask32, ArithBinaryOp::And}, dtype);
+        Step *right_hi = sm.arith_bin({right, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+
+        Step *x0y0 = sm.arith_bin({left_lo, right_lo, ArithBinaryOp::Mul64ZE}, dtype);
+        Step *x0y0_hi = sm.arith_bin({x0y0, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+        Step *x0y1 = sm.arith_bin({left_lo, right_hi, ArithBinaryOp::Mul64ZE}, dtype);
+        Step *x1y0 = sm.arith_bin({left_hi, right_lo, ArithBinaryOp::Mul64ZE}, dtype);
+        Step *x1y1 = sm.arith_bin({left_hi, right_hi, ArithBinaryOp::Mul64ZE}, dtype);
+
+        Step *temp = sm.arith_bin({x1y0, x0y0_hi, ArithBinaryOp::Add}, dtype);
+        Step *temp_lo = sm.arith_bin({temp, mask32, ArithBinaryOp::And}, dtype);
+        Step *temp_hi = sm.arith_bin({temp, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+        Step *carry = sm.arith_bin({temp_lo, x0y1, ArithBinaryOp::Add}, dtype);
+        Step *carry_hi = sm.arith_bin({carry, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+
+        Step *sum = sm.arith_bin({x1y1, temp_hi, ArithBinaryOp::Add}, dtype);
+        return sm.arith_bin({sum, carry_hi, ArithBinaryOp::Add}, dtype);
+    }
+
+    Step *mulhi_u64(Step *left, uint64_t right) {
+        return mulhi_u64(left, make_const(ConstData::u64(right), left->dtype));
+    }
+
 #if SIMJIT_USE_LIBDIVIDE
     Step *mulhi_u16_part(Step *left32, uint16_t magic) {
         VecDataType wide_dtype = left32->dtype.as_vec();
@@ -893,31 +1026,6 @@ struct MirConstructState {
         return make_narrow_combine(mulhi_u32_part(low, magic), mulhi_u32_part(high, magic), dtype);
     }
 
-    Step *mulhi_u64(Step *left, uint64_t magic) {
-        VecDataType dtype = left->dtype.as_vec();
-        Step *mask32 = make_const(ConstData::u64(0xffffffffull), dtype);
-        Step *right_lo = make_const(ConstData::u64(magic & 0xffffffffull), dtype);
-        Step *right_hi = make_const(ConstData::u64(magic >> 32), dtype);
-
-        Step *left_lo = sm.arith_bin({left, mask32, ArithBinaryOp::And}, dtype);
-        Step *left_hi = sm.arith_bin({left, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
-
-        Step *x0y0 = sm.arith_bin({left_lo, right_lo, ArithBinaryOp::Mul64ZE}, dtype);
-        Step *x0y0_hi = sm.arith_bin({x0y0, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
-        Step *x0y1 = sm.arith_bin({left_lo, right_hi, ArithBinaryOp::Mul64ZE}, dtype);
-        Step *x1y0 = sm.arith_bin({left_hi, right_lo, ArithBinaryOp::Mul64ZE}, dtype);
-        Step *x1y1 = sm.arith_bin({left_hi, right_hi, ArithBinaryOp::Mul64ZE}, dtype);
-
-        Step *temp = sm.arith_bin({x1y0, x0y0_hi, ArithBinaryOp::Add}, dtype);
-        Step *temp_lo = sm.arith_bin({temp, mask32, ArithBinaryOp::And}, dtype);
-        Step *temp_hi = sm.arith_bin({temp, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
-        Step *carry = sm.arith_bin({temp_lo, x0y1, ArithBinaryOp::Add}, dtype);
-        Step *carry_hi = sm.arith_bin({carry, make_const(32, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
-
-        Step *sum = sm.arith_bin({x1y1, temp_hi, ArithBinaryOp::Add}, dtype);
-        return sm.arith_bin({sum, carry_hi, ArithBinaryOp::Add}, dtype);
-    }
-
     Step *udiv_const_peephole(Step *left, uint64_t rhs) {
         VecDataType dtype = left->dtype.as_vec();
         switch (dtype.to_scalar()) {
@@ -931,7 +1039,8 @@ struct MirConstructState {
                 Step *sub = sm.arith_bin({left, q, ArithBinaryOp::Sub}, dtype);
                 Step *half = sm.arith_bin({sub, make_const(1, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
                 Step *t = sm.arith_bin({half, q, ArithBinaryOp::Add}, dtype);
-                return sm.arith_bin({t, make_const(div.more & 0x0f, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
+                return sm.arith_bin({t, make_const(div.more & uint8_t(0x0f), dtype), ArithBinaryOp::ShiftRightLogical},
+                                    dtype);
             }
             return sm.arith_bin({q, make_const(div.more, dtype), ArithBinaryOp::ShiftRightLogical}, dtype);
         }
@@ -1278,36 +1387,107 @@ struct MirConstructState {
         epilogue_roots.push_back(sm.agg_result({result, arg.idx}, dt));
     }
 
+    struct I128AggState {
+        Step *low;
+        Step *high;
+    };
+
+    ArithBinaryOp i128_agg_op(const AccGroup &group) {
+        SIMJIT_ASSERT(group.kind == AccKind::I128);
+        return group.agg_expr->step_data<hir::StepKind::AccI128>().op;
+    }
+
+    I128AggState i128_agg_fold(ArithBinaryOp op, I128AggState acc, I128AggState value, DataType dtype) {
+        if (op == ArithBinaryOp::AndNot) { op = ArithBinaryOp::And; }
+        return i128_agg_combine(op, acc, value, dtype);
+    }
+
+    I128AggState i128_agg_fold_values(ArithBinaryOp op, std::vector<I128AggState> values) {
+        SIMJIT_ASSERT(!values.empty());
+        size_t active = values.size();
+        while (active > 1) {
+            size_t output = 0;
+            for (size_t input = 0; input + 1 < active; input += 2) {
+                values[output++] = i128_agg_fold(op, values[input], values[input + 1], ScalarDataType::I64);
+            }
+            if (active % 2 != 0) { values[output++] = values[active - 1]; }
+            active = output;
+        }
+        return values[0];
+    }
+
+    void gen_i128_add_result(const AccGroup &group) {
+        Step *hi = nullptr;
+        if (group.main_count() != 0) {
+            VecDataType vdtype = vect_result->acc_dtypes[group.hir_idx].as_vec();
+            hi = fold_arith_accs(group, group.main_count(), 1, vdtype, ArithBinaryOp::Add);
+            hi = sm.vec_reduce({hi, ArithBinaryOp::Add}, ScalarDataType::I64);
+        }
+        Step *tmp = sm.acc_load(group.remainder(1), ScalarDataType::I64);
+        if (hi != nullptr) {
+            hi = sm.arith_bin({hi, tmp, ArithBinaryOp::Add}, ScalarDataType::I64);
+        } else {
+            hi = tmp;
+        }
+        Step *zero = make_const(0, ScalarDataType::I64);
+        std::vector<I128AggState> low_values;
+        for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
+            Step *low = sm.acc_load(group.main(copy, 0), vect_result->acc_dtypes[group.hir_idx]);
+            VecDataType vdtype = low->dtype.as_vec();
+            for (size_t lane = 0; lane < vdtype.nelems(); ++lane) {
+                Step *lane_low = sm.vec_extract({low, static_cast<uint8_t>(lane)}, ScalarDataType::I64);
+                low_values.push_back({lane_low, zero});
+            }
+        }
+        Step *remainder_low = sm.acc_load(group.remainder(0), ScalarDataType::I64);
+        low_values.push_back({remainder_low, zero});
+        I128AggState result = i128_agg_fold_values(ArithBinaryOp::Add, std::move(low_values));
+        result.high = sm.arith_bin({result.high, hi, ArithBinaryOp::Add}, ScalarDataType::I64);
+        epilogue_roots.push_back(sm.agg_result({result.low, group.dst_arg, 0}, ScalarDataType::I64));
+        epilogue_roots.push_back(sm.agg_result({result.high, group.dst_arg, 8}, ScalarDataType::I64));
+    }
+
+    void gen_i128_generic_result(const AccGroup &group, ArithBinaryOp op) {
+        std::vector<I128AggState> values;
+        for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
+            Step *low = sm.acc_load(group.main(copy, 0), vect_result->acc_dtypes[group.hir_idx]);
+            Step *high = sm.acc_load(group.main(copy, 1), vect_result->acc_dtypes[group.hir_idx]);
+            VecDataType vdtype = low->dtype.as_vec();
+            SIMJIT_ASSERT(high->dtype == low->dtype);
+            for (size_t lane = 0; lane < vdtype.nelems(); ++lane) {
+                values.push_back({sm.vec_extract({low, static_cast<uint8_t>(lane)}, ScalarDataType::I64),
+                                  sm.vec_extract({high, static_cast<uint8_t>(lane)}, ScalarDataType::I64)});
+            }
+        }
+        values.push_back({sm.acc_load(group.remainder(0), ScalarDataType::I64),
+                          sm.acc_load(group.remainder(1), ScalarDataType::I64)});
+        constexpr size_t max_i128_product_epilogue_values = 2;
+        if (op == ArithBinaryOp::Mul && values.size() > max_i128_product_epilogue_values) {
+            simjit_exception(ErrorModule::Vectorizer, ErrorKind::VectorizationFailed, ErrorSubKind::LimitExceeded,
+                             "i128 product aggregate requires %zu epilogue values (limit %zu)", values.size(),
+                             max_i128_product_epilogue_values);
+        }
+        I128AggState result = i128_agg_fold_values(op, std::move(values));
+        epilogue_roots.push_back(sm.agg_result({result.low, group.dst_arg, 0}, ScalarDataType::I64));
+        epilogue_roots.push_back(sm.agg_result({result.high, group.dst_arg, 8}, ScalarDataType::I64));
+    }
+
+    void gen_i128_agg_result(const AccGroup &group) {
+        ArithBinaryOp op = i128_agg_op(group);
+        if (op == ArithBinaryOp::Add) {
+            gen_i128_add_result(group);
+            return;
+        }
+        gen_i128_generic_result(group, op);
+    }
+
     // This functions is used to construct code to output aggregate results. Since we might have several instances that
     // belong to one aggregate due to unrolling and remaineder code, we 'collapse' them first.
     void gen_agg_results() {
         for (const AccGroup &group : acc_groups) {
             const hir::Step *agg_expr = group.agg_expr;
-            if (group.kind == AccKind::Sum128) {
-                Step *hi = nullptr;
-                if (group.main_count() != 0) {
-                    VecDataType vdtype = vect_result->acc_dtypes[group.hir_idx].as_vec();
-                    hi = fold_arith_accs(group, group.main_count(), 1, vdtype, ArithBinaryOp::Add);
-                    hi = sm.vec_reduce({hi, ArithBinaryOp::Add}, ScalarDataType::I64);
-                }
-                Step *tmp = sm.acc_load(group.remainder(1), ScalarDataType::I64);
-                if (hi != nullptr) {
-                    hi = sm.arith_bin({hi, tmp, ArithBinaryOp::Add}, ScalarDataType::I64);
-                } else {
-                    hi = tmp;
-                }
-                std::vector<Step *> all_low{};
-                for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
-                    Step *s = sm.acc_load(group.main(copy, 0), vect_result->acc_dtypes[group.hir_idx]);
-                    all_low.push_back(s);
-                }
-                Step *s = sm.acc_load(group.remainder(0), ScalarDataType::I64);
-                all_low.push_back(s);
-                MemoryArena *arena = hir->ctx->arena;
-                ArenaArray<Step *> all_low_arr = arena->copy_array<Step *>(all_low);
-
-                Step *combined = sm.sum128({all_low_arr, hi, group.dst_arg}, ScalarDataType::I128);
-                epilogue_roots.push_back(combined);
+            if (group.kind == AccKind::I128) {
+                gen_i128_agg_result(group);
             } else if (agg_expr == nullptr) {
             } else if (agg_expr->is(hir::StepKind::AccArithBinary)) {
                 ArithBinaryOp op = agg_expr->step_data<hir::StepKind::AccArithBinary>().op;
@@ -1323,7 +1503,7 @@ struct MirConstructState {
                 auto maybe_arith_op = arith_op_from_predicate(op);
                 if (!maybe_arith_op) messed_up("got invalid op %s in agg", show_predicate_binary_op(op));
                 collapse_predicate_accs(group, op, *maybe_arith_op);
-            } else if (agg_expr->is(hir::StepKind::Pack)) {
+            } else if (agg_expr->is(hir::StepKind::Pack) || agg_expr->is(hir::StepKind::Pack128)) {
                 SIMJIT_ASSERT(group.main_count() == 0);
                 Step *acc = sm.acc_load(group.remainder(), ScalarDataType::I64);
                 epilogue_roots.push_back(sm.agg_result({acc, group.dst_arg}, ScalarDataType::I64));
@@ -1372,6 +1552,8 @@ struct MirConstructState {
     }
 
     Step *agg_acc_init_value(DataType target_dtype, const hir::Step *agg_expr) {
+        // A null expression is valid only for non-aggregation accumulator kinds.
+        // cppcheck-suppress ctunullpointer
         if (agg_expr->is(hir::StepKind::Countif)) { return make_const(0, target_dtype); }
         if (agg_expr->is(hir::StepKind::AccArithBinary)) {
             ArithBinaryOp op = agg_expr->step_data<hir::StepKind::AccArithBinary>().op;
@@ -1436,10 +1618,103 @@ struct MirConstructState {
         return step;
     }
 
+    I128AggState i128_agg_init(ArithBinaryOp op, DataType dtype) {
+        switch (op) {
+        case ArithBinaryOp::Add: return {make_const(0, dtype), make_const(0, dtype)};
+        case ArithBinaryOp::Mul: return {make_const(1, dtype), make_const(0, dtype)};
+        case ArithBinaryOp::Min:
+            return {make_const(scalar_dtype_umax(ScalarDataType::I64), dtype),
+                    make_const(scalar_dtype_max(ScalarDataType::I64), dtype)};
+        case ArithBinaryOp::Max:
+            return {make_const(0, dtype), make_const(scalar_dtype_min(ScalarDataType::I64), dtype)};
+        case ArithBinaryOp::UMin:
+        case ArithBinaryOp::And:
+        case ArithBinaryOp::AndNot:
+            return {make_const(scalar_dtype_umax(ScalarDataType::I64), dtype),
+                    make_const(scalar_dtype_umax(ScalarDataType::I64), dtype)};
+        case ArithBinaryOp::UMax:
+        case ArithBinaryOp::Or:
+        case ArithBinaryOp::Xor: return {make_const(0, dtype), make_const(0, dtype)};
+        default: messed_up("i128 aggregate initialization does not support %s", show_arith_binary_op(op));
+        }
+        SIMJIT_UNREACHABLE();
+    }
+
+    Step *i128_agg_predicate_bin(Step *left, Step *right, PredicateBinaryOp op, DataType dtype) {
+        if (dtype.is_vec()) { return sm.mask_bin({left, right, op}, dtype.as_vec().mask()); }
+        auto arith_op = arith_op_from_predicate(op);
+        SIMJIT_ASSERT(arith_op);
+        return sm.arith_bin({left, right, *arith_op}, ScalarDataType::I8);
+    }
+
+    Step *i128_agg_less(I128AggState left, I128AggState right, bool is_unsigned, DataType dtype) {
+        DataType predicate_dtype = dtype.is_vec() ? DataType(dtype.as_vec().mask()) : DataType(ScalarDataType::I1);
+        Step *high_less = sm.cmp({left.high, right.high, CmpOp::Less, is_unsigned}, predicate_dtype);
+        Step *high_equal = sm.cmp({left.high, right.high, CmpOp::Equal}, predicate_dtype);
+        Step *low_less = sm.cmp({left.low, right.low, CmpOp::Less, true}, predicate_dtype);
+        return i128_agg_predicate_bin(high_less,
+                                      i128_agg_predicate_bin(high_equal, low_less, PredicateBinaryOp::And, dtype),
+                                      PredicateBinaryOp::Or, dtype);
+    }
+
+    I128AggState i128_agg_combine(ArithBinaryOp op, I128AggState acc, I128AggState arg, DataType dtype) {
+        switch (op) {
+        case ArithBinaryOp::Add: {
+            Step *low = sm.arith_bin({arg.low, acc.low, ArithBinaryOp::Add}, dtype);
+            Step *hi = sm.arith_bin({arg.high, acc.high, ArithBinaryOp::Add}, dtype);
+            Step *overflow = dtype.is_vec() ? sm.cmp({low, acc.low, CmpOp::Less, true}, dtype.as_vec().mask())
+                                            : sm.cmp({low, acc.low, CmpOp::Less, true}, ScalarDataType::I1);
+            Step *added = sm.arith_bin({hi, make_const(1, dtype), ArithBinaryOp::Add}, dtype);
+            hi = sm.select({overflow, added, hi}, dtype);
+            return {low, hi};
+        }
+        case ArithBinaryOp::Mul: {
+            Step *low = sm.arith_bin({arg.low, acc.low, ArithBinaryOp::Mul}, dtype);
+            Step *high = mulhi_u64(arg.low, acc.low);
+            high = sm.arith_bin(
+                {high, sm.arith_bin({arg.low, acc.high, ArithBinaryOp::Mul}, dtype), ArithBinaryOp::Add}, dtype);
+            high = sm.arith_bin(
+                {high, sm.arith_bin({arg.high, acc.low, ArithBinaryOp::Mul}, dtype), ArithBinaryOp::Add}, dtype);
+            return {low, high};
+        }
+        case ArithBinaryOp::Min:
+        case ArithBinaryOp::Max:
+        case ArithBinaryOp::UMin:
+        case ArithBinaryOp::UMax: {
+            bool is_unsigned = op == ArithBinaryOp::UMin || op == ArithBinaryOp::UMax;
+            Step *take_arg = i128_agg_less(arg, acc, is_unsigned, dtype);
+            if (op == ArithBinaryOp::Max || op == ArithBinaryOp::UMax) {
+                return {sm.select({take_arg, acc.low, arg.low}, dtype),
+                        sm.select({take_arg, acc.high, arg.high}, dtype)};
+            }
+            return {sm.select({take_arg, arg.low, acc.low}, dtype), sm.select({take_arg, arg.high, acc.high}, dtype)};
+        }
+        case ArithBinaryOp::And:
+        case ArithBinaryOp::Or:
+        case ArithBinaryOp::Xor:
+            return {sm.arith_bin({arg.low, acc.low, op}, dtype), sm.arith_bin({arg.high, acc.high, op}, dtype)};
+        case ArithBinaryOp::AndNot:
+            return {sm.arith_bin({arg.low, acc.low, ArithBinaryOp::AndNot}, dtype),
+                    sm.arith_bin({arg.high, acc.high, ArithBinaryOp::AndNot}, dtype)};
+        default: messed_up("i128 aggregate combination does not support %s", show_arith_binary_op(op));
+        }
+        SIMJIT_UNREACHABLE();
+    }
+
+    I128AggState i128_agg_transition(ArithBinaryOp op, I128AggState acc, I128AggState value, Step *cond,
+                                     DataType dtype) {
+        I128AggState result = i128_agg_combine(op, acc, value, dtype);
+        if (cond != nullptr) {
+            result.low = sm.select({cond, result.low, acc.low}, dtype);
+            result.high = sm.select({cond, result.high, acc.high}, dtype);
+        }
+        return result;
+    }
+
     Step *acc_init_value(AccKind kind, DataType dtype, const hir::Step *step) {
         switch (kind) {
         case AccKind::Agg: return agg_acc_init_value(dtype, step);
-        case AccKind::Sum128:
+        case AccKind::I128: messed_up("i128 aggregate initialization must use i128_agg_init");
         case AccKind::Overflow:
         case AccKind::Pack: return make_const(0, dtype);
         case AccKind::OverflowMul: {
@@ -1463,9 +1738,23 @@ struct MirConstructState {
 
     void gen_acc_inits() {
         for (const AccGroup &group : acc_groups) {
-            ScalarDataType remainder_dtype = group.kind == AccKind::Sum128           ? ScalarDataType::I64
-                                             : group.dst_dtype == ScalarDataType::I1 ? ScalarDataType::I8
-                                                                                     : group.dst_dtype;
+            if (group.kind == AccKind::I128) {
+                ArithBinaryOp op = i128_agg_op(group);
+                I128AggState remainder_init = i128_agg_init(op, ScalarDataType::I64);
+                prologue_roots.push_back(sm.acc_store({group.remainder(0), remainder_init.low}, ScalarDataType::I64));
+                prologue_roots.push_back(sm.acc_store({group.remainder(1), remainder_init.high}, ScalarDataType::I64));
+                if (group.main_count() != 0) {
+                    DataType dtype = vect_result->acc_dtypes[group.hir_idx];
+                    I128AggState init = i128_agg_init(op, dtype);
+                    for (uint32_t copy = 0; copy < group.main_count(); ++copy) {
+                        prologue_roots.push_back(sm.acc_store({group.main(copy, 0), init.low}, dtype));
+                        prologue_roots.push_back(sm.acc_store({group.main(copy, 1), init.high}, dtype));
+                    }
+                }
+                continue;
+            }
+            ScalarDataType remainder_dtype =
+                group.dst_dtype == ScalarDataType::I1 ? ScalarDataType::I8 : group.dst_dtype;
             Step *remainder_init = acc_init_value(group.kind, remainder_dtype, group.agg_expr);
             for (uint32_t slot = 0; slot < group.slots_per_copy; ++slot) {
                 prologue_roots.push_back(sm.acc_store({group.remainder(slot), remainder_init}, remainder_dtype));
@@ -1610,6 +1899,27 @@ struct MirConstructState {
         return sm.arith_bin({rhs_zero, overflow, ArithBinaryOp::Or}, ScalarDataType::I8);
     }
 
+    Step *scalar_i128_division_invalid_condition(Step *left_low, Step *left_high, Step *right_low, Step *right_high,
+                                                 ArithBinaryOp op) {
+        Step *zero = make_const(0, ScalarDataType::I64);
+        Step *rhs_low_zero = sm.cmp({right_low, zero, CmpOp::Equal}, ScalarDataType::I1);
+        Step *rhs_high_zero = sm.cmp({right_high, zero, CmpOp::Equal}, ScalarDataType::I1);
+        Step *invalid = sm.arith_bin({rhs_low_zero, rhs_high_zero, ArithBinaryOp::And}, ScalarDataType::I8);
+        if (!is_signed_division_op(op)) { return invalid; }
+
+        Step *lhs_low_zero = sm.cmp({left_low, zero, CmpOp::Equal}, ScalarDataType::I1);
+        Step *lhs_high_min =
+            sm.cmp({left_high, make_const(std::numeric_limits<int64_t>::min(), ScalarDataType::I64), CmpOp::Equal},
+                   ScalarDataType::I1);
+        Step *rhs_low_ones = sm.cmp({right_low, make_const(-1, ScalarDataType::I64), CmpOp::Equal}, ScalarDataType::I1);
+        Step *rhs_high_ones =
+            sm.cmp({right_high, make_const(-1, ScalarDataType::I64), CmpOp::Equal}, ScalarDataType::I1);
+        Step *lhs_min = sm.arith_bin({lhs_low_zero, lhs_high_min, ArithBinaryOp::And}, ScalarDataType::I8);
+        Step *rhs_minus_one = sm.arith_bin({rhs_low_ones, rhs_high_ones, ArithBinaryOp::And}, ScalarDataType::I8);
+        Step *overflow = sm.arith_bin({lhs_min, rhs_minus_one, ArithBinaryOp::And}, ScalarDataType::I8);
+        return sm.arith_bin({invalid, overflow, ArithBinaryOp::Or}, ScalarDataType::I8);
+    }
+
     Step *vec_division_invalid_condition(Step *left, Step *right, ArithBinaryOp op) {
         VecDataType dtype = left->dtype.as_vec();
         MaskDataType mdtype = dtype.mask();
@@ -1632,13 +1942,15 @@ struct MirConstructState {
         return data.retag(right->dtype).as_unsigned() == 0;
     }
 
-    void add_scalar_division_overflow_check(Step *invalid) {
+    void add_scalar_overflow_check(Step *invalid) {
         AccId acc = scalar_safety_check_acc();
         Step *load = sm.acc_load(acc, ScalarDataType::I8);
         Step *updated = sm.arith_bin({load, invalid, ArithBinaryOp::Or}, ScalarDataType::I8);
         Step *check = sm.acc_store({acc, updated}, ScalarDataType::I8);
         remainder_roots.push_back(check);
     }
+
+    void add_scalar_division_overflow_check(Step *invalid) { add_scalar_overflow_check(invalid); }
 
     void add_vec_division_overflow_check(Step *invalid) {
         MaskDataType mdtype = invalid->dtype.as_mask();
@@ -1851,6 +2163,7 @@ struct MirConstructState {
         };
         auto push = [&](uint8_t value) {
             SIMJIT_ASSERT(stack_size < TernarylogicRpn::MaxOps);
+            // cppcheck-suppress arrayIndexOutOfBoundsCond
             stack[stack_size++] = value;
         };
 
@@ -1879,9 +2192,9 @@ struct MirConstructState {
                 break;
             }
             case TernarylogicRpnOp::AndNot: {
-                uint8_t rhs = pop();
-                uint8_t lhs = pop();
-                push((uint8_t)(~lhs & rhs));
+                unsigned rhs = pop();
+                unsigned lhs = pop();
+                push(uint8_t(~lhs & rhs));
                 break;
             }
             }
@@ -2168,6 +2481,20 @@ struct MirConstructState {
                 main_loop_roots.push_back(root);
                 return;
             }
+            SIMJIT_MATCH (hir::StepKind::StoreInterleave) {
+                ArgumentAddress addr{data.dst, ctx.rows.row_offset()};
+                Step *even = ref_nth(0);
+                Step *odd = ref_nth(1);
+                invariant_same_type(node, even);
+                invariant_same_type(node, odd);
+
+                Step *cond = data.cond != nullptr ? ref_nth(2) : nullptr;
+                if (cond != nullptr) invariant_vec_mask(node, cond);
+                Step *root = sm.store_interleave({even, odd, addr, data.kind, cond}, node->dtype);
+                collect_interleave_store(root);
+                main_loop_roots.push_back(root);
+                return;
+            }
             SIMJIT_MATCH (hir::StepKind::AccArithBinary) {
                 AccId acc_idx = acc_groups[data.acc].alloc_main(ctx.remap);
                 Step *acc = sm.acc_load(acc_idx, node->dtype);
@@ -2267,25 +2594,32 @@ struct MirConstructState {
                 main_loop_roots.push_back(sm.pack({data.dst, arg, cond, acc}, node->dtype));
                 return;
             }
-            SIMJIT_MATCH (hir::StepKind::AccSum128) {
+            SIMJIT_MATCH (hir::StepKind::Pack128) {
+                Step *low = ref_nth(0);
+                Step *high = ref_nth(1);
+                Step *cond = ref_nth(2);
+                invariant_same_vec_type(low, high);
+                invariant_vec_mask(node, cond);
+                auto acc = acc_groups[data.dst_size_acc].singleton();
+                main_loop_roots.push_back(sm.pack128({data.dst, low, high, cond, acc}, node->dtype));
+                return;
+            }
+            SIMJIT_MATCH (hir::StepKind::AccI128) {
                 VecDataType vdtype = node->dtype.as_vec();
-                MaskDataType mdtype = vdtype.mask();
                 auto [low_acc, high_acc] = acc_groups[data.acc].alloc_main_pair(ctx.remap);
-                Step *acc_lo = sm.acc_load(low_acc, vdtype);
-                Step *acc_hi = sm.acc_load(high_acc, vdtype);
-                Step *lo = ref_arg();
-                Step *hi = sm.arith_bin({lo, make_const(63, vdtype), ArithBinaryOp::ShiftRightArith}, vdtype);
-                Step *new_lo = sm.arith_bin({lo, acc_lo, ArithBinaryOp::Add}, vdtype);
-                Step *new_hi = sm.arith_bin({hi, acc_hi, ArithBinaryOp::Add}, vdtype);
-                Step *overflow = sm.cmp({new_lo, acc_lo, CmpOp::Less, true}, mdtype);
-                Step *added = sm.arith_bin({new_hi, make_const(1, vdtype), ArithBinaryOp::Add}, vdtype);
-                new_hi = sm.select({overflow, added, new_hi}, vdtype);
-                main_loop_roots.push_back(sm.acc_store({high_acc, new_hi}, vdtype));
-                main_loop_roots.push_back(sm.acc_store({low_acc, new_lo}, vdtype));
+                I128AggState acc{sm.acc_load(low_acc, vdtype), sm.acc_load(high_acc, vdtype)};
+                Step *low = ref_nth(0);
+                Step *high = ref_nth(1);
+                invariant_same_vec_type(low, high);
+                I128AggState updated =
+                    i128_agg_transition(data.op, acc, {low, high}, data.cond == nullptr ? nullptr : ref_nth(2), vdtype);
+                main_loop_roots.push_back(sm.acc_store({high_acc, updated.high}, vdtype));
+                main_loop_roots.push_back(sm.acc_store({low_acc, updated.low}, vdtype));
                 return;
             }
         case hir::StepKind::Const:
         case hir::StepKind::ArithBinary:
+        case hir::StepKind::I128Div:
         case hir::StepKind::CheckedOp:
         case hir::StepKind::ArithUnary:
         case hir::StepKind::Compare:
@@ -2299,8 +2633,10 @@ struct MirConstructState {
         case hir::StepKind::Permute:
         case hir::StepKind::Fpclass:
         case hir::StepKind::Load:
+        case hir::StepKind::LoadDeinterleave:
         case hir::StepKind::Gather:
-        case hir::StepKind::LoadSplat: SIMJIT_UNREACHABLE();
+        case hir::StepKind::LoadSplat:
+        case hir::StepKind::FunnelShift: SIMJIT_UNREACHABLE();
         }
 #undef ref_arg
 #undef ref_left
@@ -2322,11 +2658,14 @@ struct MirConstructState {
             // Root steps
         case hir::StepKind::Store:
         case hir::StepKind::Pack:
+        case hir::StepKind::Pack128:
         case hir::StepKind::Scatter:
         case hir::StepKind::AccArithBinary:
         case hir::StepKind::AccPredicateBinary:
-        case hir::StepKind::AccSum128:
+        case hir::StepKind::AccI128:
         case hir::StepKind::Countif:
+        case hir::StepKind::StoreInterleave:
+        case hir::StepKind::I128Div:
             SIMJIT_UNREACHABLE();
             SIMJIT_MATCH (hir::StepKind::Const) { return make_const(data, node->dtype); }
             SIMJIT_MATCH (hir::StepKind::CheckedOp) {
@@ -2335,22 +2674,18 @@ struct MirConstructState {
                 const vect::Node *mask_node = node->child_count == 2 ? node->children[1] : nullptr;
                 Step *active_mask = nullptr;
                 if (mask_node != nullptr) { active_mask = lower_vect(mask_node, ctx); }
-                if (operation->is(hir::StepKind::ArithBinary)) {
+                auto lower_binary = [&](ArithBinaryOp checked_op) {
+                    invariant(operation->is(hir::StepKind::ArithBinary));
                     invariant(op_node->is_step(hir::StepKind::ArithBinary));
                     const auto &op_data = operation->step_data<hir::StepKind::ArithBinary>();
-                    invariant(op_data.op == ArithBinaryOp::Add || op_data.op == ArithBinaryOp::Sub ||
-                              op_data.op == ArithBinaryOp::Mul || op_data.op == ArithBinaryOp::ShiftRightArith ||
-                              op_data.op == ArithBinaryOp::ShiftLeftLogical ||
-                              op_data.op == ArithBinaryOp::ShiftRightLogical ||
-                              op_data.op == ArithBinaryOp::RotateLeft || op_data.op == ArithBinaryOp::RotateRight ||
-                              is_division_op(op_data.op));
+                    invariant(op_data.op == checked_op);
                     invariant(op_data.flags == ArithBinaryOpFlags::No);
 
                     Step *left = lower_vect(op_node->left(), ctx);
                     Step *right = lower_vect(op_node->right(), ctx);
                     VecDataType vdtype = node->dtype.as_vec();
-                    if (is_division_op(op_data.op)) {
-                        Step *invalid = vec_division_invalid_condition(left, right, op_data.op);
+                    if (is_division_op(checked_op)) {
+                        Step *invalid = vec_division_invalid_condition(left, right, checked_op);
                         if (active_mask != nullptr) {
                             invalid =
                                 sm.mask_bin({invalid, active_mask, PredicateBinaryOp::And}, invalid->dtype.as_mask());
@@ -2360,19 +2695,33 @@ struct MirConstructState {
                         checked_steps.push_back(result);
                         return result;
                     }
-                    if (op_data.op == ArithBinaryOp::Mul &&
+                    if (checked_op == ArithBinaryOp::Mul &&
                         (vdtype.elem == VecElemType::I8 || vdtype.elem == VecElemType::I16)) {
                         Step *result = make_small_vec_mul_with_overflow_check(left, right, vdtype, active_mask);
                         checked_steps.push_back(result);
                         return result;
                     }
 
-                    Step *result = make_vec_arith_bin(left, right, op_data.op, vdtype);
-                    add_vec_binary_safety_check(left, right, result, op_data.op, active_mask);
+                    Step *result = make_vec_arith_bin(left, right, checked_op, vdtype);
+                    add_vec_binary_safety_check(left, right, result, checked_op, active_mask);
                     checked_steps.push_back(result);
                     return result;
-                }
-                if (operation->is(hir::StepKind::IntCast)) {
+                };
+                switch (data.kind) {
+                case hir::CheckedOpKind::Add: return lower_binary(ArithBinaryOp::Add);
+                case hir::CheckedOpKind::Sub: return lower_binary(ArithBinaryOp::Sub);
+                case hir::CheckedOpKind::Mul: return lower_binary(ArithBinaryOp::Mul);
+                case hir::CheckedOpKind::Div: return lower_binary(ArithBinaryOp::Div);
+                case hir::CheckedOpKind::UDiv: return lower_binary(ArithBinaryOp::UDiv);
+                case hir::CheckedOpKind::Mod: return lower_binary(ArithBinaryOp::Mod);
+                case hir::CheckedOpKind::UMod: return lower_binary(ArithBinaryOp::UMod);
+                case hir::CheckedOpKind::ShiftRightArith: return lower_binary(ArithBinaryOp::ShiftRightArith);
+                case hir::CheckedOpKind::ShiftRightLogical: return lower_binary(ArithBinaryOp::ShiftRightLogical);
+                case hir::CheckedOpKind::ShiftLeftLogical: return lower_binary(ArithBinaryOp::ShiftLeftLogical);
+                case hir::CheckedOpKind::RotateLeft: return lower_binary(ArithBinaryOp::RotateLeft);
+                case hir::CheckedOpKind::RotateRight: return lower_binary(ArithBinaryOp::RotateRight);
+                case hir::CheckedOpKind::Trunc: {
+                    invariant(operation->is(hir::StepKind::IntCast));
                     const auto &cast_data = operation->step_data<hir::StepKind::IntCast>();
                     invariant(cast_data.kind == IntCastKind::Trunc);
                     Step *result = lower_vect(op_node, ctx);
@@ -2388,15 +2737,75 @@ struct MirConstructState {
                     checked_steps.push_back(result);
                     return result;
                 }
-                if (operation->is(hir::StepKind::ArithUnary)) {
+                case hir::CheckedOpKind::Abs: {
+                    invariant(operation->is(hir::StepKind::ArithUnary));
                     const auto &op_data = operation->step_data<hir::StepKind::ArithUnary>();
+                    invariant(op_data.op == ArithUnaryOp::Abs);
                     Step *arg = lower_vect(op_node->arg(), ctx);
                     Step *result = lower_vect(op_node, ctx);
                     add_vec_unary_overflow_check(arg, op_data.op, active_mask);
                     checked_steps.push_back(result);
                     return result;
                 }
-                messed_up("Unsupported checked op step kind %s", hir::show_step_kind(operation->kind));
+                case hir::CheckedOpKind::Negate: {
+                    invariant(operation->is(hir::StepKind::ArithUnary));
+                    const auto &op_data = operation->step_data<hir::StepKind::ArithUnary>();
+                    invariant(op_data.op == ArithUnaryOp::Negate);
+                    Step *arg = lower_vect(op_node->arg(), ctx);
+                    Step *result = lower_vect(op_node, ctx);
+                    add_vec_unary_overflow_check(arg, op_data.op, active_mask);
+                    checked_steps.push_back(result);
+                    return result;
+                }
+                case hir::CheckedOpKind::I128Div:
+                case hir::CheckedOpKind::I128AddLow:
+                case hir::CheckedOpKind::I128AddHigh:
+                case hir::CheckedOpKind::I128SubLow:
+                case hir::CheckedOpKind::I128SubHigh:
+                case hir::CheckedOpKind::I128MulLow:
+                case hir::CheckedOpKind::I128MulHigh:
+                case hir::CheckedOpKind::I128SllLow:
+                case hir::CheckedOpKind::I128SllHigh:
+                case hir::CheckedOpKind::I128SrlLow:
+                case hir::CheckedOpKind::I128SrlHigh:
+                case hir::CheckedOpKind::I128SraLow:
+                case hir::CheckedOpKind::I128SraHigh:
+                case hir::CheckedOpKind::I128RotlLow:
+                case hir::CheckedOpKind::I128RotlHigh:
+                case hir::CheckedOpKind::I128RotrLow:
+                case hir::CheckedOpKind::I128RotrHigh:
+                case hir::CheckedOpKind::I128NegateLow:
+                case hir::CheckedOpKind::I128NegateHigh:
+                case hir::CheckedOpKind::I128AbsLow:
+                case hir::CheckedOpKind::I128AbsHigh:
+                case hir::CheckedOpKind::I128Trunc: messed_up("i128 checked operation reached vector lowering");
+                }
+                SIMJIT_UNREACHABLE();
+            }
+            SIMJIT_MATCH (hir::StepKind::FunnelShift) {
+                VecDataType vdtype = node->dtype.as_vec();
+                Step *left = ref_nth(0);
+                Step *right = ref_nth(1);
+                Step *amount = ref_nth(2);
+                invariant_same_vec_type(left, right);
+                invariant_same_vec_type(left, amount);
+                invariant_same_vec_type(node, left);
+                switch (vdtype.elem) {
+                case VecElemType::I16:
+                case VecElemType::I32:
+                case VecElemType::I64: break;
+                default: messed_up("Invalid funnel shift dtype %s", show_vec_dtype(vdtype));
+                }
+                if (amount->is(StepKind::Const)) {
+                    uint64_t normalized = amount->step_data<StepKind::Const>().retag(vdtype.to_scalar()).as_unsigned() %
+                                          vdtype.element_size_bits();
+                    if (normalized == 0) { return data.kind == FunnelShiftKind::Left ? left : right; }
+                    amount = make_const(normalized, vdtype);
+                } else if (vec_funnel_needs_count_mask(hir->ctx->arch, vdtype)) {
+                    amount = sm.arith_bin(
+                        {make_const(vdtype.element_size_bits() - 1, vdtype), amount, ArithBinaryOp::And}, vdtype);
+                }
+                return sm.funnel_shift({left, right, amount, data.kind}, vdtype);
             }
             SIMJIT_MATCH (hir::StepKind::ArithBinary) {
                 VecDataType vdtype = node->dtype.as_vec();
@@ -2410,15 +2819,14 @@ struct MirConstructState {
                     if (auto *it = binary_op_fma_peephole(node->dtype.as_vec(), node, ctx)) return it;
                 }
 
-                if (bool(hir->ctx->transformations & CodeTransformations::SmallArith) &&
-                    vdtype.elem == VecElemType::I8 && arch_traits.i8_gfni_shift &&
+                if (vdtype.elem == VecElemType::I8 && arch_traits.i8_gfni_shift &&
                     (data.op == ArithBinaryOp::RotateLeft || data.op == ArithBinaryOp::RotateRight ||
                      data.op == ArithBinaryOp::ShiftRightArith || data.op == ArithBinaryOp::ShiftLeftLogical ||
                      data.op == ArithBinaryOp::ShiftRightLogical)) {
                     if (auto *it = i8_shift_peephole(node, ctx)) return it;
                 }
                 Step *left = ref_left();
-                Step *right = nullptr;
+                Step *right = ref_right();
 #if SIMJIT_USE_LIBDIVIDE
                 if (bool(hir->ctx->transformations & CodeTransformations::ConstDiv) &&
                     data.right->is(hir::StepKind::Const) &&
@@ -2432,12 +2840,10 @@ struct MirConstructState {
 #endif
                 if (vdtype.is_int() && (data.op == ArithBinaryOp::Div || data.op == ArithBinaryOp::UDiv ||
                                         data.op == ArithBinaryOp::Mod || data.op == ArithBinaryOp::UMod)) {
-                    // Actually HIR already set scalar_only flag, but caller ignored it for some reason and still called
-                    // vectorizer
+                    // HIR already selected scalar-only policy, but caller ignored it and still called vectorization.
                     simjit_exception(ErrorModule::MIR, ErrorKind::Unsupported, ErrorSubKind::UnsupportedFeature,
                                      "vectorization is not supported for non-constant divisions");
                 }
-                if (right == nullptr) { right = ref_right(); }
                 invariant_same_vec_type(left, right);
                 invariant_same_vec_type(node, left);
                 invariant_imply(bool(data.flags & ArithBinaryOpFlags::ShiftWraparound),
@@ -2513,7 +2919,7 @@ struct MirConstructState {
                 case ArithUnaryOp::Tzcnt: result = make_tzcnt(arg, node->dtype); break;
                 case ArithUnaryOp::Lzcnt:
                     if ((vdtype.elem == VecElemType::I8 || vdtype.elem == VecElemType::I16) &&
-                        bool(hir->ctx->transformations & CodeTransformations::SmallArith) && !arch_traits.small_lzcnt) {
+                        !arch_traits.small_lzcnt) {
                         return lzcnt_i8_i16(arg);
                     }
                     [[fallthrough]];
@@ -2569,7 +2975,7 @@ struct MirConstructState {
             }
             SIMJIT_MATCH (hir::StepKind::LoadSplat) {
                 ArgumentAddress addr{data.idx, 0};
-                return sm.load_splat({addr, data.kind}, node->dtype);
+                return sm.load_splat({addr, data.kind, data.byte_offset}, node->dtype);
             }
             SIMJIT_MATCH (hir::StepKind::IntCast) {
                 Step *arg = ref_arg();
@@ -2617,6 +3023,12 @@ struct MirConstructState {
             SIMJIT_MATCH (hir::StepKind::Load) {
                 ArgumentAddress addr{data.idx, ctx.rows.row_offset()};
                 return sm.load({addr, data.kind}, node->dtype);
+            }
+            SIMJIT_MATCH (hir::StepKind::LoadDeinterleave) {
+                ArgumentAddress addr{data.idx, ctx.rows.row_offset()};
+                Step *lane = sm.load_deinterleave({addr, data.kind, data.lane_count, data.lane}, node->dtype);
+                collect_interleave_lane(lane);
+                return lane;
             }
             SIMJIT_MATCH (hir::StepKind::Gather) {
                 Step *idx = ref_arg();
@@ -2708,8 +3120,7 @@ struct MirConstructState {
     }
 
     Step *make_vec_arith_bin(Step *l, Step *r, ArithBinaryOp op, VecDataType dtype) {
-        if (dtype.elem == VecElemType::I8 && !arch_traits.i8_ops &&
-            bool(hir->ctx->transformations & CodeTransformations::SmallArith)) {
+        if (dtype.elem == VecElemType::I8 && !arch_traits.i8_ops) {
             if (op == ArithBinaryOp::Mul || op == ArithBinaryOp::ShiftRightArith ||
                 op == ArithBinaryOp::ShiftRightLogical || op == ArithBinaryOp::ShiftLeftLogical) {
                 return arith_binary_i8_i16_widen(l, r, dtype, op);
@@ -2840,6 +3251,13 @@ struct MirConstructState {
                 }
                 return remainder_roots.push_back(sm.store({{data.addr, 0}, ref(data.what), data.kind}, sdtype));
             }
+            SIMJIT_MATCH (hir::StepKind::StoreInterleave) {
+                Step *even = ref(data.even);
+                Step *odd = ref(data.odd);
+                Step *cond = data.cond != nullptr ? ref(data.cond) : nullptr;
+                return remainder_roots.push_back(
+                    sm.store_interleave({even, odd, {data.dst, 0}, data.kind, cond}, even->dtype));
+            }
             SIMJIT_MATCH (hir::StepKind::AccArithBinary) {
                 if (data.cond != nullptr) {
                     ScalarDataType dtype = sdtype;
@@ -2884,22 +3302,14 @@ struct MirConstructState {
                 Step *updated = sm.arith_bin({acc, count, data.op}, step->dtype);
                 return remainder_roots.push_back(sm.acc_store({acc_idx, updated}, step->dtype));
             }
-            SIMJIT_MATCH (hir::StepKind::AccSum128) {
+            SIMJIT_MATCH (hir::StepKind::AccI128) {
                 ScalarDataType dtype = ScalarDataType::I64;
                 auto [low_acc, high_acc] = acc_groups[data.acc].alloc_remainder_pair();
-                // TODO: This can be computed more efficiently using add with carry, right now it does the same as
-                // vector version
-                Step *acc_lo = sm.acc_load(low_acc, dtype);
-                Step *acc_hi = sm.acc_load(high_acc, dtype);
-                Step *lo = ref(data.arg);
-                Step *hi = sm.arith_bin({lo, make_const(63, dtype), ArithBinaryOp::ShiftRightArith}, dtype);
-                Step *new_lo = sm.arith_bin({lo, acc_lo, ArithBinaryOp::Add}, dtype);
-                Step *new_hi = sm.arith_bin({hi, acc_hi, ArithBinaryOp::Add}, dtype);
-                Step *overflow = sm.cmp({new_lo, acc_lo, CmpOp::Less, true}, ScalarDataType::I1);
-                Step *added = sm.arith_bin({new_hi, make_const(1, dtype), ArithBinaryOp::Add}, dtype);
-                new_hi = sm.select({overflow, added, new_hi}, dtype);
-                Step *store_lo = sm.acc_store({low_acc, new_lo}, dtype);
-                Step *store_hi = sm.acc_store({high_acc, new_hi}, dtype);
+                I128AggState acc{sm.acc_load(low_acc, dtype), sm.acc_load(high_acc, dtype)};
+                I128AggState updated = i128_agg_transition(data.op, acc, {ref(data.low), ref(data.high)},
+                                                           data.cond == nullptr ? nullptr : ref(data.cond), dtype);
+                Step *store_lo = sm.acc_store({low_acc, updated.low}, dtype);
+                Step *store_hi = sm.acc_store({high_acc, updated.high}, dtype);
                 // Note the order of operations - high part goes first. This is needed to process safety check
                 // correctly, otherwise we can't guarantee that accumulator will not be updated before it is read
                 remainder_roots.push_back(store_hi);
@@ -2930,13 +3340,391 @@ struct MirConstructState {
                 auto acc = acc_groups[data.dst_size_acc].singleton();
                 return remainder_roots.push_back(sm.pack({data.dst, arg, cond, acc}, arg->dtype));
             }
+            SIMJIT_MATCH (hir::StepKind::Pack128) {
+                Step *low = ref(data.low);
+                Step *high = ref(data.high);
+                Step *cond = ref(data.cond);
+                auto acc = acc_groups[data.dst_size_acc].singleton();
+                return remainder_roots.push_back(sm.pack128({data.dst, low, high, cond, acc}, low->dtype));
+            }
         default: break;
         }
 #undef ref
         SIMJIT_UNREACHABLE();
     }
 
-    Step *_lower_hir_non_root(const hir::Step *step, nonstd::span<Step *const> step_map) {
+    Step *lower_i128_div(const hir::Step *step, const hir::I128DivData &data, Step *left_low, Step *left_high,
+                         Step *right_low, Step *right_high, nonstd::span<Step *> step_map) {
+        if (step->dtype != ScalarDataType::I64 || data.partner == nullptr ||
+            data.partner->dtype != ScalarDataType::I64 || data.partner->kind != hir::StepKind::I128Div) {
+            messed_up("malformed paired i128 division");
+        }
+        const auto &partner = data.partner->step_data<hir::StepKind::I128Div>();
+        if (partner.partner != step || partner.high_word == data.high_word || partner.op != data.op ||
+            partner.left_low != data.left_low || partner.left_high != data.left_high ||
+            partner.right_low != data.right_low || partner.right_high != data.right_high) {
+            messed_up("malformed paired i128 division");
+        }
+        if (left_low->dtype != ScalarDataType::I64 || left_high->dtype != ScalarDataType::I64 ||
+            right_low->dtype != ScalarDataType::I64 || right_high->dtype != ScalarDataType::I64) {
+            messed_up("i128 division requires i64 words");
+        }
+        Step *low =
+            sm.i128_div({data.op, left_low, left_high, right_low, right_high, nullptr, false}, ScalarDataType::I64);
+        Step *high = sm.i128_div({data.op, left_low, left_high, right_low, right_high, low, true}, ScalarDataType::I64);
+        low->step_data<StepKind::I128Div>().partner = high;
+        step_map[data.high_word ? data.partner->id : step->id] = low;
+        step_map[data.high_word ? step->id : data.partner->id] = high;
+        return data.high_word ? high : low;
+    }
+
+    Step *lower_checked_i128_div(const hir::Step *wrapper, nonstd::span<Step *> step_map) {
+        const auto &checked = wrapper->step_data<hir::StepKind::CheckedOp>();
+        const hir::Step *step = checked.op;
+        if (checked.kind != hir::CheckedOpKind::I128Div || !step->is(hir::StepKind::I128Div) ||
+            checked.partner == nullptr || !checked.partner->is(hir::StepKind::CheckedOp)) {
+            messed_up("malformed checked i128 division");
+        }
+        const auto &data = step->step_data<hir::StepKind::I128Div>();
+        const auto &partner_checked = checked.partner->step_data<hir::StepKind::CheckedOp>();
+        if (partner_checked.kind != hir::CheckedOpKind::I128Div || partner_checked.partner != wrapper ||
+            partner_checked.mask != checked.mask || checked.left_low == nullptr || checked.left_high == nullptr ||
+            checked.right_low == nullptr || checked.right_high == nullptr || checked.left_low != data.left_low ||
+            checked.left_high != data.left_high || checked.right_low != data.right_low ||
+            checked.right_high != data.right_high || partner_checked.left_low != checked.left_low ||
+            partner_checked.left_high != checked.left_high || partner_checked.right_low != checked.right_low ||
+            partner_checked.right_high != checked.right_high) {
+            messed_up("malformed checked i128 division");
+        }
+        if (!is_division_op(data.op)) { messed_up("malformed checked i128 division"); }
+
+        Step *left_low = lower_hir(data.left_low, step_map);
+        Step *left_high = lower_hir(data.left_high, step_map);
+        Step *right_low = lower_hir(data.right_low, step_map);
+        Step *right_high = lower_hir(data.right_high, step_map);
+        Step *invalid = scalar_i128_division_invalid_condition(left_low, left_high, right_low, right_high, data.op);
+
+        if (step_map[step->id] == nullptr) {
+            Step *safe_right_low =
+                sm.select({invalid, make_const(1, ScalarDataType::I64), right_low}, ScalarDataType::I64);
+            Step *safe_right_high =
+                sm.select({invalid, make_const(0, ScalarDataType::I64), right_high}, ScalarDataType::I64);
+            lower_i128_div(step, data, left_low, left_high, safe_right_low, safe_right_high, step_map);
+        }
+
+        const hir::Step *low_wrapper = data.high_word ? checked.partner : wrapper;
+        const hir::Step *high_wrapper = data.high_word ? wrapper : checked.partner;
+        const hir::Step *low_word = data.high_word ? data.partner : step;
+        const hir::Step *high_word = data.high_word ? step : data.partner;
+        Step *overflow = invalid;
+        if (checked.mask != nullptr) {
+            overflow =
+                sm.arith_bin({overflow, lower_hir(checked.mask, step_map), ArithBinaryOp::And}, ScalarDataType::I8);
+        }
+        add_scalar_division_overflow_check(overflow);
+        step_map[low_wrapper->id] = step_map[low_word->id];
+        step_map[high_wrapper->id] = step_map[high_word->id];
+        return step_map[wrapper->id];
+    }
+
+    Step *scalar_i128_mul_overflow(Step *left_low, Step *left_high, Step *right_low, Step *right_high) {
+        auto leading_zeros = [&](Step *low, Step *high) {
+            Step *high_lz = sm.arith_un({high, ArithUnaryOp::Lzcnt}, ScalarDataType::I64);
+            Step *low_lz = sm.arith_un({low, ArithUnaryOp::Lzcnt}, ScalarDataType::I64);
+            Step *high_zero = sm.cmp({high, make_const(0, ScalarDataType::I64), CmpOp::Equal}, ScalarDataType::I1);
+            Step *with_low =
+                sm.arith_bin({low_lz, make_const(64, ScalarDataType::I64), ArithBinaryOp::Add}, ScalarDataType::I64);
+            return sm.select({high_zero, with_low, high_lz}, ScalarDataType::I64);
+        };
+        // The signed-multiply check deliberately mirrors the established conservative bit hack.
+        Step *left_neg = sm.cmp({left_high, make_const(0, ScalarDataType::I64), CmpOp::Less}, ScalarDataType::I1);
+        Step *right_neg = sm.cmp({right_high, make_const(0, ScalarDataType::I64), CmpOp::Less}, ScalarDataType::I1);
+        Step *left_nlow =
+            sm.arith_bin({make_const(0, ScalarDataType::I64), left_low, ArithBinaryOp::Sub}, ScalarDataType::I64);
+        Step *right_nlow =
+            sm.arith_bin({make_const(0, ScalarDataType::I64), right_low, ArithBinaryOp::Sub}, ScalarDataType::I64);
+        Step *left_nhigh = sm.arith_un({left_high, ArithUnaryOp::Not}, ScalarDataType::I64);
+        Step *right_nhigh = sm.arith_un({right_high, ArithUnaryOp::Not}, ScalarDataType::I64);
+        Step *left_carry =
+            sm.select({sm.cmp({left_low, make_const(0, ScalarDataType::I64), CmpOp::Equal}, ScalarDataType::I1),
+                       make_const(1, ScalarDataType::I64), make_const(0, ScalarDataType::I64)},
+                      ScalarDataType::I64);
+        Step *right_carry =
+            sm.select({sm.cmp({right_low, make_const(0, ScalarDataType::I64), CmpOp::Equal}, ScalarDataType::I1),
+                       make_const(1, ScalarDataType::I64), make_const(0, ScalarDataType::I64)},
+                      ScalarDataType::I64);
+        left_nhigh = sm.arith_bin({left_nhigh, left_carry, ArithBinaryOp::Add}, ScalarDataType::I64);
+        right_nhigh = sm.arith_bin({right_nhigh, right_carry, ArithBinaryOp::Add}, ScalarDataType::I64);
+        Step *left_lz = leading_zeros(sm.select({left_neg, left_nlow, left_low}, ScalarDataType::I64),
+                                      sm.select({left_neg, left_nhigh, left_high}, ScalarDataType::I64));
+        Step *right_lz = leading_zeros(sm.select({right_neg, right_nlow, right_low}, ScalarDataType::I64),
+                                       sm.select({right_neg, right_nhigh, right_high}, ScalarDataType::I64));
+        Step *sum = sm.arith_bin({left_lz, right_lz, ArithBinaryOp::Add}, ScalarDataType::I64);
+        return sm.cmp({sum, make_const(128, ScalarDataType::I64), CmpOp::LessEqual, true}, ScalarDataType::I1);
+    }
+
+    Step *lower_checked_i128_pair(const hir::Step *wrapper, nonstd::span<Step *> step_map) {
+        const auto &initial = wrapper->step_data<hir::StepKind::CheckedOp>();
+        if (initial.partner == nullptr) { messed_up("malformed paired checked i128 operation"); }
+        const hir::Step *low_wrapper = nullptr;
+        const hir::Step *high_wrapper = nullptr;
+        hir::CheckedOpKind expected_high{};
+        using K = hir::CheckedOpKind;
+        switch (initial.kind) {
+        case K::I128AddLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128AddHigh;
+            break;
+        case K::I128AddHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128AddHigh;
+            break;
+        case K::I128SubLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128SubHigh;
+            break;
+        case K::I128SubHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128SubHigh;
+            break;
+        case K::I128MulLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128MulHigh;
+            break;
+        case K::I128MulHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128MulHigh;
+            break;
+        case K::I128SllLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128SllHigh;
+            break;
+        case K::I128SllHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128SllHigh;
+            break;
+        case K::I128SrlLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128SrlHigh;
+            break;
+        case K::I128SrlHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128SrlHigh;
+            break;
+        case K::I128SraLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128SraHigh;
+            break;
+        case K::I128SraHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128SraHigh;
+            break;
+        case K::I128RotlLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128RotlHigh;
+            break;
+        case K::I128RotlHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128RotlHigh;
+            break;
+        case K::I128RotrLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128RotrHigh;
+            break;
+        case K::I128RotrHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128RotrHigh;
+            break;
+        case K::I128NegateLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128NegateHigh;
+            break;
+        case K::I128NegateHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128NegateHigh;
+            break;
+        case K::I128AbsLow:
+            low_wrapper = wrapper;
+            high_wrapper = initial.partner;
+            expected_high = K::I128AbsHigh;
+            break;
+        case K::I128AbsHigh:
+            low_wrapper = initial.partner;
+            high_wrapper = wrapper;
+            expected_high = K::I128AbsHigh;
+            break;
+        default: messed_up("malformed paired checked i128 operation");
+        }
+        const auto &low = low_wrapper->step_data<hir::StepKind::CheckedOp>();
+        const auto &high = high_wrapper->step_data<hir::StepKind::CheckedOp>();
+        if (low.partner != high_wrapper || high.partner != low_wrapper || high.kind != expected_high ||
+            low.op->dtype != ScalarDataType::I64 || high.op->dtype != ScalarDataType::I64 || low.left_low == nullptr ||
+            low.left_high == nullptr || low.left_low != high.left_low || low.left_high != high.left_high ||
+            low.right_low != high.right_low || low.right_high != high.right_high || low.mask != high.mask) {
+            messed_up("inconsistent paired checked i128 operation");
+        }
+        Step *low_result = lower_hir(low.op, step_map);
+        Step *high_result = lower_hir(high.op, step_map);
+
+        Step *left_low = lower_hir(low.left_low, step_map);
+        Step *left_high = lower_hir(low.left_high, step_map);
+        Step *overflow = nullptr;
+        switch (low.kind) {
+        case K::I128NegateLow:
+        case K::I128AbsLow: {
+            if (low.right_low != nullptr || low.right_high != nullptr) {
+                messed_up("malformed unary checked i128 operation");
+            }
+            Step *low_zero = sm.cmp({left_low, make_const(0, ScalarDataType::I64), CmpOp::Equal}, ScalarDataType::I1);
+            Step *high_min =
+                sm.cmp({left_high, make_const(std::numeric_limits<int64_t>::min(), ScalarDataType::I64), CmpOp::Equal},
+                       ScalarDataType::I1);
+            overflow = sm.arith_bin({low_zero, high_min, ArithBinaryOp::And}, ScalarDataType::I8);
+            break;
+        }
+        case K::I128AddLow: {
+            if (low.right_low == nullptr || low.right_high == nullptr) { messed_up("malformed checked i128 addition"); }
+            Step *right_high = lower_hir(low.right_high, step_map);
+            Step *left_sign = sm.cmp({left_high, make_const(0, ScalarDataType::I64), CmpOp::Less}, ScalarDataType::I1);
+            Step *right_sign =
+                sm.cmp({right_high, make_const(0, ScalarDataType::I64), CmpOp::Less}, ScalarDataType::I1);
+            Step *result_sign =
+                sm.cmp({high_result, make_const(0, ScalarDataType::I64), CmpOp::Less}, ScalarDataType::I1);
+            Step *same = sm.cmp({left_sign, right_sign, CmpOp::Equal}, ScalarDataType::I1);
+            Step *changed = sm.cmp({left_sign, result_sign, CmpOp::NotEqual}, ScalarDataType::I1);
+            overflow = sm.arith_bin({same, changed, ArithBinaryOp::And}, ScalarDataType::I8);
+            break;
+        }
+        case K::I128SubLow: {
+            if (low.right_low == nullptr || low.right_high == nullptr) {
+                messed_up("malformed checked i128 subtraction");
+            }
+            Step *right_high = lower_hir(low.right_high, step_map);
+            Step *left_sign = sm.cmp({left_high, make_const(0, ScalarDataType::I64), CmpOp::Less}, ScalarDataType::I1);
+            Step *right_sign =
+                sm.cmp({right_high, make_const(0, ScalarDataType::I64), CmpOp::Less}, ScalarDataType::I1);
+            Step *result_sign =
+                sm.cmp({high_result, make_const(0, ScalarDataType::I64), CmpOp::Less}, ScalarDataType::I1);
+            Step *different = sm.cmp({left_sign, right_sign, CmpOp::NotEqual}, ScalarDataType::I1);
+            Step *changed = sm.cmp({left_sign, result_sign, CmpOp::NotEqual}, ScalarDataType::I1);
+            overflow = sm.arith_bin({different, changed, ArithBinaryOp::And}, ScalarDataType::I8);
+            break;
+        }
+        case K::I128MulLow: {
+            if (low.right_low == nullptr || low.right_high == nullptr) {
+                messed_up("malformed checked i128 multiplication");
+            }
+            Step *right_low = lower_hir(low.right_low, step_map);
+            Step *right_high = lower_hir(low.right_high, step_map);
+            overflow = scalar_i128_mul_overflow(left_low, left_high, right_low, right_high);
+            break;
+        }
+        case K::I128SllLow:
+        case K::I128SrlLow:
+        case K::I128SraLow:
+        case K::I128RotlLow:
+        case K::I128RotrLow: {
+            if (low.right_low == nullptr || low.right_high == nullptr) {
+                messed_up("malformed checked i128 shift or rotate");
+            }
+            Step *right_low = lower_hir(low.right_low, step_map);
+            Step *right_high = lower_hir(low.right_high, step_map);
+            Step *high_nonzero =
+                sm.cmp({right_high, make_const(0, ScalarDataType::I64), CmpOp::NotEqual}, ScalarDataType::I1);
+            Step *low_large =
+                sm.cmp({right_low, make_const(127, ScalarDataType::I64), CmpOp::Greater, true}, ScalarDataType::I1);
+            overflow = sm.arith_bin({high_nonzero, low_large, ArithBinaryOp::Or}, ScalarDataType::I8);
+            break;
+        }
+        case K::Add:
+        case K::Sub:
+        case K::Mul:
+        case K::Div:
+        case K::UDiv:
+        case K::Mod:
+        case K::UMod:
+        case K::ShiftRightArith:
+        case K::ShiftRightLogical:
+        case K::ShiftLeftLogical:
+        case K::RotateLeft:
+        case K::RotateRight:
+        case K::Trunc:
+        case K::Abs:
+        case K::Negate:
+        case K::I128Div:
+        case K::I128AddHigh:
+        case K::I128SubHigh:
+        case K::I128MulHigh:
+        case K::I128SllHigh:
+        case K::I128SrlHigh:
+        case K::I128SraHigh:
+        case K::I128RotlHigh:
+        case K::I128RotrHigh:
+        case K::I128NegateHigh:
+        case K::I128AbsHigh:
+        case K::I128Trunc: messed_up("malformed paired checked i128 operation");
+        }
+        if (low.mask != nullptr) {
+            overflow = sm.arith_bin({overflow, lower_hir(low.mask, step_map), ArithBinaryOp::And}, ScalarDataType::I8);
+        }
+        add_scalar_overflow_check(overflow);
+        step_map[low_wrapper->id] = low_result;
+        step_map[high_wrapper->id] = high_result;
+        return step_map[wrapper->id];
+    }
+
+    Step *lower_checked_i128_trunc(const hir::Step *wrapper, nonstd::span<Step *> step_map) {
+        const auto &checked = wrapper->step_data<hir::StepKind::CheckedOp>();
+        if (checked.kind != hir::CheckedOpKind::I128Trunc || checked.partner != nullptr ||
+            checked.left_low == nullptr || checked.left_high == nullptr || checked.right_low != nullptr ||
+            checked.right_high != nullptr || !checked.op->is(hir::StepKind::IntCast) ||
+            !is_simple_int_dtype(wrapper->dtype)) {
+            messed_up("malformed checked i128 truncation");
+        }
+        const auto &cast = checked.op->step_data<hir::StepKind::IntCast>();
+        if (cast.kind != IntCastKind::Trunc || cast.arg != checked.left_low) {
+            messed_up("malformed checked i128 truncation");
+        }
+        Step *result = lower_hir(checked.op, step_map);
+        Step *original_low = lower_hir(checked.left_low, step_map);
+        Step *original_high = lower_hir(checked.left_high, step_map);
+        Step *wide = result;
+        if (wrapper->dtype != ScalarDataType::I64) {
+            wide = sm.int_cast({wide, IntCastKind::Sext}, ScalarDataType::I64);
+        }
+        Step *expected_high = sm.arith_bin({wide, make_const(63, ScalarDataType::I64), ArithBinaryOp::ShiftRightArith},
+                                           ScalarDataType::I64);
+        Step *low_bad = sm.cmp({original_low, wide, CmpOp::NotEqual}, ScalarDataType::I1);
+        Step *high_bad = sm.cmp({original_high, expected_high, CmpOp::NotEqual}, ScalarDataType::I1);
+        Step *overflow = sm.arith_bin({low_bad, high_bad, ArithBinaryOp::Or}, ScalarDataType::I8);
+        if (checked.mask != nullptr) {
+            overflow =
+                sm.arith_bin({overflow, lower_hir(checked.mask, step_map), ArithBinaryOp::And}, ScalarDataType::I8);
+        }
+        add_scalar_overflow_check(overflow);
+        step_map[wrapper->id] = result;
+        return result;
+    }
+
+    Step *_lower_hir_non_root(const hir::Step *step, nonstd::span<Step *> step_map) {
 #define ref(_step) step_map[(_step)->id]
 
         ScalarDataType sdtype = step->dtype;
@@ -2944,15 +3732,42 @@ struct MirConstructState {
             // Root steps
         case hir::StepKind::Store:
         case hir::StepKind::Pack:
+        case hir::StepKind::Pack128:
         case hir::StepKind::Scatter:
         case hir::StepKind::AccArithBinary:
         case hir::StepKind::AccPredicateBinary:
-        case hir::StepKind::AccSum128:
+        case hir::StepKind::AccI128:
         case hir::StepKind::Countif:
+        case hir::StepKind::StoreInterleave:
             SIMJIT_UNREACHABLE();
+            SIMJIT_MATCH (hir::StepKind::I128Div) {
+                return lower_i128_div(step, data, ref(data.left_low), ref(data.left_high), ref(data.right_low),
+                                      ref(data.right_high), step_map);
+            }
             SIMJIT_MATCH (hir::StepKind::Const) {
                 ScalarDataType dt = sdtype == ScalarDataType::I1 ? ScalarDataType::I8 : sdtype;
                 return make_const(data, dt);
+            }
+            SIMJIT_MATCH (hir::StepKind::FunnelShift) {
+                Step *left = ref(data.left);
+                Step *right = ref(data.right);
+                Step *amount = ref(data.amount);
+                invariant_same_scalar_type(left, right);
+                invariant_same_scalar_type(left, amount);
+                invariant_same_scalar_type(left, step);
+                switch (sdtype) {
+                case ScalarDataType::I16:
+                case ScalarDataType::I32:
+                case ScalarDataType::I64: break;
+                default: messed_up("Invalid funnel shift dtype %s", show_scalar_dtype(sdtype));
+                }
+                if (amount->is(StepKind::Const)) {
+                    uint64_t normalized =
+                        amount->step_data<StepKind::Const>().retag(sdtype).as_unsigned() % scalar_dtype_bits(sdtype);
+                    if (normalized == 0) { return data.kind == FunnelShiftKind::Left ? left : right; }
+                    amount = make_const(normalized, sdtype);
+                }
+                return sm.funnel_shift({left, right, amount, data.kind}, sdtype);
             }
             SIMJIT_MATCH (hir::StepKind::ArithBinary) {
                 Step *l = ref(data.left);
@@ -3034,34 +3849,28 @@ struct MirConstructState {
             }
             SIMJIT_MATCH (hir::StepKind::CheckedOp) {
                 Step *active_mask = data.mask != nullptr ? ref(data.mask) : nullptr;
-
-                if (data.op->is(hir::StepKind::ArithBinary)) {
+                auto lower_binary = [&](ArithBinaryOp checked_op) {
                     invariant(data.op->is(hir::StepKind::ArithBinary));
                     const auto &op_data = data.op->step_data<hir::StepKind::ArithBinary>();
-                    invariant(op_data.op == ArithBinaryOp::Add || op_data.op == ArithBinaryOp::Sub ||
-                              op_data.op == ArithBinaryOp::Mul || op_data.op == ArithBinaryOp::ShiftRightArith ||
-                              op_data.op == ArithBinaryOp::ShiftLeftLogical ||
-                              op_data.op == ArithBinaryOp::ShiftRightLogical ||
-                              op_data.op == ArithBinaryOp::RotateLeft || op_data.op == ArithBinaryOp::RotateRight ||
-                              is_division_op(op_data.op));
+                    invariant(op_data.op == checked_op);
                     invariant(op_data.flags == ArithBinaryOpFlags::No);
                     Step *left = ref(op_data.left);
                     Step *right = ref(op_data.right);
-                    if (is_division_op(op_data.op)) {
-                        Step *invalid = scalar_division_invalid_condition(left, right, op_data.op);
+                    if (is_division_op(checked_op)) {
+                        Step *invalid = scalar_division_invalid_condition(left, right, checked_op);
                         Step *overflow = invalid;
                         if (active_mask != nullptr) {
                             overflow = sm.arith_bin({overflow, active_mask, ArithBinaryOp::And}, ScalarDataType::I8);
                         }
                         add_scalar_division_overflow_check(overflow);
-                        if (divisor_needs_safety(op_data.right, op_data.op)) {
+                        if (divisor_needs_safety(op_data.right, checked_op)) {
                             right = sm.select({invalid, make_const(1, sdtype), right}, sdtype);
                         }
 #if SIMJIT_USE_LIBDIVIDE
                         if (bool(hir->ctx->transformations & CodeTransformations::ConstDiv) &&
                             right->is(StepKind::Const)) {
                             if (Step *rewritten =
-                                    scalar_const_div_peephole(left, right->step_data<StepKind::Const>(), op_data.op)) {
+                                    scalar_const_div_peephole(left, right->step_data<StepKind::Const>(), checked_op)) {
                                 return rewritten;
                             }
                         }
@@ -3073,35 +3882,81 @@ struct MirConstructState {
                                 right_const_data = right->step_data<StepKind::Const>();
                                 right_const = &right_const_data;
                             }
-                            return small_size_arith_binary(left, right, op_data.op, right_const);
+                            return small_size_arith_binary(left, right, checked_op, right_const);
                         }
-                        return sm.arith_bin({left, right, op_data.op}, sdtype);
+                        return sm.arith_bin({left, right, checked_op}, sdtype);
                     }
-                    if (op_data.op == ArithBinaryOp::ShiftRightArith || op_data.op == ArithBinaryOp::ShiftLeftLogical ||
-                        op_data.op == ArithBinaryOp::ShiftRightLogical || op_data.op == ArithBinaryOp::RotateLeft ||
-                        op_data.op == ArithBinaryOp::RotateRight) {
+                    if (checked_op == ArithBinaryOp::ShiftRightArith || checked_op == ArithBinaryOp::ShiftLeftLogical ||
+                        checked_op == ArithBinaryOp::ShiftRightLogical || checked_op == ArithBinaryOp::RotateLeft ||
+                        checked_op == ArithBinaryOp::RotateRight) {
                         add_scalar_shift_overflow_check(right, active_mask);
                         return ref(data.op);
                     }
-                    if (op_data.op == ArithBinaryOp::Mul &&
+                    if (checked_op == ArithBinaryOp::Mul &&
                         (sdtype == ScalarDataType::I8 || sdtype == ScalarDataType::I16)) {
                         return small_size_mul_with_overflow_check(left, right, active_mask);
                     }
                     AccId acc = scalar_safety_check_acc();
-                    return sm.ab_overflow({op_data.op, left, right, acc, active_mask}, sdtype);
-                }
-                if (data.op->is(hir::StepKind::IntCast)) {
+                    return sm.ab_overflow({checked_op, left, right, acc, active_mask}, sdtype);
+                };
+                switch (data.kind) {
+                case hir::CheckedOpKind::Add: return lower_binary(ArithBinaryOp::Add);
+                case hir::CheckedOpKind::Sub: return lower_binary(ArithBinaryOp::Sub);
+                case hir::CheckedOpKind::Mul: return lower_binary(ArithBinaryOp::Mul);
+                case hir::CheckedOpKind::Div: return lower_binary(ArithBinaryOp::Div);
+                case hir::CheckedOpKind::UDiv: return lower_binary(ArithBinaryOp::UDiv);
+                case hir::CheckedOpKind::Mod: return lower_binary(ArithBinaryOp::Mod);
+                case hir::CheckedOpKind::UMod: return lower_binary(ArithBinaryOp::UMod);
+                case hir::CheckedOpKind::ShiftRightArith: return lower_binary(ArithBinaryOp::ShiftRightArith);
+                case hir::CheckedOpKind::ShiftRightLogical: return lower_binary(ArithBinaryOp::ShiftRightLogical);
+                case hir::CheckedOpKind::ShiftLeftLogical: return lower_binary(ArithBinaryOp::ShiftLeftLogical);
+                case hir::CheckedOpKind::RotateLeft: return lower_binary(ArithBinaryOp::RotateLeft);
+                case hir::CheckedOpKind::RotateRight: return lower_binary(ArithBinaryOp::RotateRight);
+                case hir::CheckedOpKind::Trunc: {
+                    invariant(data.op->is(hir::StepKind::IntCast));
                     const auto &cast_data = data.op->step_data<hir::StepKind::IntCast>();
                     invariant(cast_data.kind == IntCastKind::Trunc);
                     add_scalar_cast_overflow_check(ref(cast_data.arg), sdtype, active_mask);
                     return ref(data.op);
                 }
-                if (data.op->is(hir::StepKind::ArithUnary)) {
+                case hir::CheckedOpKind::Abs: {
+                    invariant(data.op->is(hir::StepKind::ArithUnary));
                     const auto &op_data = data.op->step_data<hir::StepKind::ArithUnary>();
+                    invariant(op_data.op == ArithUnaryOp::Abs);
                     add_scalar_unary_overflow_check(ref(op_data.arg), op_data.op, active_mask);
                     return ref(data.op);
                 }
-                messed_up("Unsupported checked op %s", hir::show_step_kind(data.op->kind));
+                case hir::CheckedOpKind::Negate: {
+                    invariant(data.op->is(hir::StepKind::ArithUnary));
+                    const auto &op_data = data.op->step_data<hir::StepKind::ArithUnary>();
+                    invariant(op_data.op == ArithUnaryOp::Negate);
+                    add_scalar_unary_overflow_check(ref(op_data.arg), op_data.op, active_mask);
+                    return ref(data.op);
+                }
+                case hir::CheckedOpKind::I128Div:
+                case hir::CheckedOpKind::I128AddLow:
+                case hir::CheckedOpKind::I128AddHigh:
+                case hir::CheckedOpKind::I128SubLow:
+                case hir::CheckedOpKind::I128SubHigh:
+                case hir::CheckedOpKind::I128MulLow:
+                case hir::CheckedOpKind::I128MulHigh:
+                case hir::CheckedOpKind::I128SllLow:
+                case hir::CheckedOpKind::I128SllHigh:
+                case hir::CheckedOpKind::I128SrlLow:
+                case hir::CheckedOpKind::I128SrlHigh:
+                case hir::CheckedOpKind::I128SraLow:
+                case hir::CheckedOpKind::I128SraHigh:
+                case hir::CheckedOpKind::I128RotlLow:
+                case hir::CheckedOpKind::I128RotlHigh:
+                case hir::CheckedOpKind::I128RotrLow:
+                case hir::CheckedOpKind::I128RotrHigh:
+                case hir::CheckedOpKind::I128NegateLow:
+                case hir::CheckedOpKind::I128NegateHigh:
+                case hir::CheckedOpKind::I128AbsLow:
+                case hir::CheckedOpKind::I128AbsHigh:
+                case hir::CheckedOpKind::I128Trunc: messed_up("i128 checked operation reached generic scalar lowering");
+                }
+                SIMJIT_UNREACHABLE();
             }
             SIMJIT_MATCH (hir::StepKind::ArithUnary) {
                 Step *arg = ref(data.arg);
@@ -3170,9 +4025,13 @@ struct MirConstructState {
                 ArgumentAddress addr{data.idx, 0};
                 return sm.load({addr, data.kind}, sdtype);
             }
+            SIMJIT_MATCH (hir::StepKind::LoadDeinterleave) {
+                ArgumentAddress addr{data.idx, 0};
+                return sm.load_deinterleave({addr, data.kind, data.lane_count, data.lane}, sdtype);
+            }
             SIMJIT_MATCH (hir::StepKind::LoadSplat) {
                 ArgumentAddress addr{data.idx, 0};
-                return sm.load_splat({addr, data.kind}, sdtype);
+                return sm.load_splat({addr, data.kind, data.byte_offset}, sdtype);
             }
             SIMJIT_MATCH (hir::StepKind::Gather) return sm.gather({data.data, ref(data.idx)}, sdtype);
             SIMJIT_MATCH (hir::StepKind::Index) {
@@ -3194,6 +4053,50 @@ struct MirConstructState {
 
     Step *lower_hir(const hir::Step *hir_step, nonstd::span<Step *> step_map) {
         if (auto *found = step_map[hir_step->id]) { return found; }
+        if (hir_step->is(hir::StepKind::CheckedOp)) {
+            const auto &checked = hir_step->step_data<hir::StepKind::CheckedOp>();
+            switch (checked.kind) {
+            case hir::CheckedOpKind::I128Div:
+                SIMJIT_ASSERT(checked.op->is(hir::StepKind::I128Div));
+                return lower_checked_i128_div(hir_step, step_map);
+            case hir::CheckedOpKind::I128AddLow:
+            case hir::CheckedOpKind::I128AddHigh:
+            case hir::CheckedOpKind::I128SubLow:
+            case hir::CheckedOpKind::I128SubHigh:
+            case hir::CheckedOpKind::I128MulLow:
+            case hir::CheckedOpKind::I128MulHigh:
+            case hir::CheckedOpKind::I128SllLow:
+            case hir::CheckedOpKind::I128SllHigh:
+            case hir::CheckedOpKind::I128SrlLow:
+            case hir::CheckedOpKind::I128SrlHigh:
+            case hir::CheckedOpKind::I128SraLow:
+            case hir::CheckedOpKind::I128SraHigh:
+            case hir::CheckedOpKind::I128RotlLow:
+            case hir::CheckedOpKind::I128RotlHigh:
+            case hir::CheckedOpKind::I128RotrLow:
+            case hir::CheckedOpKind::I128RotrHigh:
+            case hir::CheckedOpKind::I128NegateLow:
+            case hir::CheckedOpKind::I128NegateHigh:
+            case hir::CheckedOpKind::I128AbsLow:
+            case hir::CheckedOpKind::I128AbsHigh: return lower_checked_i128_pair(hir_step, step_map);
+            case hir::CheckedOpKind::I128Trunc: return lower_checked_i128_trunc(hir_step, step_map);
+            case hir::CheckedOpKind::Add:
+            case hir::CheckedOpKind::Sub:
+            case hir::CheckedOpKind::Mul:
+            case hir::CheckedOpKind::Div:
+            case hir::CheckedOpKind::UDiv:
+            case hir::CheckedOpKind::Mod:
+            case hir::CheckedOpKind::UMod:
+            case hir::CheckedOpKind::ShiftRightArith:
+            case hir::CheckedOpKind::ShiftRightLogical:
+            case hir::CheckedOpKind::ShiftLeftLogical:
+            case hir::CheckedOpKind::RotateLeft:
+            case hir::CheckedOpKind::RotateRight:
+            case hir::CheckedOpKind::Trunc:
+            case hir::CheckedOpKind::Abs:
+            case hir::CheckedOpKind::Negate: break;
+            }
+        }
         // Unlike vectorized lowering, we eagerly initialize all children node into cache.
         // There is no much reason to do it since we recurse here anyway, but it is just how we do it.
         hir::step_recurse((hir::Step *)hir_step, [&](hir::Step *x) { lower_hir(x, step_map); });
@@ -3373,9 +4276,10 @@ struct MirConstructState {
     void create_acc_groups() {
         acc_groups.reserve(hir->accs.size());
         for (const hir::Accumulator &acc : hir->accs) {
-            AccKind kind = acc.agg_expr->dtype == ScalarDataType::I128 ? AccKind::Sum128
-                           : acc.agg_expr->kind == hir::StepKind::Pack ? AccKind::Pack
-                                                                       : AccKind::Agg;
+            AccKind kind = acc.agg_expr->is(hir::StepKind::AccI128) ? AccKind::I128
+                           : (acc.agg_expr->kind == hir::StepKind::Pack || acc.agg_expr->kind == hir::StepKind::Pack128)
+                               ? AccKind::Pack
+                               : AccKind::Agg;
             acc_groups.emplace_back(kind, acc.dtype, acc.idx, acc.agg_expr, acc.dst_arg);
         }
     }
@@ -3406,6 +4310,7 @@ struct MirConstructState {
 
         Function *func = arena->create<Function>();
         func->ctx = hir->ctx;
+        func->source_hir = hir;
         func->args = hir->args;
         std::vector<size_t> acc_group_offsets(acc_groups.size() + 1, 0);
         for (size_t i = 0; i < acc_groups.size(); ++i) {
@@ -3421,7 +4326,31 @@ struct MirConstructState {
         func->epilogue_roots = arena->copy_array<Step *>(epilogue_roots);
         func->loop_width = loop_width;
         func->step_id_count = sm.max_id();
-
+        interleave_pairs.resize(func->args.size());
+        func->interleave.by_argument = arena->alloc_array<ArgumentInterleave>(func->args.size());
+        std::vector<VecDataType> deinterleave_dtypes{};
+        std::vector<VecDataType> interleave_dtypes{};
+        for (size_t i = 0; i < func->args.size(); ++i) {
+            const auto &drafts = interleave_pairs[i];
+            func->interleave.by_argument[i].pairs = arena->alloc_array<InterleavePair>(drafts.size());
+            for (size_t j = 0; j < drafts.size(); ++j) {
+                func->interleave.by_argument[i].pairs[j] = InterleavePair{drafts[j].even, drafts[j].odd};
+                VecDataType lane_dtype = drafts[j].dtype.as_vec();
+                std::vector<VecDataType> &dtypes = drafts[j].store ? interleave_dtypes : deinterleave_dtypes;
+                if (std::find(dtypes.begin(), dtypes.end(), lane_dtype) == dtypes.end()) {
+                    dtypes.push_back(lane_dtype);
+                }
+            }
+        }
+        for (Step *root : main_loop_roots) {
+            if (!root->is(StepKind::Pack128) || !root->dtype.is_vec()) { continue; }
+            VecDataType lane_dtype = root->dtype.as_vec();
+            if (std::find(interleave_dtypes.begin(), interleave_dtypes.end(), lane_dtype) == interleave_dtypes.end()) {
+                interleave_dtypes.push_back(lane_dtype);
+            }
+        }
+        func->interleave.deinterleave_dtypes = arena->copy_array<VecDataType>(deinterleave_dtypes);
+        func->interleave.interleave_dtypes = arena->copy_array<VecDataType>(interleave_dtypes);
         return func;
     }
 };
@@ -3464,16 +4393,16 @@ std::vector<uint8_t> generate_bit_permute_lut(uint64_t func) {
     SIMJIT_ASSERT((func & 0x0707070707070707) == func);
 
     uint8_t loc1 = func & 0xff;
-    uint8_t loc2 = (func >> 8) & 0xff;
-    uint8_t loc3 = (func >> 16) & 0xff;
-    uint8_t loc4 = (func >> 24) & 0xff;
-    uint8_t loc5 = (func >> 32) & 0xff;
-    uint8_t loc6 = (func >> 40) & 0xff;
-    uint8_t loc7 = (func >> 48) & 0xff;
-    uint8_t loc8 = (func >> 56) & 0xff;
+    uint8_t loc2 = (func >> UINT64_C(8)) & 0xff;
+    uint8_t loc3 = (func >> UINT64_C(16)) & 0xff;
+    uint8_t loc4 = (func >> UINT64_C(24)) & 0xff;
+    uint8_t loc5 = (func >> UINT64_C(32)) & 0xff;
+    uint8_t loc6 = (func >> UINT64_C(40)) & 0xff;
+    uint8_t loc7 = (func >> UINT64_C(48)) & 0xff;
+    uint8_t loc8 = (func >> UINT64_C(56)) & 0xff;
 
-    auto construct_value = [&](uint8_t src) -> uint8_t {
-        uint8_t result = 0;
+    auto construct_value = [&](unsigned src) -> unsigned {
+        unsigned result = 0;
         result |= ((src >> loc1) & 1);
         result |= ((src >> loc2) & 1) << 1;
         result |= ((src >> loc3) & 1) << 2;

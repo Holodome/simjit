@@ -34,6 +34,7 @@
 #include "float_test.cpp"
 #include "general_test.cpp"
 #include "int_test.cpp"
+#include "interleaved_test.cpp"
 #include "invalid_builder_test.cpp"
 #include "invalid_type_test.cpp"
 #include "libdivide_test.cpp"
@@ -199,7 +200,7 @@ enum class AnsiStyle : uint8_t {
 
 static bool g_use_ansi = false;
 
-static const std::array<SuiteDefinition, 11> kSuites{{
+static const std::array<SuiteDefinition, 12> kSuites{{
     {"int", 0, &int_tests},
     {"float", 1, &float_tests},
     {"nullable", 2, &nullable_tests},
@@ -211,6 +212,7 @@ static const std::array<SuiteDefinition, 11> kSuites{{
     {"invalid_builder", 8, &invalid_builder_tests},
     {"misc", 9, &misc_tests},
     {"ternarylogic", 10, &ternarylogic_tests},
+    {"interleaved", 11, &interleaved_tests},
 }};
 
 static const std::string base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -322,7 +324,9 @@ static std::string make_base64(std::span<uint8_t const> memory) {
     return base64_encode(memory.data(), memory.size());
 }
 
-static std::string schema_json(nonstd::span<ArgumentDecl> args) {
+static std::string schema_json(const hir::Function *func) {
+    const auto &args = func->args;
+    const auto &usages = func->argument_usage;
     std::string result = "{ \"args\": [";
     for (auto &arg : args) {
         std::string dtype;
@@ -337,21 +341,23 @@ static std::string schema_json(nonstd::span<ArgumentDecl> args) {
         case ScalarDataType::I128: dtype = "i128"; break;
         }
         std::string kind;
-        if ((arg.kind & simjit::ArgumentKind::SrcIdxArr) != simjit::ArgumentKind::Undefined) {
+        if (bool(usages[arg.idx] & hir::ArgumentUsage::BoundedIndex)) {
             kind = "sv";
-        } else if ((arg.kind & (simjit::ArgumentKind::SrcGatherArr | simjit::ArgumentKind::SrcArr |
-                                ArgumentKind::SrcConst)) != simjit::ArgumentKind::Undefined) {
-            kind = "in";
-        } else if ((arg.kind & simjit::ArgumentKind::DstSafetyCheck) != simjit::ArgumentKind::Undefined) {
+        } else if (bool(usages[arg.idx] & hir::ArgumentUsage::SafetyCheck)) {
             kind = "safety";
-        } else if ((arg.kind & simjit::ArgumentKind::DstAgg) != simjit::ArgumentKind::Undefined) {
+        } else if (bool(usages[arg.idx] & hir::ArgumentUsage::AggregateWrite)) {
             kind = "outs";
-        } else if ((arg.kind & simjit::ArgumentKind::Dst) != simjit::ArgumentKind::Undefined) {
+        } else if (bool(usages[arg.idx] & (hir::ArgumentUsage::SequentialWrite | hir::ArgumentUsage::RandomWrite |
+                                           hir::ArgumentUsage::AppendWrite))) {
             kind = "out";
         } else {
-            throw std::runtime_error("invalid arg kind");
+            kind = "in";
         }
-        result += std::format("{{ \"dtype\": \"{}\", \"kind\": \"{}\"}}", dtype, kind);
+        std::string interleaved;
+        if (arg.interleaved) {
+            interleaved = std::format(", \"interleaved_dtype\": \"{}\"", show_scalar_dtype(arg.interleaved_half_dtype));
+        }
+        result += std::format("{{ \"dtype\": \"{}\", \"kind\": \"{}\"{}}}", dtype, kind, interleaved);
         if (&arg != &args[args.size() - 1]) { result += ","; }
     }
     result += "]}";
@@ -881,7 +887,7 @@ static void print_usage(FILE *out) {
                  "\n"
                  "Select suites:\n"
                  "  --suite <csv>          Comma-separated suites: int,float,nullable,tpcds,general,libdivide,agg,"
-                 "ternarylogic,invalid,all\n"
+                 "ternarylogic,interleaved,invalid,all\n"
                  "\n"
                  "Execution:\n"
                  "  --arch <native|x86|x86-ymm|arm|all>\n"
@@ -1229,7 +1235,7 @@ static void append_codes_json(const mir::Function *func, std::vector<std::string
 #endif
 }
 
-static std::string build_test_json(const RegisteredTest &descriptor, const mir::Function *mir, std::string_view hir_str,
+static std::string build_test_json(const RegisteredTest &descriptor, const hir::Function *hir, std::string_view hir_str,
                                    std::string_view mir_str, std::string_view serialized_str, TestVariant variant,
                                    ExpectedOutcome expected, const PipelineTiming &pipeline_timing, double asmjit_time,
                                    double llvm_time, std::vector<std::string> &codes, int iteration,
@@ -1257,7 +1263,7 @@ static std::string build_test_json(const RegisteredTest &descriptor, const mir::
     obj += ",";
     obj += std::format("\"line\": {}", descriptor.test->line);
     obj += ",";
-    obj += std::format("\"schema\": {}", schema_json(mir->args));
+    obj += std::format("\"schema\": {}", schema_json(hir));
     obj += ",";
     obj += std::format("\"src\": \"{}\"", escape_json(hir_str));
     obj += ",";
@@ -1343,7 +1349,7 @@ static RunResult run_test(const RegisteredTest &descriptor, const TestRunConfig 
         auto hir_t2 = std::chrono::high_resolution_clock::now();
         pipeline_timing.hir_us = elapsed_us(hir_t1, hir_t2);
 
-        resolution = resolve_variant(config, *descriptor.test, fn->scalar_only);
+        resolution = resolve_variant(config, *descriptor.test, fn->is_scalar_only());
         if (!resolution.runnable()) {
             result.skipped = true;
             return result;
@@ -1430,7 +1436,8 @@ static RunResult run_test(const RegisteredTest &descriptor, const TestRunConfig 
                 FunctionBuilder other_builder{opts};
                 simjit::deserialize(serialized_str, other_builder);
                 hir::Function *other_fn = other_builder.build();
-                VariantResolution other_resolution = resolve_variant(config, *descriptor.test, other_fn->scalar_only);
+                VariantResolution other_resolution =
+                    resolve_variant(config, *descriptor.test, other_fn->is_scalar_only());
                 if (!other_resolution.runnable()) {
                     throw std::runtime_error("deserialized test variant is unrunnable");
                 }
@@ -1484,7 +1491,7 @@ static RunResult run_test(const RegisteredTest &descriptor, const TestRunConfig 
             }
 
             result.json =
-                build_test_json(descriptor, mir, hir_str, mir_str, serialized_str, resolution.variant, expected,
+                build_test_json(descriptor, fn, hir_str, mir_str, serialized_str, resolution.variant, expected,
                                 pipeline_timing, asmjit_time, llvm_time, codes, iteration, config.iterations);
         }
     } catch (const SimjitException &e) {

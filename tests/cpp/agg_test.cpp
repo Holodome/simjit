@@ -9,6 +9,60 @@ using namespace simjit;
 using namespace simjit::types;
 
 std::vector<Test> agg_tests{
+    // I128 aggregates consume an ordinary i128 value and lower it to a pair
+    // before vectorization. Keep the high words distinct so comparisons must
+    // not accidentally reduce the two words independently.
+    Test{[](FunctionBuilder &b) {
+             Value value = b.input_arg(I128);
+             Predicate cond = b.input_predicate_arg();
+             b.min_agg(value, b.arg(I128));
+             b.max_agg(value, b.arg(I128));
+             b.umin_agg_if(value, cond, b.arg(I128));
+             b.umax_agg_if(value, cond, b.arg(I128));
+             b.and_agg(value, b.arg(I128));
+             b.or_agg_if(value, cond, b.arg(I128));
+             b.xor_agg(value, b.arg(I128));
+             b.andnot_agg_if(value, cond, b.arg(I128));
+         },
+         PASS_ALL},
+    // Product is a modulo-2^128 pair multiplication. Its scalar epilogue is
+    // compact; vector reduction deliberately falls back until it has a
+    // bounded paired reduction strategy.
+    Test{[](FunctionBuilder &b) {
+             Value value = b.input_arg(I128);
+             Predicate cond = b.input_predicate_arg();
+             b.product(value, b.arg(I128));
+             b.product_if(value, cond, b.arg(I128));
+         },
+         LIMIT_ALL_VECTOR.vectorization_failure(TestVariant::VectorAll, simjit::ErrorSubKind::LimitExceeded)},
+    // The default-enabled SumAutoSext transformation sign-extends all widening
+    // integer sums, including the existing i64-to-i128 sum.
+    Test{[](FunctionBuilder &b) { b.sum(b.input_arg(I8), b.arg(I16)); }, PASS_ALL},
+    Test{[](FunctionBuilder &b) { b.sum(b.input_arg(I16), b.arg(I32)); }, PASS_ALL},
+    Test{[](FunctionBuilder &b) { b.sum(b.input_arg(I32), b.arg(I64)); }, PASS_ALL},
+    Test{[](FunctionBuilder &b) { b.sum(b.input_arg(I64), b.arg(I128)); }, PASS_ALL},
+    // Other i128 aggregates take an explicit integer extension, including Zext
+    // when the caller wants a zero high word.
+    Test{[](FunctionBuilder &b) {
+             Value value = b.input_arg(I64);
+             Value signed_extended = b.sext(value, I128);
+             Value zero_extended = b.zext(value, I128);
+             Predicate cond = b.input_predicate_arg();
+             b.umin_agg(signed_extended, b.arg(I128));
+             b.umin_agg(zero_extended, b.arg(I128));
+             b.umax_agg_if(signed_extended, cond, b.arg(I128));
+             b.umax_agg_if(zero_extended, cond, b.arg(I128));
+             b.andnot_agg(signed_extended, b.arg(I128));
+             b.andnot_agg(zero_extended, b.arg(I128));
+         },
+         PASS_ALL},
+    // Signed i64 widening into i128 preserves both the predicate and carries
+    // from the low half while accumulating negative values.
+    Test{[](FunctionBuilder &b) {
+             Value value = b.or_(b.input_arg(I64), b.i64(INT64_MIN));
+             b.sum_if(value, b.input_predicate_arg(), b.arg(I128));
+         },
+         PASS_ALL},
     // I32 grouped
     Test{[](FunctionBuilder &b) {
              Argument ht = b.arg(I32);
